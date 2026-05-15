@@ -1,0 +1,53 @@
+name: hyperion-scheduler
+version: '0.2.0.0'
+author:
+  - Vasiliy Dommes
+  - David Simmons-Duffin
+maintainer: vasdommes@gmail.com
+license: MIT
+language: GHC2021
+
+ghc-options:
+- -Wall
+- -Wcompat
+- -Wincomplete-record-updates
+- -Wincomplete-uni-patterns
+- -Wredundant-constraints
+- -O2
+- -Wunused-packages
+- -Wno-x-partial
+- -Werror=missing-fields
+
+library:
+  source-dirs: src
+  dependencies:
+  - aeson
+  - array
+  - base
+  - binary
+  - binaryhash
+  - bootstrap-build
+  - bytestring
+  - concurrency
+  - containers
+  - deepseq
+  - directory
+  - disk-free-space
+  - distributed-process
+  - distributed-process-async
+  - distributed-process-client-server
+  - distributed-process-extras
+  - exceptions
+  - extra
+  - file-io
+  - hyperion
+  - min-max-pqueue
+  - monoidal-containers
+  - mtl
+  - pqueue
+  - rusage
+  - stm
+  - strict-concurrency
+  - text
+  - time
+  - vector

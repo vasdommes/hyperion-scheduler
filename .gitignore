@@ -21,3 +21,7 @@ cabal.project.local
 cabal.project.local~
 .HTF/
 .ghc.environment.*
+stack.yaml.lock
+
+# Temporary folder (for user convenience)
+tmp/

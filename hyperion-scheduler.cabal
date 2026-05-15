@@ -1,0 +1,83 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           hyperion-scheduler
+version:        0.2.0.0
+author:         Vasiliy Dommes,
+                David Simmons-Duffin
+maintainer:     vasdommes@gmail.com
+license:        MIT
+license-file:   LICENSE
+build-type:     Simple
+
+library
+  exposed-modules:
+      Hyperion.Scheduler
+      Hyperion.Scheduler.ConcurrentQueue
+      Hyperion.Scheduler.Config
+      Hyperion.Scheduler.FilePath
+      Hyperion.Scheduler.FileService
+      Hyperion.Scheduler.FileService.FileSender
+      Hyperion.Scheduler.FileService.NodeLocalFileManager
+      Hyperion.Scheduler.FileService.RetryTimeout
+      Hyperion.Scheduler.PathResolver
+      Hyperion.Scheduler.RemoteUtil
+      Hyperion.Scheduler.ReusableWorker
+      Hyperion.Scheduler.RunTasks
+      Hyperion.Scheduler.RunTasks.CanRemoteRunTask
+      Hyperion.Scheduler.RunTasks.NodeStatus
+      Hyperion.Scheduler.RunTasks.ProgressMap
+      Hyperion.Scheduler.RunTasks.Shared
+      Hyperion.Scheduler.RunTasks.TaskDistribution
+      Hyperion.Scheduler.RunTasks.TaskPriority
+      Hyperion.Scheduler.RunTasks.TChangeNotifier
+      Hyperion.Scheduler.Stats
+      Hyperion.Scheduler.Task
+      Hyperion.Scheduler.TaskGraph
+      Hyperion.Scheduler.TaskInfo
+      Hyperion.Scheduler.TaskKeyFileInfo
+      Hyperion.Scheduler.TaskLink
+      Hyperion.Scheduler.TPrioQueue
+      Hyperion.Scheduler.Types
+      Hyperion.Scheduler.Util
+      Hyperion.Scheduler.WorkerPool
+  other-modules:
+      Paths_hyperion_scheduler
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -O2 -Wunused-packages -Wno-x-partial -Werror=missing-fields
+  build-depends:
+      aeson
+    , array
+    , base
+    , binary
+    , binaryhash
+    , bootstrap-build
+    , bytestring
+    , concurrency
+    , containers
+    , deepseq
+    , directory
+    , disk-free-space
+    , distributed-process
+    , distributed-process-async
+    , distributed-process-client-server
+    , distributed-process-extras
+    , exceptions
+    , extra
+    , file-io
+    , hyperion
+    , min-max-pqueue
+    , monoidal-containers
+    , mtl
+    , pqueue
+    , rusage
+    , stm
+    , strict-concurrency
+    , text
+    , time
+    , vector
+  default-language: GHC2021
