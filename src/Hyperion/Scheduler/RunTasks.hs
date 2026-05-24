@@ -43,7 +43,6 @@ import Data.Set                                     qualified as Set
 import Data.Time.Clock                              (NominalDiffTime, UTCTime,
                                                      addUTCTime, diffUTCTime,
                                                      getCurrentTime)
-import Data.Tree                                    (Tree)
 import GHC.Generics                                 (Generic)
 import Hyperion                                     (Job, Process, RemoteError)
 import Hyperion.Log                                 qualified as Log
@@ -556,12 +555,12 @@ type TaskRecords a = [TaskRecord a]
 runTasks
   :: (HasTaskInfo a, CanRemoteRunTask a, Ord a)
   => Config
-  -> Tree a
+  -> Map a (Set a)
   -> Job (TaskRecords a)
-runTasks config taskTree = do
+runTasks config taskMap = do
   let
-    taskGraph = TaskGraph.fromTree taskTree
-    cleanupDependencies = buildCleanupDependenciesMap config taskTree
+    taskGraph = TaskGraph.fromEdges taskMap
+    cleanupDependencies = buildCleanupDependenciesMap config taskMap
   nodes <- getJobNodes config
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let
@@ -686,12 +685,11 @@ type CleanupDependenciesMap = Map VirtualFilePath Int
 type CleanupQueue = ConcurrentQueue (Maybe VirtualFilePath)
 
 buildCleanupDependenciesMap
-  :: (HasTaskInfo a, Ord a)
+  :: HasTaskInfo a
   => Config
-  -> Tree a
+  -> Map a (Set a)
   -> CleanupDependenciesMap
-buildCleanupDependenciesMap config taskTree = cleanupMap where
-  taskMap = TaskGraph.treeToEdges taskTree
+buildCleanupDependenciesMap config taskMap = cleanupMap where
   tasks = Map.keys taskMap
   partialCleanupMap task = Map.fromSet (const 1) $ taskFilesToCleanup config task
   cleanupMap = Map.unionsWith (+) $ map partialCleanupMap tasks
