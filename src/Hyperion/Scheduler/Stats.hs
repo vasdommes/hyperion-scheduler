@@ -32,7 +32,7 @@ import Control.DeepSeq                    (NFData, deepseq)
 import Control.Monad.Catch                (Handler (..), catches)
 import Control.Monad.IO.Class             (MonadIO, liftIO)
 import Data.Aeson                         (AesonException, FromJSON,
-                                           FromJSONKey, ToJSON, ToJSONKey)
+                                           FromJSONKey, ToJSON, ToJSONKey, (.=))
 import Data.Aeson                         qualified as Aeson
 import Data.ByteString                    qualified as B
 import Data.List.Extra                    (maximumOn, minimumOn)
@@ -43,6 +43,7 @@ import Data.Map.Strict                    (Map)
 import Data.Map.Strict                    qualified as Map
 import Data.Maybe                         (mapMaybe)
 import Data.Time.Clock                    (NominalDiffTime)
+import Data.Typeable                      (Typeable, typeOf)
 import GHC.Generics                       (Generic, Generically (..))
 import Hyperion.Log                       qualified as Log
 import Hyperion.OsPath                    (OsPath, takeDirectory)
@@ -207,11 +208,12 @@ class ToStatKey a where
   toStatKey :: a -> StatKey
   -- | A default implementation for the case where we wish to retain
   -- all the information about a task in the StatKey.
-  default toStatKey :: ToJSON a => a -> StatKey
+  default toStatKey :: (Typeable a, ToJSON a) => a -> StatKey
   toStatKey = mkStatKeyViaJSON
 
-mkStatKeyViaJSON :: ToJSON a => a -> StatKey
-mkStatKeyViaJSON = MkStatKey . Aeson.toJSON
+mkStatKeyViaJSON :: (Typeable a, ToJSON a) => a -> StatKey
+mkStatKeyViaJSON key = MkStatKey $
+  Aeson.object ["type" .= show (typeOf key), "key" .= Aeson.toJSON key]
 
 instance ToStatKey StatKey where
   toStatKey = id
