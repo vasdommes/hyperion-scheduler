@@ -23,5 +23,8 @@ cabal.project.local~
 .ghc.environment.*
 stack.yaml.lock
 
+# IDE
+.idea/
+
 # Temporary folder (for user convenience)
 tmp/
