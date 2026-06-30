@@ -1,8 +1,8 @@
 name: hyperion-scheduler
 version: '0.2.0.0'
 author:
-  - Vasiliy Dommes
-  - David Simmons-Duffin
+- Vasiliy Dommes
+- David Simmons-Duffin
 maintainer: vasdommes@gmail.com
 license: MIT
 language: GHC2021
@@ -41,6 +41,7 @@ library:
   - extra
   - file-io
   - hyperion
+  - hyperion-util
   - min-max-pqueue
   - monoidal-containers
   - mtl

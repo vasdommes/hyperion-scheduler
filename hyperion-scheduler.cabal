@@ -36,6 +36,11 @@ library
       Hyperion.Scheduler.RunTasks.TChangeNotifier
       Hyperion.Scheduler.Stats
       Hyperion.Scheduler.Task
+      Hyperion.Scheduler.Task.KeyTask
+      Hyperion.Scheduler.Task.KeyValue
+      Hyperion.Scheduler.Task.ListTask
+      Hyperion.Scheduler.Task.ToTaskGraph
+      Hyperion.Scheduler.Task.Util
       Hyperion.Scheduler.TaskGraph
       Hyperion.Scheduler.TaskInfo
       Hyperion.Scheduler.TaskKeyFileInfo
@@ -70,6 +75,7 @@ library
     , extra
     , file-io
     , hyperion
+    , hyperion-util
     , min-max-pqueue
     , monoidal-containers
     , mtl
