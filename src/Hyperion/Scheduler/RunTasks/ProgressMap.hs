@@ -5,16 +5,16 @@
 
 module Hyperion.Scheduler.RunTasks.ProgressMap where
 
-import Control.Monad.IO.Class      (MonadIO)
-import Data.Map.Strict             (Map)
-import Data.Map.Strict             qualified as Map
-import Data.Maybe                  (catMaybes)
-import Data.Set                    (Set)
-import Data.Set                    qualified as Set
-import Data.Text                   qualified as Text
-import Hyperion.Log                qualified as Log
-import Hyperion.Scheduler.TaskInfo (HasTaskInfo (..), Tag, TaskInfo (..))
-import Text.Printf                 qualified as Printf
+import Control.Monad.IO.Class (MonadIO)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes)
+import Data.Set (Set)
+import Data.Set qualified as Set
+import Data.Text qualified as Text
+import Hyperion.Log qualified as Log
+import Hyperion.Scheduler.IsTask (IsTask (..), Tag)
+import Text.Printf qualified as Printf
 
 data Progress = MkProgress
   { completed :: Int
@@ -28,17 +28,17 @@ noProgressYet n = MkProgress 0 n
 
 -- | Given a set of tasks, make a tally of the number of tasks with
 -- each tag, with no completed tasks yet.
-fromTasksTodo :: HasTaskInfo a => Set a -> ProgressMap
+fromTasksTodo :: IsTask a => Set a -> ProgressMap
 fromTasksTodo tasks =
   fmap noProgressYet $
   Map.fromListWith (+) $ do
   t <- Set.toList tasks
-  pure ((taskInfo t).tag, 1)
+  pure (taskTag t, 1)
 
 -- | Update a Progress Map to account for a finished task
-update :: HasTaskInfo a => a -> ProgressMap -> ProgressMap
+update :: IsTask a => a -> ProgressMap -> ProgressMap
 update task =
-  Map.adjust (\p -> p { completed = p.completed + 1 }) (taskInfo task).tag
+  Map.adjust (\p -> p { completed = p.completed + 1 }) (taskTag task)
 
 -- | Determine if all tasks have been completed
 isFinished :: ProgressMap -> Bool

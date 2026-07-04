@@ -17,11 +17,9 @@ import Data.Graph                   qualified as Graph
 import Data.IntMap.Strict           (IntMap)
 import Data.IntMap.Strict           qualified as IntMap
 import Data.Time.Clock              (NominalDiffTime)
+import Hyperion.Scheduler.IsTask (IsTask (..), RunStage (..))
 import Hyperion.Scheduler.TaskGraph (TaskGraph, taskToVertex, vertexToTask)
 import Hyperion.Scheduler.TaskGraph qualified as TaskGraph
-import Hyperion.Scheduler.TaskInfo  (HasTaskInfo, RunStage (..),
-                                     defaultTaskPriority, taskMaxThreads,
-                                     taskMemory, taskMinThreads, taskRuntime)
 import Hyperion.Scheduler.Types     (MemorySize (..), Node (..))
 
 
@@ -74,7 +72,7 @@ type TaskPriority = (Int, CriticalPathPriority, MemorySize)
 -- Extra data used to compute task priority
 type TaskPriorityHelper a = (TaskGraph a, IntMap CriticalPathPriority)
 
-mkTaskPriorityHelper :: (HasTaskInfo a) => [Node] -> TaskGraph a -> TaskPriorityHelper a
+mkTaskPriorityHelper :: (IsTask a) => [Node] -> TaskGraph a -> TaskPriorityHelper a
 mkTaskPriorityHelper [] _    = error "Empty node list"
 -- NB: here we assume that all nodes have the same memory and numCPUs (which is true in practice).
 -- If not, we should maybe construct an "average node".
@@ -97,7 +95,7 @@ mkTaskPriorityHelper (node:_) taskGraph = (taskGraph, criticalPathPriorityMap) w
         -- Task runtime depends on number of CPUs.
         -- We don't know it in advance, so we try to come up with a realistic estimate.
         t = vertexToTask taskGraph v
-        ownRuntime = taskRuntime t expectedNumCpus
+        ownRuntime = taskRuntimeEstimate t expectedNumCpus
         expectedNumCpus =
           if minCpus == maxCpus then
             minCpus
@@ -107,7 +105,7 @@ mkTaskPriorityHelper (node:_) taskGraph = (taskGraph, criticalPathPriorityMap) w
         maxCpus = min node.cpus $ taskMaxThreads runStage t
         runStage = if null deps then InitialRun else InProgressRun
         -- A fraction of node CPUs proportional to task memory.
-        cpusFromMem = round $ (fromIntegral $ node.cpus * fromIntegral (taskMemory t) :: Double) / fromIntegral node.memory
+        cpusFromMem = round $ (fromIntegral $ node.cpus * fromIntegral (taskMemoryEstimate t) :: Double) / fromIntegral node.memory
 
   criticalPathPriorityMap :: IntMap CriticalPathPriority
   criticalPathPriorityMap = IntMap.map (CriticalPathPriority . reverse) $
@@ -126,7 +124,7 @@ mkTaskPriorityHelper (node:_) taskGraph = (taskGraph, criticalPathPriorityMap) w
         revDeps = taskGraph.revDependencyGraph Array.! v
         revDepsCriticalTimes = foldr max [] $ map (m IntMap.! ) revDeps
 
-taskPriority :: (HasTaskInfo a, Ord a) => TaskPriorityHelper a -> a -> TaskPriority
-taskPriority (taskGraph, criticalPathPriorityMap) t = (defaultTaskPriority t, criticalPathPriority, taskMemory t) where
+taskPriority :: IsTask a => TaskPriorityHelper a -> a -> TaskPriority
+taskPriority (taskGraph, criticalPathPriorityMap) t = (taskDefaultPriority t, criticalPathPriority, taskMemoryEstimate t) where
   v = taskToVertex taskGraph t
   criticalPathPriority = criticalPathPriorityMap IntMap.! v

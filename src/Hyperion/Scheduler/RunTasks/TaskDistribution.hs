@@ -18,22 +18,20 @@ import Data.Set                           qualified as Set
 import Data.Time.Clock                    (NominalDiffTime)
 import Hyperion.Scheduler.Config          (Config)
 import Hyperion.Scheduler.FilePath        (VirtualFilePath, isNodeLocal)
-import Hyperion.Scheduler.TaskInfo        (HasTaskInfo, RunStage (..),
-                                           taskInputs, taskMaxThreads,
-                                           taskMemoryCapped, taskMinThreads,
-                                           taskOutputs, taskRuntime)
+import Hyperion.Scheduler.IsTask (IsTask (..), RunStage (..),
+        taskMemoryCapped)
 import Hyperion.Scheduler.TaskKeyFileInfo (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Types           (FileSize, Node (..), NumCPUs)
 
 type CPUAllocation a = Map a NumCPUs
 
-allocCompletionTime :: HasTaskInfo a => CPUAllocation a -> NominalDiffTime
+allocCompletionTime :: IsTask a => CPUAllocation a -> NominalDiffTime
 allocCompletionTime alloc
   | Map.null alloc = 0
   | otherwise = maximum $
-    [taskRuntime task threads | (task, threads) <- Map.toList alloc]
+    [taskRuntimeEstimate task threads | (task, threads) <- Map.toList alloc]
 
-basicValidAllocation :: HasTaskInfo a => RunStage -> NumCPUs -> [a] -> [(a, NumCPUs)]
+basicValidAllocation :: IsTask a => RunStage -> NumCPUs -> [a] -> [(a, NumCPUs)]
 basicValidAllocation stage totalCpus tasks = allocNoExcess
   where
     -- Minimum number of threads for each task
@@ -63,13 +61,13 @@ basicValidAllocation stage totalCpus tasks = allocNoExcess
 --
 -- NB: This function is only well-defined when 'totalCpus' is between
 -- total sum of 'minThreads' and the total sum of 'maxThreads'.
-allocateCpusToTasks :: forall a . (Ord a, HasTaskInfo a) => RunStage -> NumCPUs -> [a] -> CPUAllocation a
+allocateCpusToTasks :: forall a . IsTask a => RunStage -> NumCPUs -> [a] -> CPUAllocation a
 allocateCpusToTasks stage totalCpus tasks =
   let (fastTasks, normalTasks, slowTasks) = refineAllocation stage (basicValidAllocation stage totalCpus tasks)
   in Map.fromList $ fastTasks <> normalTasks <> slowTasks
 
 -- Total size for all node-local input and output files of a task.
-taskLocalFileSizeMap :: HasTaskInfo a => Config -> a -> Map VirtualFilePath FileSize
+taskLocalFileSizeMap :: IsTask a => Config -> a -> Map VirtualFilePath FileSize
 taskLocalFileSizeMap config t =
   Map.fromList $
   map (\fileInfo -> (fileInfo.path, fileInfo.fileSize)) $
@@ -77,7 +75,7 @@ taskLocalFileSizeMap config t =
   Set.filter (isNodeLocal config . (.path)) $
   Set.union (taskInputs t) (taskOutputs t)
 
-canHandleTask :: HasTaskInfo a => Config -> a -> (Node, CPUAllocation a) -> Bool
+canHandleTask :: IsTask a => Config -> a -> (Node, CPUAllocation a) -> Bool
 canHandleTask config task (node, nodeAlloc) =
   total (taskMemoryCapped node.memory) <= node.memory &&
   total (taskMinThreads InitialRun)    <= node.cpus &&
@@ -96,8 +94,8 @@ canHandleTask config task (node, nodeAlloc) =
       Map.unionsWith (+) $
       map (taskLocalFileSizeMap config) thisAndNodeTasks
 
-getRuntime :: HasTaskInfo a => (a, NumCPUs) -> NominalDiffTime
-getRuntime = uncurry taskRuntime
+getRuntime :: IsTask a => (a, NumCPUs) -> NominalDiffTime
+getRuntime (t, threads) = taskRuntimeEstimate t threads
 
 -- Now we iteratively refine the allocation by taking 1 CPU from
 -- the fastest task and giving it to the slowest, until we no
@@ -121,7 +119,7 @@ getRuntime = uncurry taskRuntime
 --                   immediatey, since they will likely be a
 --                   bottleneck.
 refineAllocation
-  :: HasTaskInfo a
+  :: IsTask a
   => RunStage
   -> [(a, NumCPUs)]
   -> ([(a, NumCPUs)], [(a, NumCPUs)], [(a, NumCPUs)])
@@ -190,7 +188,7 @@ refineAllocation stage allocInit = go queueInit [] [] []
 -- finish. If we don't take that strategy, then we probably shouldn't
 -- re-compute the completion time every round.
 distributeTasksToNodes
-  :: forall a k . (HasTaskInfo a, Ord a, Ord k)
+  :: forall a k . (IsTask a, Ord k)
   => Config
   -> [Node]
   -> Set a
@@ -273,7 +271,7 @@ differences :: Num a => [a] -> [a]
 differences xs = zipWith (-) xs (drop 1 xs)
 
 integrateAlloc
-  :: (HasTaskInfo a, Real b)
+  :: (IsTask a, Real b)
   => (NumCPUs -> b)
   -> CPUAllocation a
   -> NominalDiffTime
@@ -284,7 +282,7 @@ integrateAlloc f alloc = sum $ zipWith (*) times weights
     weights = map (realToFrac . f) usedCpuCounts
     times = differences (map getRuntime sortedTasks <> [0])
 
-allocScore :: HasTaskInfo a => Double -> Node -> CPUAllocation a -> NominalDiffTime
+allocScore :: IsTask a => Double -> Node -> CPUAllocation a -> NominalDiffTime
 allocScore e0 node = integrateAlloc integrand
   where
     totalCpus = fromIntegral node.cpus
@@ -305,7 +303,7 @@ allocScore e0 node = integrateAlloc integrand
 -- finish. If we don't take that strategy, then we probably shouldn't
 -- re-compute the completion time every round.
 distributeTasksToNodesWithScores
-  :: forall a k . (HasTaskInfo a, Ord a, Ord k)
+  :: forall a k . (IsTask a, Ord k)
   => Double
   -> Config
   -> [Node]

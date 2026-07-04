@@ -11,29 +11,20 @@ module Hyperion.Scheduler.Task.ListTask
 import Data.Aeson         (ToJSON)
 import Data.Binary        (Binary)
 import Data.Set           qualified as Set
-import Hyperion.Scheduler (CanRemoteRunTask (..), HasTaskHash, HasTaskInfo (..),
-                           TaskInfo (..), TaskLink (..), ToStatKey (..),
-                           emptyRemoteRunTaskResult)
+import Data.Typeable      (Typeable)
+import Hyperion.Scheduler (IsTask (..), TaskLink (..), ToStatKey (..))
 
 -- TODO: This is general and can be moved to the scheduler
 newtype ListTask k = MkListTask { keys :: [k] }
-  deriving newtype (Binary, ToJSON)
-  deriving anyclass (HasTaskHash)
+  deriving newtype (Binary, ToJSON, Eq, Ord)
 
-instance HasTaskInfo (ListTask k) where
-  taskInfo _ = MkTaskInfo
-    { memory     = 0
-    , runtime    = const 0
-    , maxThreads = const 0
-    , minThreads = const 0
-    , inputs     = Set.empty
-    , outputs    = Set.empty
-    , priority   = 0
-    , tag        = Nothing
-    }
-
-instance CanRemoteRunTask (ListTask k) where
-  remoteRunTask _ _ _ = pure emptyRemoteRunTaskResult
+instance (Eq k, Ord k, ToJSON k, Typeable k) => IsTask (ListTask k) where
+  taskMaxThreads _ _ = 0
+  taskMinThreads _ _ = 0
+  taskInputs _       = Set.empty
+  taskOutputs _      = Set.empty
+  taskTag _          = Nothing
+  taskClosure _ _    = Nothing
 
 instance ToStatKey (ListTask k) where
   toStatKey _ = toStatKey ()

@@ -12,6 +12,7 @@
 
 module Hyperion.Scheduler.Stats
   ( TaskAndFileStats (..)
+  , TaskRecord (..)
   , TaskStats (..)
   , FileStats (..)
   , StatKey (..)
@@ -42,15 +43,15 @@ import Data.Map.Monoidal                  (MonoidalMap (..))
 import Data.Map.Strict                    (Map)
 import Data.Map.Strict                    qualified as Map
 import Data.Maybe                         (mapMaybe)
+import Data.Time (UTCTime)
 import Data.Time.Clock                    (NominalDiffTime)
 import Data.Typeable                      (Typeable, typeOf)
 import GHC.Generics                       (Generic, Generically (..))
 import Hyperion.Log                       qualified as Log
 import Hyperion.OsPath                    (OsPath, takeDirectory)
 import Hyperion.OsString                  (fromString, toString)
-import Hyperion.Scheduler.RunTasks        (TaskRecord (..))
 import Hyperion.Scheduler.TaskKeyFileInfo (FileStatKey)
-import Hyperion.Scheduler.Types           (FileSize (..), MemorySize (..),
+import Hyperion.Scheduler.Types (FileSize (..), MemorySize (..), Node,
                                            NumCPUs)
 import Hyperion.Util                      (randomString)
 import Prelude                            hiding (readFile, (^))
@@ -60,6 +61,17 @@ import System.File.OsPath                 (readFile)
 
 (^) :: Num a => a -> Int -> a
 (^) = (Prelude.^)
+
+-- | A record of task and information about when and how it ran
+data TaskRecord a = MkTaskRecord
+  { task          :: a
+  , taskStart     :: UTCTime
+  , taskRuntime   :: NominalDiffTime
+  , taskMemory    :: Maybe MemorySize
+  , taskNode      :: Node
+  , taskNumCPUs   :: NumCPUs
+  , taskFileSizes :: Map FileStatKey (NonEmpty FileSize)
+  } deriving (Eq, Ord, Show, Generic, ToJSON, Functor)
 
 -- TODO: Maybe we don't need all of these quantities
 data Trials a = MkTrials

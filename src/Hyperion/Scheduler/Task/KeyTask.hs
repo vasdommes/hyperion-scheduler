@@ -32,15 +32,12 @@ import Hyperion                         (Dict (..), Process, Static (..), cAp,
                                          cPure)
 import Hyperion.Log                     qualified as Log
 import Hyperion.OsPath                  (OsPath)
-import Hyperion.Scheduler               (CanRemoteRunTask (..), HasTaskHash,
-                                         HasTaskInfo (..), MemorySize,
-                                         PathResolverForAll, Tag, Task,
-                                         TaskChain (..), TaskInfo (..),
-                                         TaskLink (..), ToFileStatKey,
-                                         ToStatKey (..), ToTaskKeyFileInfo,
-                                         afterReturnRemoteRunTaskResult,
-                                         mkStatKeyViaJSON, mkTask,
-                                         remoteRunOnNode, toTaskKeyFileInfo)
+import Hyperion.Scheduler (IsTask (..), MemorySize,
+        PathResolverForAll, RunStage, Tag,
+        Task, TaskChain (..), TaskLink (..),
+        ToFileStatKey, ToStatKey (..),
+        ToTaskKeyFileInfo, mkStatKeyViaJSON,
+        mkTask, toTaskKeyFileInfo)
 import Hyperion.Scheduler.PathResolver  (PathResolver (..))
 import Hyperion.Scheduler.Task.KeyValue (ValueType, readValue)
 import Hyperion.Scheduler.Task.ListTask (ListTask (..), listTaskLink)
@@ -67,16 +64,18 @@ data KeyTask r k = MkKeyTask
 
 deriving instance (Binary k, Binary r, Binary (KeyConfig k)) => Binary (KeyTask r k)
 deriving instance (ToJSON k, ToJSON r, ToJSON (KeyConfig k)) => ToJSON (KeyTask r k)
-deriving instance (Binary k, Typeable k, Binary r, Typeable r, Binary (KeyConfig k)) => HasTaskHash (KeyTask r k)
+deriving instance (Eq k, Eq r, Eq (KeyConfig k)) => Eq (KeyTask r k)
+deriving instance (Ord k, Ord r, Ord (KeyConfig k)) => Ord (KeyTask r k)
 
 instance (Static (Binary r), Static (Binary k), Static (Binary (KeyConfig k)), Typeable r, Typeable k, Typeable (KeyConfig k)) => Static (Binary (KeyTask r k)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary r, Binary (KeyConfig k), Binary k)
 
+-- TODO rename e.g. to TaskProperties
 data TaskInfoSimple = MkTaskInfoSimple
   { memory     :: MemorySize
   , runtime    :: Int -> NominalDiffTime
-  , maxThreads :: Int
-  , minThreads :: Int
+  , maxThreads :: RunStage -> Int
+  , minThreads :: RunStage -> Int
   , priority   :: Int
   , tag        :: Maybe Tag
   }
@@ -148,7 +147,6 @@ class ( All Ord (DepKeys k)
   computeValue = computeValueWithNumCpus 1
 
   computeValueWithNumCpus :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => Int -> KeyConfig k -> k -> f (ValueType k)
-  computeValueWithNumCpus = undefined
 
   computeValueM :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => KeyConfig k -> k -> f (Process (ValueType k))
   computeValueM = computeValueWithNumCpusM 1
@@ -189,45 +187,40 @@ computeAndWrite Dict numCpus task = do
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
 
-instance ( PathResolverForAll r (DepKeys k)
-         , All (FileInfo r) (DepKeys k)
-         , PathResolver r k
-         , BuildKey k
-         ) => HasTaskInfo (KeyTask r k) where
-  taskInfo task = MkTaskInfo
-    { memory     = infoSimple.memory
-    , runtime    = infoSimple.runtime
-    , maxThreads = const infoSimple.maxThreads
-    , minThreads = const infoSimple.minThreads
-    , inputs     = Set.map toFileInfo deps
-    , outputs    = Set.singleton $ toTaskKeyFileInfo task.resolver task.key
-    , priority   = infoSimple.priority
-    , tag        = infoSimple.tag
-    }
-    where
-      toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo task.resolver)
-      deps = dependencies task.config task.key
-      infoSimple = taskInfoSimple task
-
-instance ( Static (PathResolverForAll r (DepKeys k))
-         , All (FileInfo r) (DepKeys k)
-         , Static (PathResolver r k)
-         , Static (BuildKey k)
-         , Static (Binary r)
-         , Static (Binary k)
-         , Static (Binary (KeyConfig k))
-         , Typeable r
-         , Typeable k
-         , Typeable (KeyConfig k)
-         , Typeable (PathResolverForAll r (DepKeys k))
-         ) => CanRemoteRunTask (KeyTask r k) where
-  remoteRunTask node numCpus task =
-    remoteRunOnNode node numCpus $
-    afterReturnRemoteRunTaskResult task $
-    static computeAndWrite
+instance
+  ( Static(PathResolverForAll r (DepKeys k))
+  , All (FileInfo r) (DepKeys k)
+  , PathResolver r k
+  , BuildKey k
+  , ToJSON (KeyTask r k)
+  , Eq (KeyTask r k)
+  , Ord (KeyTask r k)
+  , All (FileInfo r) (DepKeys k)
+  , Static (PathResolver r k)
+  , Static (BuildKey k)
+  , Static (Binary r)
+  , Static (Binary k)
+  , Static (Binary (KeyConfig k))
+  , Typeable r
+  , Typeable k
+  , Typeable (KeyConfig k)
+  , Typeable (PathResolverForAll r (DepKeys k))
+  ) => IsTask (KeyTask r k) where
+  taskMemoryEstimate t   = (taskInfoSimple t).memory
+  taskRuntimeEstimate t  = (taskInfoSimple t).runtime
+  -- TODO reorder arguments?
+  taskMaxThreads stage t = (taskInfoSimple t).maxThreads stage
+  taskMinThreads stage t = (taskInfoSimple t).minThreads stage
+  taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
+    toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
+  taskOutputs t          = Set.singleton $ toTaskKeyFileInfo t.resolver t.key
+  taskDefaultPriority t   = (taskInfoSimple t).priority
+  taskTag t               = (taskInfoSimple t).tag
+  taskClosure numCpus t   = Just $ static computeAndWrite
     `cAp` closureDict
     `cAp` cPure numCpus
-    `cAp` cPure task
+    `cAp` cPure t
+
 
 -- TODO: Make configurable
 instance (BuildKey k, ToJSON r, Typeable r, Typeable k) => ToStatKey (KeyTask r k) where
@@ -270,11 +263,9 @@ instance {-# OVERLAPPABLE #-}
   , All (FileInfo r) (DepKeys k)
   , Static (Binary r)
   , Static (Binary k)
-  , Static (Binary (KeyConfig k))
+  , IsTask (KeyTask r k)
   , Typeable r
   , Typeable k
-  , Typeable (KeyConfig k)
-  , Typeable (PathResolverForAll r (DepKeys k))
   , ToJSON r
   ) => HasTaskChain m r c k Task where
   taskChain resolver cfg = TaskNode (mkTask <$> keyTaskLink resolver cfg) (taskChain resolver cfg)

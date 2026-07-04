@@ -6,14 +6,7 @@
 {-# LANGUAGE StaticPointers        #-}
 
 module Hyperion.Scheduler.RunTasks
-  ( RemoteRunTaskResult(..)
-  , CanRemoteRunTask (..)
-  , TaskRecord(..)
-  , TaskRecords
-  , emptyRemoteRunTaskResult
-  , runTasks
-  , remoteRunOnNode
-  )
+(runTasks)
 where
 
 import Control.Concurrent.STM                       (TVar, atomically, check,
@@ -30,7 +23,6 @@ import Control.Monad.Catch                          (Handler (..), catches)
 import Control.Monad.IO.Class                       (liftIO)
 import Control.Monad.Reader                         (lift)
 import Control.Monad.Writer                         (Writer, runWriter, tell)
-import Data.Aeson                                   (ToJSON)
 import Data.List.Extra                              (nubOrd, partition)
 import Data.List.NonEmpty                           (NonEmpty (..))
 import Data.List.NonEmpty                           qualified as NonEmpty
@@ -40,10 +32,8 @@ import Data.Maybe                                   (catMaybes, fromMaybe,
                                                      isNothing, listToMaybe)
 import Data.Set                                     (Set)
 import Data.Set                                     qualified as Set
-import Data.Time.Clock                              (NominalDiffTime, UTCTime,
-                                                     addUTCTime, diffUTCTime,
+import Data.Time.Clock (addUTCTime, diffUTCTime,
                                                      getCurrentTime)
-import GHC.Generics                                 (Generic)
 import Hyperion                                     (Job, Process, RemoteError)
 import Hyperion.Log                                 qualified as Log
 import Hyperion.Scheduler.ConcurrentQueue           (ConcurrentQueue,
@@ -65,18 +55,20 @@ import Hyperion.Scheduler.FileService               (FileService, Response (..),
                                                      registerFilesOnNode,
                                                      reserveFilesOnNode,
                                                      withFileService)
+import Hyperion.Scheduler.IsTask (IsTask (..), RunStage (..),
+        taskInputPaths,
+        taskMemoryCapped,
+        taskOutputPaths)
 import Hyperion.Scheduler.RemoteUtil                (AsyncFailedException (..),
                                                      asyncLinkedLocalJob,
                                                      getJobNodes,
                                                      throwOnAsyncFailed)
-import Hyperion.Scheduler.RunTasks.CanRemoteRunTask (CanRemoteRunTask (..),
-                                                     RemoteRunTaskResult (..),
-                                                     emptyRemoteRunTaskResult,
-                                                     remoteRunOnNode)
 import Hyperion.Scheduler.RunTasks.NodeStatus       (NodeStatus)
 import Hyperion.Scheduler.RunTasks.NodeStatus       qualified as NodeStatus
 import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
 import Hyperion.Scheduler.RunTasks.ProgressMap      qualified as ProgressMap
+import Hyperion.Scheduler.RunTasks.RemoteRunTask (RemoteRunTaskResult (..),
+        remoteRunTask)
 import Hyperion.Scheduler.RunTasks.Shared           (Shared (..), newShared,
                                                      readShared)
 import Hyperion.Scheduler.RunTasks.Shared           qualified as Shared
@@ -90,17 +82,10 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
                                                      newChangeNotifierIO,
                                                      notifyChangeM,
                                                      runWithRetry)
+import Hyperion.Scheduler.Stats (TaskRecord (..))
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
-import Hyperion.Scheduler.TaskInfo                  (HasTaskInfo, RunStage (..),
-                                                     TaskInfo (..), taskInfo,
-                                                     taskInputPaths, taskInputs,
-                                                     taskMemoryCapped,
-                                                     taskMinThreads,
-                                                     taskOutputPaths,
-                                                     taskOutputs)
-import Hyperion.Scheduler.TaskKeyFileInfo           (FileStatKey,
-                                                     TaskKeyFileInfo (..))
+import Hyperion.Scheduler.TaskKeyFileInfo (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
 import Hyperion.Scheduler.TPrioQueue                qualified as TPrioQueue
 import Hyperion.Scheduler.Types                     (FileSize (..),
@@ -144,7 +129,7 @@ allNodesStalling statuses = case nubOrd statuses of
 -- just dequeue more tasks. We update the NodeStatus when we start the
 -- tasks. So, no. We do not need to do things atomically.
 runNodeLoop
-  :: forall a . (HasTaskInfo a, Ord a, CanRemoteRunTask a)
+  :: forall a . IsTask a
   => Config
   -> Node
   -> FileService
@@ -184,7 +169,7 @@ runNodeLoop
         "Failed to reserve local disk space for a task from initial allocation: " <> show
           ( response
           , node
-          , (taskInfo task).tag
+          , taskTag task
           , taskOutputPaths task
           , localFileSizes
           )
@@ -260,7 +245,7 @@ runNodeLoop
                   liftA2 (,) (TPrioQueue.read taskQueue) (TPrioQueue.tryPeek taskQueue)
                 notifyChangeM taskQueueNotifier
                 if (newTask /= t) then do
-                  let taskInfo' task = ((taskInfo task).tag, taskOutputPaths task)
+                  let taskInfo' task = (taskTag task, taskOutputPaths task)
                   Log.throwError $
                     "Non-atomic dequeueTask: someone else modified taskQueue without taking taskQueueLock! (peekTask,readTask): "
                     ++ show (taskInfo' t, taskInfo' newTask)
@@ -271,7 +256,7 @@ runNodeLoop
                 -- TODO: if all CPUs on all nodes are free, we should definitely do something. Either take another task or throw error and exit.
                 Log.text $ "WARN: Cannot dequeue task, waiting until more local storage space becomes available: " <> Log.showText
                   -- TODO: we print only one of the files to make logs more compact
-                  (response, node.address, (taskInfo t).tag, listToMaybe $ Map.toAscList localFileSizes)
+                  (response, node.address, taskTag t, listToMaybe $ Map.toAscList localFileSizes)
                 pure (Nothing, maybeTask)
               _ -> Log.throwError $ "Failed to reserve space for task files: " ++ show (response, localFileSizes)
           else
@@ -375,7 +360,7 @@ runNodeLoop
       -- TODO for debug
       selfPid <- lift getSelfPid
       Log.info "remoteRunTask (masterPid,workerId,tag,numCPUs,priority,outputPaths)"
-        (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, (taskInfo task).tag, numCpus, taskQueue.elemPriority task, taskOutputPaths task)
+        (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, taskTag task, numCpus, taskQueue.elemPriority task, taskOutputPaths task)
 
       start <- liftIO getCurrentTime
       res <- remoteRunTask firstWorker numCpus task
@@ -460,7 +445,7 @@ cleanupLoop config fileService taskQueueNotifier cleanupQueue = lift go where
 -- report. For each task, when all the dependencies of a task have
 -- finished, enqueue the task in the 'taskQueue'.
 monitorProgressAndDeps
-  :: (HasTaskInfo a, Ord a)
+  :: IsTask a
   => Config
   -> TPrioQueue TaskPriority a
   -> TChangeNotifier
@@ -533,17 +518,6 @@ monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finished
         globalStalling <- allNodesStalling <$> mapM readTVar isStallingVars
         check globalStalling
 
--- | A record of task and information about when and how it ran
-data TaskRecord a = MkTaskRecord
-  { task          :: a
-  , taskStart     :: UTCTime
-  , taskRuntime   :: NominalDiffTime
-  , taskMemory    :: Maybe MemorySize
-  , taskNode      :: Node
-  , taskNumCPUs   :: NumCPUs
-  , taskFileSizes :: Map FileStatKey (NonEmpty FileSize)
-  } deriving (Eq, Ord, Show, Generic, ToJSON, Functor)
-
 type TaskRecords a = [TaskRecord a]
 
 -- | Run the given tasks on the given list of nodes by initially
@@ -553,7 +527,7 @@ type TaskRecords a = [TaskRecord a]
 --
 -- TODO: Check that no tasks require more memory than an entire node.
 runTasks
-  :: (HasTaskInfo a, CanRemoteRunTask a, Ord a)
+  :: IsTask a
   => Config
   -> Map a (Set a)
   -> Job (TaskRecords a)
@@ -671,7 +645,7 @@ runTasks config taskMap = do
 -- TODO: remove also all global files with FileTreatment = RemoveFile?
 -- TODO: make isNodeLocal configurable?
 taskFilesToCleanup
-  :: (HasTaskInfo a)
+  :: (IsTask a)
   => Config
   -> a
   -> Set VirtualFilePath
@@ -685,7 +659,7 @@ type CleanupDependenciesMap = Map VirtualFilePath Int
 type CleanupQueue = ConcurrentQueue (Maybe VirtualFilePath)
 
 buildCleanupDependenciesMap
-  :: HasTaskInfo a
+  :: IsTask a
   => Config
   -> Map a (Set a)
   -> CleanupDependenciesMap
