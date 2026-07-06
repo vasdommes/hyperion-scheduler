@@ -133,6 +133,7 @@ class ( All Ord (DepKeys k)
       , Show k
       , ToJSON k
       , Binary k
+      , Typeable k
       , ToFileStatKey k
       , Binary (KeyConfig k)
       , ToJSON (KeyConfig k)
@@ -221,10 +222,11 @@ instance
     `cAp` cPure numCpus
     `cAp` cPure t
 
-
--- TODO: Make configurable
-instance (BuildKey k, ToJSON r, Typeable r, Typeable k) => ToStatKey (KeyTask r k) where
+instance {-# OVERLAPPABLE #-} BuildKey k => ToStatKey k where
   toStatKey = mkStatKeyViaJSON
+
+instance {-# OVERLAPPABLE #-} ToStatKey k => ToStatKey (KeyTask r k) where
+  toStatKey t = toStatKey t.key
 
 keyTaskLink
   :: forall r c k m. (MonadPathExists m, HasConfig c (KeyConfig k), BuildKey k, PathResolver r k)
