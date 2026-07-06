@@ -13,38 +13,45 @@
 
 module Hyperion.Scheduler.Task.KeyTask where
 
-import Bootstrap.Build                  (All, AllCF, FetchConfig (..), FetchT,
-                                         Fetches, GetDependencies, HasForce,
-                                         Keys, getDependencies, runFetchT)
-import Bootstrap.Build.FList            (HasIndex (..), HasLength (..),
-                                         Index (..), Length (..), Variant (..),
-                                         setsFromLists, toVariants)
-import Control.Monad.IO.Class           (MonadIO, liftIO)
-import Data.Aeson                       (ToJSON (..), Value)
-import Data.Binary                      (Binary (..))
-import Data.Data                        (Proxy (..))
-import Data.Kind                        (Constraint, Type)
-import Data.Set                         (Set)
-import Data.Set                         qualified as Set
-import Data.Time                        (NominalDiffTime)
-import GHC.Generics                     (Generic)
-import Hyperion                         (Dict (..), Process, Static (..), cAp,
-                                         cPure)
-import Hyperion.Log                     qualified as Log
-import Hyperion.OsPath                  (OsPath)
-import Hyperion.Scheduler (IsTask (..), MemorySize,
-        PathResolverForAll, RunStage, Tag,
-        Task, TaskChain (..), TaskLink (..),
-        ToFileStatKey, ToStatKey (..),
-        ToTaskKeyFileInfo, mkStatKeyViaJSON,
-        mkTask, toTaskKeyFileInfo)
-import Hyperion.Scheduler.PathResolver  (PathResolver (..))
-import Hyperion.Scheduler.Task.KeyValue (ValueType, readValue)
-import Hyperion.Scheduler.Task.ListTask (ListTask (..), listTaskLink)
-import Hyperion.Scheduler.Task.Util     (contramapKey, emptyTaskChain,
-                                         encodeBinaryFileAtomic, vAll)
-import Hyperion.Util.MonadPathExists    (MonadPathExists (..))
-import Type.Reflection                  (Typeable)
+import Bootstrap.Build                    (All, AllCF, FetchConfig (..), FetchT,
+                                           Fetches, GetDependencies, HasForce,
+                                           Keys, getDependencies, runFetchT)
+import Bootstrap.Build.FList              (HasIndex (..), HasLength (..),
+                                           Index (..), Length (..),
+                                           Variant (..), setsFromLists,
+                                           toVariants)
+import Control.Monad.IO.Class             (MonadIO, liftIO)
+import Data.Aeson                         (ToJSON (..), Value)
+import Data.Binary                        (Binary (..))
+import Data.Data                          (Proxy (..))
+import Data.Kind                          (Constraint, Type)
+import Data.Set                           (Set)
+import Data.Set                           qualified as Set
+import Data.Text                          qualified as Text
+import Data.Time                          (NominalDiffTime)
+import Data.Typeable                      (typeOf)
+import GHC.Generics                       (Generic)
+import Hyperion                           (Dict (..), Process, Static (..), cAp,
+                                           cPure)
+import Hyperion.Log                       qualified as Log
+import Hyperion.OsPath                    (OsPath)
+import Hyperion.Scheduler.IsTask          (IsTask (..), RunStage, Tag,
+                                           memoryToCpuTimeApprox)
+import Hyperion.Scheduler.PathResolver    (PathResolver (..),
+                                           PathResolverForAll)
+import Hyperion.Scheduler.Stats           (ToStatKey (..), mkStatKeyViaJSON)
+import Hyperion.Scheduler.Task            (Task, mkTask)
+import Hyperion.Scheduler.Task.KeyValue   (ValueType, readValue)
+import Hyperion.Scheduler.Task.ListTask   (ListTask (..), listTaskLink)
+import Hyperion.Scheduler.Task.Util       (contramapKey, emptyTaskChain,
+                                           encodeBinaryFileAtomic, vAll)
+import Hyperion.Scheduler.TaskKeyFileInfo (ToFileStatKey, ToTaskKeyFileInfo,
+                                           toTaskKeyFileInfo)
+import Hyperion.Scheduler.TaskLink        (TaskChain (TaskMerge, TaskNode),
+                                           TaskLink (..))
+import Hyperion.Scheduler.Types           (MemorySize, NumCPUs)
+import Hyperion.Util.MonadPathExists      (MonadPathExists (..))
+import Type.Reflection                    (Typeable)
 
 type FetchesKey k = Fetches k (ValueType k)
 
@@ -69,16 +76,6 @@ deriving instance (Ord k, Ord r, Ord (KeyConfig k)) => Ord (KeyTask r k)
 
 instance (Static (Binary r), Static (Binary k), Static (Binary (KeyConfig k)), Typeable r, Typeable k, Typeable (KeyConfig k)) => Static (Binary (KeyTask r k)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary r, Binary (KeyConfig k), Binary k)
-
--- TODO rename e.g. to TaskProperties
-data TaskInfoSimple = MkTaskInfoSimple
-  { memory     :: MemorySize
-  , runtime    :: Int -> NominalDiffTime
-  , maxThreads :: RunStage -> Int
-  , minThreads :: RunStage -> Int
-  , priority   :: Int
-  , tag        :: Maybe Tag
-  }
 
 class Binary (ValueType k) => BinaryValue k
 instance Binary (ValueType k) => BinaryValue k
@@ -147,15 +144,31 @@ class ( All Ord (DepKeys k)
   computeValue :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => KeyConfig k -> k -> f (ValueType k)
   computeValue = computeValueWithNumCpus 1
 
-  computeValueWithNumCpus :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => Int -> KeyConfig k -> k -> f (ValueType k)
+  computeValueWithNumCpus :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => NumCPUs -> KeyConfig k -> k -> f (ValueType k)
 
   computeValueM :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => KeyConfig k -> k -> f (Process (ValueType k))
   computeValueM = computeValueWithNumCpusM 1
 
-  computeValueWithNumCpusM :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => Int -> KeyConfig k -> k -> f (Process (ValueType k))
+  computeValueWithNumCpusM :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => NumCPUs -> KeyConfig k -> k -> f (Process (ValueType k))
   computeValueWithNumCpusM numCpus cfg = fmap pure . computeValueWithNumCpus numCpus cfg
 
-  taskInfoSimple :: KeyTask r k -> TaskInfoSimple
+  -- | Estimated memory in bytes
+  keyTaskMemoryEstimate     :: k -> MemorySize
+  keyTaskMemoryEstimate = const 0
+  -- | Estimated runtime in seconds, as a function of NumCPUs
+  keyTaskRuntimeEstimate    :: k -> NumCPUs -> NominalDiffTime
+  keyTaskRuntimeEstimate t numCpus = memoryToCpuTimeApprox (keyTaskMemoryEstimate t) / fromIntegral numCpus
+  -- | Maximum possible threads for the task
+  -- TODO: get rid of RunStage?
+  keyTaskMaxThreads :: RunStage -> k -> NumCPUs
+  keyTaskMaxThreads _ _ = 1
+  -- | Minimum possible threads for the keyTask
+  keyTaskMinThreads :: RunStage -> k -> NumCPUs
+  keyTaskMinThreads _ _ = 1
+  keyTaskTag        :: k -> Maybe Tag
+  keyTaskTag = Just . Text.pack . show . typeOf
+  keyTaskDefaultPriority :: k -> Int
+  keyTaskDefaultPriority = const 0
 
   saveValue :: Proxy k -> OsPath -> ValueType k -> Process ()
   default saveValue :: Binary (ValueType k) => Proxy k -> OsPath -> ValueType k -> Process ()
@@ -207,17 +220,17 @@ instance
   , Typeable (KeyConfig k)
   , Typeable (PathResolverForAll r (DepKeys k))
   ) => IsTask (KeyTask r k) where
-  taskMemoryEstimate t   = (taskInfoSimple t).memory
-  taskRuntimeEstimate t  = (taskInfoSimple t).runtime
+  taskMemoryEstimate t   = keyTaskMemoryEstimate t.key
+  taskRuntimeEstimate t  = keyTaskRuntimeEstimate t.key
   -- TODO reorder arguments?
-  taskMaxThreads stage t = (taskInfoSimple t).maxThreads stage
-  taskMinThreads stage t = (taskInfoSimple t).minThreads stage
+  taskMaxThreads stage t = keyTaskMaxThreads stage t.key
+  taskMinThreads stage t = keyTaskMinThreads stage t.key
   taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
     toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
   taskOutputs t          = Set.singleton $ toTaskKeyFileInfo t.resolver t.key
-  taskDefaultPriority t   = (taskInfoSimple t).priority
-  taskTag t               = (taskInfoSimple t).tag
-  taskClosure numCpus t   = Just $ static computeAndWrite
+  taskDefaultPriority t  = keyTaskDefaultPriority t.key
+  taskTag t              = keyTaskTag t.key
+  taskClosure numCpus t  = Just $ static computeAndWrite
     `cAp` closureDict
     `cAp` cPure numCpus
     `cAp` cPure t
