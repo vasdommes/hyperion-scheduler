@@ -52,3 +52,29 @@ library:
   - text
   - time
   - vector
+
+executables:
+  hyperion-scheduler-test:
+    main: Main.hs
+    source-dirs: test/src
+    dependencies:
+    - aeson
+    - base
+    - binary
+    - bootstrap-build
+    - bytestring-conversion
+    - containers
+    - directory
+    - distributed-process
+    - extra
+    - hyperion
+    - hyperion-scheduler
+    - hyperion-util
+    - matrix
+    - mtl
+    - lens
+    - optparse-applicative
+    - time
+    - text
+    - vector
+    ghc-options : -threaded
