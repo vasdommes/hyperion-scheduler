@@ -14,13 +14,13 @@
 module Hyperion.Scheduler.Task.KeyTask where
 
 import Bootstrap.Build                    (All, AllCF, FetchConfig (..), FetchT,
-                                           Fetches, GetDependencies, HasForce,
+                                           Fetches (..), GetDependencies,
                                            Keys, getDependencies, runFetchT)
 import Bootstrap.Build.FList              (HasIndex (..), HasLength (..),
                                            Index (..), Length (..),
                                            Variant (..), setsFromLists,
-                                           toVariants)
-import Control.Monad.IO.Class             (MonadIO, liftIO)
+                                           toVariants, FList (..))
+import Control.Monad.IO.Class             (MonadIO)
 import Data.Aeson                         (ToJSON (..), Value)
 import Data.Binary                        (Binary (..))
 import Data.Data                          (Proxy (..))
@@ -33,7 +33,6 @@ import Data.Typeable                      (typeOf)
 import GHC.Generics                       (Generic)
 import Hyperion                           (Dict (..), Process, Static (..), cAp,
                                            cPure)
-import Hyperion.Log                       qualified as Log
 import Hyperion.OsPath                    (OsPath)
 import Hyperion.Scheduler.IsTask          (IsTask (..), RunStage, Tag,
                                            memoryToCpuTimeApprox)
@@ -41,10 +40,8 @@ import Hyperion.Scheduler.PathResolver    (PathResolver (..),
                                            PathResolverForAll)
 import Hyperion.Scheduler.Stats           (ToStatKey (..), mkStatKeyViaJSON)
 import Hyperion.Scheduler.Task            (Task, mkTask)
-import Hyperion.Scheduler.Task.KeyValue   (ValueType, readValue)
 import Hyperion.Scheduler.Task.ListTask   (ListTask (..), listTaskLink)
-import Hyperion.Scheduler.Task.Util       (contramapKey, emptyTaskChain,
-                                           encodeBinaryFileAtomic, vAll)
+import Hyperion.Scheduler.Task.Util       (contramapKey, emptyTaskChain, vAll)
 import Hyperion.Scheduler.TaskKeyFileInfo (ToFileStatKey, ToTaskKeyFileInfo,
                                            toTaskKeyFileInfo)
 import Hyperion.Scheduler.TaskLink        (TaskChain (TaskMerge, TaskNode),
@@ -52,16 +49,22 @@ import Hyperion.Scheduler.TaskLink        (TaskChain (TaskMerge, TaskNode),
 import Hyperion.Scheduler.Types           (MemorySize, NumCPUs)
 import Hyperion.Util.MonadPathExists      (MonadPathExists (..))
 import Type.Reflection                    (Typeable)
+import qualified Bootstrap.Build.FList as FList
+import Control.Monad (join)
+import Hyperion.Scheduler.Task.KeyValue (ValueType)
 
-type FetchesKey k = Fetches k (ValueType k)
+type FetchesPath k = Fetches k OsPath
 
-type family ToKeyVals ks where
-  ToKeyVals '[] = '[]
-  ToKeyVals (k ': ks) = '(k, ValueType k) ': ToKeyVals ks
+type family FetchesPaths ks m :: Constraint where
+  FetchesPaths '[] m = ()
+  FetchesPaths (k ': ks) m = (FetchesPath k m, FetchesPaths ks m)
 
-type family FetchesKeys ks m :: Constraint where
-  FetchesKeys '[] m = ()
-  FetchesKeys (k ': ks) m = (FetchesKey k m, FetchesKeys ks m)
+type family WithPaths (ks :: [Type]) :: [(Type, Type)] where
+  WithPaths '[] = '[]
+  WithPaths (k ': ks) = '(k, OsPath) ': WithPaths ks
+
+type OutAndDepKeys k = OutKey k ': DepKeys k
+type OutAndDepsWithPaths k = WithPaths (OutAndDepKeys k)
 
 data KeyTask r k = MkKeyTask
   { resolver :: r
@@ -77,29 +80,25 @@ deriving instance (Ord k, Ord r, Ord (KeyConfig k)) => Ord (KeyTask r k)
 instance (Static (Binary r), Static (Binary k), Static (Binary (KeyConfig k)), Typeable r, Typeable k, Typeable (KeyConfig k)) => Static (Binary (KeyTask r k)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary r, Binary (KeyConfig k), Binary k)
 
-class Binary (ValueType k) => BinaryValue k
-instance Binary (ValueType k) => BinaryValue k
-
 fetchWithResolver
   :: forall ks r m .
      ( PathResolverForAll r ks
-     , All BinaryValue ks
      , MonadIO m
      , HasLength ks
      )
   => Proxy ks
   -> r
-  -> FetchConfig m (ToKeyVals ks)
+  -> FetchConfig m (WithPaths ks)
 fetchWithResolver _ resolver = go (getLength @ks)
   where
-    go :: (PathResolverForAll r ks', All BinaryValue ks') => Length ks' -> FetchConfig m (ToKeyVals ks')
+    go :: (PathResolverForAll r ks') => Length ks' -> FetchConfig m (WithPaths ks')
     go LZero      = FetchNil
-    go (LSucc l') = liftIO . readValue resolver :&: go l'
+    go (LSucc l') = pure . resolvePath resolver :&: go l'
 
-keysAreKeysWitness :: forall ks . HasLength ks => Dict (Keys (ToKeyVals ks) ~ ks)
+keysAreKeysWitness :: forall ks . HasLength ks => Dict (Keys (WithPaths ks) ~ ks)
 keysAreKeysWitness = go (getLength @ks)
   where
-    go :: Length ks' -> Dict (Keys (ToKeyVals ks') ~ ks')
+    go :: Length ks' -> Dict (Keys (WithPaths ks') ~ ks')
     go LZero = Dict
     go (LSucc l') = case go l' of
       Dict -> Dict
@@ -120,13 +119,16 @@ semigroupListWitness = go (getLength @ks)
     go (LSucc l') = case go l' of
       Dict -> Dict
 
-class ( All Ord (DepKeys k)
-      , All Eq (DepKeys k)
+class ( All Eq (DepKeys k)
+      , All Ord (DepKeys k)
       , All ToFileStatKey (DepKeys k)
-      , All BinaryValue (DepKeys k)
       , HasLength (DepKeys k)
-      , FetchesKeys (DepKeys k) (GetDependencies (DepKeyVals k))
-      , FetchesKeys (DepKeys k) (FetchT (DepKeyVals k) Process)
+      , Eq (OutKey k)
+      , Ord (OutKey k)
+      , ToFileStatKey (OutKey k)
+      , Typeable (OutKey k)
+      , FetchesPaths (OutKey k ': DepKeys k) (GetDependencies (OutAndDepsWithPaths k))
+      , FetchesPaths (OutKey k ': DepKeys k) (FetchT (OutAndDepsWithPaths k) Process)
       , Show k
       , ToJSON k
       , Binary k
@@ -137,20 +139,20 @@ class ( All Ord (DepKeys k)
       ) => BuildKey k where
 
   type DepKeys k :: [Type]
+  type OutKey k :: Type
+  type OutKey k = k
+
   type KeyConfig k :: Type
   type KeyConfig k = ()
 
-
-  computeValue :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => KeyConfig k -> k -> f (ValueType k)
-  computeValue = computeValueWithNumCpus 1
-
-  computeValueWithNumCpus :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => NumCPUs -> KeyConfig k -> k -> f (ValueType k)
-
-  computeValueM :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => KeyConfig k -> k -> f (Process (ValueType k))
-  computeValueM = computeValueWithNumCpusM 1
-
-  computeValueWithNumCpusM :: (Applicative f, HasForce f, FetchesKeys (DepKeys k) f) => NumCPUs -> KeyConfig k -> k -> f (Process (ValueType k))
-  computeValueWithNumCpusM numCpus cfg = fmap pure . computeValueWithNumCpus numCpus cfg
+  -- This will be called with two f's:
+  -- 1. GetDependencies (OutAndDepsWithPaths k) to get the dependencies of the key.
+  -- 2. FetchT (OutAndDepsWithPaths k) Process to actually compute the value and write it to disk
+  computeValue
+    :: ( Applicative f
+       , FetchesPaths (OutKey k ': DepKeys k) f
+       )
+    => NumCPUs -> KeyConfig k -> k -> f (Process ())
 
   -- | Estimated memory in bytes
   keyTaskMemoryEstimate     :: k -> MemorySize
@@ -170,33 +172,70 @@ class ( All Ord (DepKeys k)
   keyTaskDefaultPriority :: k -> Int
   keyTaskDefaultPriority = const 0
 
-  saveValue :: Proxy k -> OsPath -> ValueType k -> Process ()
-  default saveValue :: Binary (ValueType k) => Proxy k -> OsPath -> ValueType k -> Process ()
-  saveValue _ path val = liftIO $ encodeBinaryFileAtomic path val
+  -- saveValue :: Proxy k -> OsPath -> ValueType k -> Process ()
+  -- default saveValue :: Binary (ValueType k) => Proxy k -> OsPath -> ValueType k -> Process ()
+  -- saveValue _ path val = liftIO $ encodeBinaryFileAtomic path val
 
-type DepKeyVals k = ToKeyVals (DepKeys k)
+-- type DepKeyVals k = ToKeyVals (DepKeys k)
 
+type family ToKeyVals ks where
+  ToKeyVals '[] = '[]
+  ToKeyVals (k ': ks) = '(k, ValueType k) ': ToKeyVals ks
+
+convert 
+  :: (Applicative f2, FetchesPaths (v ': DepKeys k) f)
+  => (forall f . (Applicative f, Fetches (ToKeyVals (DepKeys k)) f) => k -> f v)
+  -> k -> f2 (Process ())
+convert = undefined
+
+getPath :: Fetches k OsPath f => k -> f OsPath
+getPath = fetch
+
+-- myComputeValue myKey = do
+--   outPath <- getPath myKey
+--   depPath1 <- getPath (dep1 myKey)
+--   depPath2 <- getPath (dep2 myKey)
+--   pure $ do
+--     dep1 <- readFile depPath1
+--     let foo = 12 + myKey.x
+--     encodeBinaryFileAtomic outPath foo
+
+outAndDependencies :: forall k . BuildKey k => KeyConfig k -> k -> FList Set (OutAndDepKeys k)
+outAndDependencies cfg key =
+  case keysAreKeysWitness @(OutAndDepKeys k) of
+    Dict -> case semigroupListWitness @(OutAndDepKeys k) of
+      Dict -> case monoidListWitness @(OutAndDepKeys k) of
+        Dict -> setsFromLists $ getDependencies @(OutAndDepsWithPaths k) $ computeValue 1 cfg key
+
+-- TODO: add function FList.tail
 dependencies :: forall k . BuildKey k => KeyConfig k -> k -> Set (Variant (DepKeys k))
-dependencies cfg key =
-  case keysAreKeysWitness @(DepKeys k) of
-    Dict -> case semigroupListWitness @(DepKeys k) of
-      Dict -> case monoidListWitness @(DepKeys k) of
-        Dict -> toVariants $ setsFromLists $ getDependencies @(DepKeyVals k) $ computeValue cfg key
+dependencies cfg key = case outAndDependencies cfg key of
+  _ ::: rest -> toVariants rest
 
+-- outAndDependencies :: forall k . BuildKey k => KeyConfig k -> k -> Set (Variant (OutAndDepKeys k))
+-- outAndDependencies cfg key =
+--   case keysAreKeysWitness @(OutAndDepKeys k) of
+--     Dict -> case semigroupListWitness @(OutAndDepKeys k) of
+--       Dict -> case monoidListWitness @(OutAndDepKeys k) of
+--         Dict -> toVariants $ setsFromLists $ getDependencies @(OutAndDepsWithPaths k) $ computeValue 1 cfg key
+
+outKeys :: forall k . BuildKey k => KeyConfig k -> k -> Set (OutKey k)
+outKeys cfg key =
+  -- TODO: add function FList.head
+  FList.elemAt Here $ outAndDependencies cfg key 
 computeAndWrite
   :: forall r k .
      Dict ( PathResolverForAll r (DepKeys k)
-          , PathResolver r k
+          , PathResolver r (OutKey k)
           , BuildKey k
           )
   -> Int
   -> KeyTask r k
   -> Process ()
-computeAndWrite Dict numCpus task = do
-  val <- runFetchT (computeValueWithNumCpus numCpus task.config task.key) (fetchWithResolver (Proxy @(DepKeys k)) task.resolver)
-  let path = resolvePath task.resolver task.key
-  Log.info "Saving value" (task.key, path)
-  saveValue (Proxy @k) path val
+computeAndWrite Dict numCpus task =
+  join $
+  runFetchT (computeValue numCpus task.config task.key) $
+  fetchWithResolver (Proxy @(OutKey k ': DepKeys k)) task.resolver
 
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
@@ -210,7 +249,7 @@ instance
   , Eq (KeyTask r k)
   , Ord (KeyTask r k)
   , All (FileInfo r) (DepKeys k)
-  , Static (PathResolver r k)
+  , Static (PathResolver r (OutKey k))
   , Static (BuildKey k)
   , Static (Binary r)
   , Static (Binary k)
@@ -227,7 +266,7 @@ instance
   taskMinThreads stage t = keyTaskMinThreads stage t.key
   taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
     toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
-  taskOutputs t          = Set.singleton $ toTaskKeyFileInfo t.resolver t.key
+  taskOutputs t          = Set.map (toTaskKeyFileInfo t.resolver) $ outKeys t.config t.key
   taskDefaultPriority t  = keyTaskDefaultPriority t.key
   taskTag t              = keyTaskTag t.key
   taskClosure numCpus t  = Just $ static computeAndWrite

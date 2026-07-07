@@ -9,4 +9,4 @@ resolver: github:pkravchuk/hyperionage:snapshots/hyp-2.0.0.yaml
 flags:
   crypton:
     use_target_attributes: false
-arch: x86_64
+# arch: x86_64
