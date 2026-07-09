@@ -15,10 +15,8 @@ module Hyperion.Scheduler.Stats
   , TaskRecord (..)
   , TaskStats (..)
   , FileStats (..)
-  , StatKey (..)
   , ToStatKey (..)
   , Trials (..)
-  , mkStatKeyViaJSON
   , recordToTaskStats
   , approxRuntime
   , maxMemory
@@ -29,35 +27,33 @@ module Hyperion.Scheduler.Stats
   , encodeJsonFileAtomic
   ) where
 
-import Control.DeepSeq                    (NFData, deepseq)
-import Control.Monad.Catch                (Handler (..), catches)
-import Control.Monad.IO.Class             (MonadIO, liftIO)
-import Data.Aeson                         (AesonException, FromJSON,
-                                           FromJSONKey, ToJSON, ToJSONKey, (.=))
-import Data.Aeson                         qualified as Aeson
-import Data.ByteString                    qualified as B
-import Data.List.Extra                    (maximumOn, minimumOn)
-import Data.List.NonEmpty                 (NonEmpty (..), nonEmpty)
-import Data.List.NonEmpty                 qualified as NonEmpty
-import Data.Map.Monoidal                  (MonoidalMap (..))
-import Data.Map.Strict                    (Map)
-import Data.Map.Strict                    qualified as Map
-import Data.Maybe                         (mapMaybe)
-import Data.Time (UTCTime)
-import Data.Time.Clock                    (NominalDiffTime)
-import Data.Typeable                      (Typeable, typeOf)
-import GHC.Generics                       (Generic, Generically (..))
-import Hyperion.Log                       qualified as Log
-import Hyperion.OsPath                    (OsPath, takeDirectory)
-import Hyperion.OsString                  (fromString, toString)
-import Hyperion.Scheduler.TaskKeyFileInfo (FileStatKey)
-import Hyperion.Scheduler.Types (FileSize (..), MemorySize (..), Node,
-                                           NumCPUs)
-import Hyperion.Util                      (randomString)
-import Prelude                            hiding (readFile, (^))
+import Control.DeepSeq            (NFData, deepseq)
+import Control.Monad.Catch        (Handler (..), catches)
+import Control.Monad.IO.Class     (MonadIO, liftIO)
+import Data.Aeson                 (AesonException, FromJSON, ToJSON)
+import Data.Aeson                 qualified as Aeson
+import Data.ByteString            qualified as B
+import Data.List.Extra            (maximumOn, minimumOn)
+import Data.List.NonEmpty         (NonEmpty (..), nonEmpty)
+import Data.List.NonEmpty         qualified as NonEmpty
+import Data.Map.Monoidal          (MonoidalMap (..))
+import Data.Map.Strict            (Map)
+import Data.Map.Strict            qualified as Map
+import Data.Maybe                 (mapMaybe)
+import Data.Time                  (UTCTime)
+import Data.Time.Clock            (NominalDiffTime)
+import GHC.Generics               (Generic, Generically (..))
+import Hyperion.Log               qualified as Log
+import Hyperion.OsPath            (OsPath, takeDirectory)
+import Hyperion.OsString          (fromString, toString)
+import Hyperion.Scheduler.StatKey (FileStatKey, StatKey, ToStatKey (..))
+import Hyperion.Scheduler.Types   (FileSize (..), MemorySize (..), Node,
+                                   NumCPUs)
+import Hyperion.Util              (randomString)
+import Prelude                    hiding (readFile, (^))
 import Prelude qualified
-import System.Directory.OsPath            (createDirectoryIfMissing, renameFile)
-import System.File.OsPath                 (readFile)
+import System.Directory.OsPath    (createDirectoryIfMissing, renameFile)
+import System.File.OsPath         (readFile)
 
 (^) :: Num a => a -> Int -> a
 (^) = (Prelude.^)
@@ -211,26 +207,6 @@ newtype TaskStats = MkTaskStats (Map StatKey TaskResourceMap)
   deriving newtype (FromJSON, ToJSON, NFData)
   deriving (Semigroup, Monoid) via (MonoidalMap StatKey TaskResourceMap)
 
-newtype StatKey = MkStatKey Aeson.Value
-  deriving stock (Eq, Ord, Show)
-  deriving newtype (ToJSON, FromJSON, NFData)
-  deriving anyclass (ToJSONKey, FromJSONKey)
-
-class ToStatKey a where
-  toStatKey :: a -> StatKey
-  -- | A default implementation for the case where we wish to retain
-  -- all the information about a task in the StatKey.
-  default toStatKey :: (Typeable a, ToJSON a) => a -> StatKey
-  toStatKey = mkStatKeyViaJSON
-
-mkStatKeyViaJSON :: (Typeable a, ToJSON a) => a -> StatKey
-mkStatKeyViaJSON key = MkStatKey $
-  Aeson.object ["type" .= show (typeOf key), "key" .= Aeson.toJSON key]
-
-instance ToStatKey StatKey where
-  toStatKey = id
-
-instance ToStatKey ()
 
 -- TODO rename to recordToTaskAndFileStats
 recordToTaskStats :: ToStatKey a => TaskRecord a -> TaskAndFileStats

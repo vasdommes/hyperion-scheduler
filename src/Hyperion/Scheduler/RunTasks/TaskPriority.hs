@@ -12,15 +12,15 @@ module Hyperion.Scheduler.RunTasks.TaskPriority
   )
 where
 
-import Data.Array                   qualified as Array
-import Data.Graph                   qualified as Graph
-import Data.IntMap.Strict           (IntMap)
-import Data.IntMap.Strict           qualified as IntMap
-import Data.Time.Clock              (NominalDiffTime)
-import Hyperion.Scheduler.IsTask (IsTask (..), RunStage (..))
-import Hyperion.Scheduler.TaskGraph (TaskGraph, taskToVertex, vertexToTask)
-import Hyperion.Scheduler.TaskGraph qualified as TaskGraph
-import Hyperion.Scheduler.Types     (MemorySize (..), Node (..))
+import Data.Array                     qualified as Array
+import Data.Graph                     qualified as Graph
+import Data.IntMap.Strict             (IntMap)
+import Data.IntMap.Strict             qualified as IntMap
+import Data.Time.Clock                (NominalDiffTime)
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..))
+import Hyperion.Scheduler.TaskGraph   (TaskGraph, taskToVertex, vertexToTask)
+import Hyperion.Scheduler.TaskGraph   qualified as TaskGraph
+import Hyperion.Scheduler.Types       (MemorySize (..), Node (..))
 
 
 -- CriticalPathPriority prioritizes the critical path of a task graph (the slowest dependency chain).

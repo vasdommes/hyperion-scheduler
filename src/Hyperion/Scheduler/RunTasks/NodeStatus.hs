@@ -5,13 +5,13 @@
 
 module Hyperion.Scheduler.RunTasks.NodeStatus where
 
-import Data.IntMap.Strict (IntMap)
-import Data.IntMap.Strict qualified as IntMap
-import Data.List (intercalate)
-import Data.Text (Text)
-import Data.Text qualified as Text
-import Hyperion.Scheduler.IsTask (IsTask (..))
-import Hyperion.Scheduler.Types (MemorySize, NumCPUs)
+import Data.IntMap.Strict             (IntMap)
+import Data.IntMap.Strict             qualified as IntMap
+import Data.List                      (intercalate)
+import Data.Text                      (Text)
+import Data.Text                      qualified as Text
+import Hyperion.Scheduler.Task.IsTask (IsTask (..))
+import Hyperion.Scheduler.Types       (MemorySize, NumCPUs)
 
 -- | Currently in-use resources on a node
 data NodeStatus = MkNodeStatus

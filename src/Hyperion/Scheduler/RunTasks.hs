@@ -32,7 +32,7 @@ import Data.Maybe                                   (catMaybes, fromMaybe,
                                                      isNothing, listToMaybe)
 import Data.Set                                     (Set)
 import Data.Set                                     qualified as Set
-import Data.Time.Clock (addUTCTime, diffUTCTime,
+import Data.Time.Clock                              (addUTCTime, diffUTCTime,
                                                      getCurrentTime)
 import Hyperion                                     (Job, Process, RemoteError)
 import Hyperion.Log                                 qualified as Log
@@ -55,10 +55,6 @@ import Hyperion.Scheduler.FileService               (FileService, Response (..),
                                                      registerFilesOnNode,
                                                      reserveFilesOnNode,
                                                      withFileService)
-import Hyperion.Scheduler.IsTask (IsTask (..), RunStage (..),
-        taskInputPaths,
-        taskMemoryCapped,
-        taskOutputPaths)
 import Hyperion.Scheduler.RemoteUtil                (AsyncFailedException (..),
                                                      asyncLinkedLocalJob,
                                                      getJobNodes,
@@ -67,8 +63,8 @@ import Hyperion.Scheduler.RunTasks.NodeStatus       (NodeStatus)
 import Hyperion.Scheduler.RunTasks.NodeStatus       qualified as NodeStatus
 import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
 import Hyperion.Scheduler.RunTasks.ProgressMap      qualified as ProgressMap
-import Hyperion.Scheduler.RunTasks.RemoteRunTask (RemoteRunTaskResult (..),
-        remoteRunTask)
+import Hyperion.Scheduler.RunTasks.RemoteRunTask    (RemoteRunTaskResult (..),
+                                                     remoteRunTask)
 import Hyperion.Scheduler.RunTasks.Shared           (Shared (..), newShared,
                                                      readShared)
 import Hyperion.Scheduler.RunTasks.Shared           qualified as Shared
@@ -82,10 +78,14 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
                                                      newChangeNotifierIO,
                                                      notifyChangeM,
                                                      runWithRetry)
-import Hyperion.Scheduler.Stats (TaskRecord (..))
+import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
+import Hyperion.Scheduler.Stats                     (TaskRecord (..))
+import Hyperion.Scheduler.Task.IsTask               (IsTask (..), RunStage (..),
+                                                     taskInputPaths,
+                                                     taskMemoryCapped,
+                                                     taskOutputPaths)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
-import Hyperion.Scheduler.TaskKeyFileInfo (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
 import Hyperion.Scheduler.TPrioQueue                qualified as TPrioQueue
 import Hyperion.Scheduler.Types                     (FileSize (..),

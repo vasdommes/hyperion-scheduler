@@ -3,37 +3,20 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 
-module Hyperion.Scheduler.Task.Util
-  ( contramapKey
-  , emptyTaskChain
-  , unvariant
-  , vEither
-  , vNil
-  , vAll
-  , encodeBinaryFileAtomic
-  ) where
+module Hyperion.Scheduler.Task.Util where
 
 import Bootstrap.Build         (All)
 import Bootstrap.Build.FList   (Variant (..))
 import Data.Binary             (Binary)
 import Data.Binary             qualified as Binary
-import Data.Set                qualified as Set
-import Data.Void               (Void)
 import Hyperion.Log            qualified as Log
 import Hyperion.OsPath         (OsPath, takeDirectory)
 import Hyperion.OsString       (toString)
-import Hyperion.Scheduler      (TaskChain (..), TaskLink (..))
 import Hyperion.Util           (randomOsString)
 import System.Directory.OsPath (createDirectoryIfMissing, renameFile)
 
--- TODO: Move to Scheduler
-contramapKey :: (k' -> k) -> TaskLink m k d t -> TaskLink m k' d t
-contramapKey f taskLink =
-  MkTaskLink
-    { dependencies = taskLink.dependencies . f
-    , checkCreated = taskLink.checkCreated . f
-    , toTask       = taskLink.toTask . f
-    }
+-- These 4 utilities should move to Bootstrap.Build. We probably want to make a
+-- separate Variant module in that library instead of having it all in FList.
 
 -- TODO: Move to Bootstrap.Build
 vNil :: Variant '[] -> a
@@ -52,18 +35,6 @@ vAll f (VRight y) = vAll @c f y
 -- TODO: Move to Bootstrap.Build
 unvariant :: Variant '[a] -> a
 unvariant = id `vEither` vNil
-
--- Move to Scheduler
-emptyTaskChain :: Applicative m => TaskChain m (Variant '[]) t
-emptyTaskChain = TaskNode emptyTaskLink TaskNil
-
--- Move to Scheduler
-emptyTaskLink :: Applicative m => TaskLink m (Variant '[]) Void t
-emptyTaskLink = MkTaskLink
-  { dependencies = const Set.empty
-  , checkCreated = const (pure True)
-  , toTask       = error "absurd"
-  }
 
 -- Copied from SDPB.Write, TODO move elsewhere
 -- | Write a json representation of 'x' to a temporary file, and then

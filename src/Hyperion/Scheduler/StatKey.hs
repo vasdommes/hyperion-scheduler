@@ -6,34 +6,60 @@
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 
-module Hyperion.Scheduler.TaskKeyFileInfo where
+module Hyperion.Scheduler.StatKey where
 
 import Control.DeepSeq                 (NFData)
 import Data.Aeson                      (FromJSON, FromJSONKey, ToJSON (..),
-                                        ToJSONKey)
+                                        ToJSONKey, (.=))
 import Data.Aeson                      qualified as Aeson
+import Data.Typeable                   (Typeable, typeOf)
 import GHC.Generics                    (Generic)
 import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
 import Hyperion.Scheduler.PathResolver (PathResolver (..))
 import Hyperion.Scheduler.Types        (FileSize)
+
+newtype StatKey = MkStatKey Aeson.Value
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON, NFData)
+  deriving anyclass (ToJSONKey, FromJSONKey)
+
+class ToStatKey a where
+  toStatKey :: a -> StatKey
+  -- | A default implementation for the case where we wish to retain
+  -- all the information about a task in the StatKey.
+  default toStatKey :: (Typeable a, ToJSON a) => a -> StatKey
+  toStatKey = mkStatKeyViaJSON
+
+keyToJSONWithType :: (Typeable a, ToJSON a) => a -> Aeson.Value
+keyToJSONWithType key = Aeson.object ["type" .= show (typeOf key), "key" .= Aeson.toJSON key]
+
+mkStatKeyViaJSON :: (Typeable a, ToJSON a) => a -> StatKey
+mkStatKeyViaJSON = MkStatKey . keyToJSONWithType
+
+instance ToStatKey StatKey where
+  toStatKey = id
+
+instance ToStatKey ()
+
 
 -- | Container for a file stat key.
 newtype FileStatKey = MkFileStatKey Aeson.Value
   deriving newtype (Eq, Ord, Show, ToJSON, FromJSON, NFData)
   deriving anyclass (ToJSONKey, FromJSONKey)
 
--- TODO remove?
 class ToFileStatKey a where
   toFileStatKey :: a -> FileStatKey
+  -- | A default implementation: FileStatKey = StatKey.
+  default toFileStatKey :: ToStatKey a => a -> FileStatKey
+  toFileStatKey key = MkFileStatKey value where
+    (MkStatKey value) = toStatKey key
+
   toFileSize    :: a -> FileSize
+  toFileSize _ = 0
 
-  -- | A default implementation for the case where we wish to retain
-  -- all the information about a task in the FileStatKey.
-  default toFileStatKey :: ToJSON a => a -> FileStatKey
-  toFileStatKey = mkFileStatKeyViaJSON
 
-mkFileStatKeyViaJSON :: ToJSON a => a -> FileStatKey
-mkFileStatKeyViaJSON = MkFileStatKey . Aeson.toJSON
+mkFileStatKeyViaJSON :: (ToJSON a, Typeable a) => a -> FileStatKey
+mkFileStatKeyViaJSON = MkFileStatKey . keyToJSONWithType
 
 data TaskKeyFileInfo = MkTaskKeyFileInfo
   { fileStatKey :: FileStatKey

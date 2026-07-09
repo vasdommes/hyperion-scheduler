@@ -18,68 +18,54 @@
 -- This not how you should multiuply matrix in practice.
 module Hyperion.Scheduler.Test.LinearTransform where
 
-import Bootstrap.Build                     (Fetches (..))
-import Control.Distributed.Process         (getSelfNode, getSelfPid, spawn,
-                                            spawnLocal)
-import Control.Distributed.Process.Debug   (TraceFlags (..), enableTrace,
-                                            logfileTracer, setTraceFlags,
-                                            startTraceRelay, traceLog, traceOn)
-import Control.Exception                   (AssertionFailed (..))
-import Control.Monad                       (forM_, unless)
-import Control.Monad.IO.Class              (liftIO)
-import Control.Monad.Reader                (asks, lift, local)
-import Data.Aeson                          (ToJSON, (.=))
-import Data.Aeson                          qualified as Aeson
-import Data.Binary                         (Binary)
-import Data.Map.Strict                     qualified as Map
-import Data.Matrix                         (Matrix)
-import Data.Matrix                         qualified as Matrix
-import Data.Maybe                          (fromMaybe)
-import Data.Time.Clock                     (NominalDiffTime)
-import Data.Traversable                    (for)
-import Data.Typeable                       (Typeable)
-import Data.Vector                         (Vector)
-import Data.Vector                         qualified as Vector
+import Bootstrap.Build                (Fetches (..))
+import Control.Exception              (AssertionFailed (..))
+import Control.Monad                  (unless)
+import Control.Monad.IO.Class         (liftIO)
+import Control.Monad.Reader           (lift, local)
+import Data.Aeson                     (ToJSON, (.=))
+import Data.Aeson                     qualified as Aeson
+import Data.Binary                    (Binary)
+import Data.Kind                      (Type)
+import Data.Map.Strict                qualified as Map
+import Data.Matrix                    (Matrix)
+import Data.Matrix                    qualified as Matrix
+import Data.Maybe                     (fromMaybe)
+import Data.Proxy                     (Proxy (..))
+import Data.Time.Clock                (NominalDiffTime)
+import Data.Traversable               (for)
+import Data.Typeable                  (Typeable)
+import Data.Vector                    (Vector)
+import Data.Vector                    qualified as Vector
 import Debug.Trace
-import GHC.Generics                        (Generic)
+import GHC.Generics                   (Generic)
 import Hyperion
-import Hyperion.Log                        qualified as Log
-import Hyperion.OsPath                     (OsPath, (<.>), (</>))
-import Hyperion.OsString                   (OsString, fromString, showOs)
-import Hyperion.Scheduler                  (PathResolver (..), StatKey (..),
-                                            Task, TaskChain (..),
-                                            ToFileStatKey (..), ToStatKey (..),
-                                            encodeJsonFileAtomic,
-                                            memoryToCpuTimeApprox,
-                                            mkStatKeyViaJSON, mkTask,
-                                            recordToTaskStats, writeTaskStats)
-import Hyperion.Scheduler                  qualified as Scheduler
-import Hyperion.Scheduler.Config           qualified as Scheduler
-import Hyperion.Scheduler.Task.KeyTask     (BuildKey (..), FetchesKey,
-                                            keyTaskLink, taskChain)
-import Hyperion.Scheduler.Task.KeyValue    (ValueType, readValue)
-import Hyperion.Scheduler.Task.ToTaskGraph (toTaskEdges)
-import Hyperion.Scheduler.Task.Util        (emptyTaskChain)
-import Hyperion.Scheduler.Test.Config      qualified as TestConfig
-import Hyperion.Slurm                      (SbatchOptions, sBatchOptionsParser)
-import Hyperion.Util                       (minute)
-import Hyperion.Util.MonadPathExists       (MonadPathExists)
-import Options.Applicative                 (Parser, ReadM, auto, help, long,
-                                            maybeReader, metavar, option,
-                                            optional, str, value)
-import Options.Applicative.Types           (readerAsk)
-import System.Directory.OsPath             (createDirectoryIfMissing,
-                                            makeAbsolute, removePathForcibly)
-import Text.Read                           (Read (..))
-
--- class (ToJSON a) => LinearTransformContext a where
---   numLayers :: a -> Int
---   layerMatrix :: a -> Closure (Int -> Matrix Int)
---   inputVector :: a -> Closure (Vector Int)
---   layerMatrixDims :: Int -> a -> (Int, Int)
---   layerInputVectorLength :: Int -> a -> Int
---   layerOutputVectorLength :: Int -> a -> Int
---   modulus :: a -> Int
+import Hyperion.Log                   qualified as Log
+import Hyperion.OsPath                (OsPath, (<.>), (</>))
+import Hyperion.OsString              (OsString, fromString, showOs)
+import Hyperion.Scheduler             (PathResolver (..), StatKey (..),
+                                       TaskChain (..), ToFileStatKey (..),
+                                       ToStatKey (..), WrappedTask,
+                                       encodeJsonFileAtomic,
+                                       memoryToCpuTimeApprox, mkStatKeyViaJSON,
+                                       recordToTaskStats, wrapTask,
+                                       writeTaskStats)
+import Hyperion.Scheduler             qualified as Scheduler
+import Hyperion.Scheduler.Config      qualified as Scheduler
+import Hyperion.Scheduler.Task        (ComputeValue (..), DepKeys, FetchesKey,
+                                       TaskKey (..), ValueSerializable (..),
+                                       ValueType, getPath, mkTaskMap)
+import Hyperion.Scheduler.Test.Config qualified as TestConfig
+import Hyperion.Slurm                 (SbatchOptions, sBatchOptionsParser)
+import Hyperion.Util                  (minute)
+import Hyperion.Util.MonadPathExists  (MonadPathExists)
+import Options.Applicative            (Parser, ReadM, auto, help, long,
+                                       maybeReader, metavar, option, optional,
+                                       str, value)
+import Options.Applicative.Types      (readerAsk)
+import System.Directory.OsPath        (createDirectoryIfMissing, makeAbsolute,
+                                       removePathForcibly)
+import Text.Read                      (Read (..))
 
 class (ToJSON a, Ord a, Show a, Binary a, Typeable a) => LinearTransformContext a where
   numLayers :: a -> Int
@@ -108,12 +94,15 @@ data MultiplyKey a = MkMultiplyKey
   , col        :: Int
   , ctx        :: a
   }
-  deriving (Eq, Ord, Show, Generic, Binary, ToJSON)
+  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ValueSerializable)
 
 instance (Typeable a, Static (Binary a)) => Static (Binary (MultiplyKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary a)
 
 type instance ValueType (MultiplyKey a) = Int
+
+type instance DepKeys (MultiplyKey a) = '[VectorKey a]
+
 
 computeMultiplyM :: (Applicative f, FetchesKey (VectorKey a) f, LinearTransformContext a) => MultiplyKey a -> f (Process Int)
 computeMultiplyM key = do
@@ -134,17 +123,20 @@ computeMultiplyM key = do
       , ctx = key.ctx
       }
 
+instance LinearTransformContext a => ComputeValue (MultiplyKey a) where
+  computeValueM _ _ = computeMultiplyM
+
+type instance DepKeys (MultiplyKey a) = '[VectorKey a]
+
 instance
   ( LinearTransformContext a
   , ToFileStatKey (MultiplyKey a)
   , ToFileStatKey (VectorKey a)
-  ) => BuildKey (MultiplyKey a) where
-  type DepKeys (MultiplyKey a) = '[VectorKey a]
-  computeValueWithNumCpusM _ _ = computeMultiplyM
-  keyTaskMemoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
-  keyTaskTag _ = Just "Multiply"
+  ) => TaskKey (MultiplyKey a) where
+  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  tag _ = Just "Multiply"
 
-instance ToJSON a => ToFileStatKey (MultiplyKey a) where
+instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
   toFileSize = const 1
   -- TODO toFileStatKey
 
@@ -153,36 +145,61 @@ data VectorElementKey a = MkVectorElementKey
   , index      :: Int
   , ctx        :: a
   }
-  deriving (Eq, Ord, Show, Generic, Binary, ToJSON)
+  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ValueSerializable)
 
 instance (Typeable a, Static (Binary a)) => Static (Binary (VectorElementKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary a)
 
 type instance ValueType (VectorElementKey a) = Int
 
--- sum_k A_ik x_k
-computeVectorElement :: (Applicative f, FetchesKey (MultiplyKey a) f, LinearTransformContext a) => VectorElementKey a -> f Int
-computeVectorElement key = sum <$> for ks (fetch . mkKey)
-  where
-    ncols = layerInputVectorLength key.layerIndex key.ctx
-    ks = [0..ncols-1]
-    mkKey k = MkMultiplyKey
-      { layerIndex = key.layerIndex
-      , row = key.index
-      , col = k
-      , ctx = key.ctx
-      }
+vectorElementInputKeys :: LinearTransformContext a => VectorElementKey a -> [MultiplyKey a]
+vectorElementInputKeys key = map mkKey ks where
+  ncols = layerInputVectorLength key.layerIndex key.ctx
+  ks = [0..ncols-1]
+  mkKey k = MkMultiplyKey
+    { layerIndex = key.layerIndex
+    , row = key.index
+    , col = k
+    , ctx = key.ctx
+    }
+
+
+ -- sum_k A_ik x_k
+--computeVectorElement :: (Applicative f, FetchesKey (MultiplyKey a) f, LinearTransformContext a) => VectorElementKey a -> f Int
+--computeVectorElement key = sum <$> for (vectorElementInputKeys key) fetch
+
+-- instance LinearTransformContext a => ComputeValue (VectorElementKey a) where
+--   computeValue _ _ = computeVectorElement
+
+-- Let's pretend that this calls some external script
+--   that reads A_ik x_k, computes their sum and write it to the output file:
+-- $ vector_element.sh input_1.bin input_2.bin input_3.bin output.bin
+-- This is needed to test KeyType for the case
+-- when we cannot define instance ComputeValue (VectorElementKey a).
+runVectorElementScript :: forall (a :: Type) . Proxy a -> [OsPath] -> OsPath -> Process ()
+runVectorElementScript _ inputPaths outputPath = do
+  Log.info "runVectorElementScript" (inputPaths, outputPath)
+  values <- mapM (readValue (Proxy @(MultiplyKey a))) inputPaths
+  let result = sum values
+  saveValue (Proxy @(VectorElementKey a)) outputPath result
+
+
+type instance DepKeys (VectorElementKey a) = '[MultiplyKey a]
 
 instance
   ( LinearTransformContext a
   , ToFileStatKey (MultiplyKey a)
   , ToFileStatKey (VectorElementKey a)
-  ) => BuildKey (VectorElementKey a) where
-  type DepKeys (VectorElementKey a) = '[MultiplyKey a]
---  computeValue _ = computeVectorElement
-  computeValueWithNumCpus _ _ = computeVectorElement
-  keyTaskMemoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
-  keyTaskTag _ = Just "VectorElement"
+  ) => TaskKey (VectorElementKey a) where
+  -- type DepKeys (VectorElementKey a) = '[MultiplyKey a]
+  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  tag _ = Just "VectorElement"
+  computeAndSaveValue numCpus config key = do
+    inputPaths <- for (vectorElementInputKeys key) getPath
+    outputPath <- getPath key
+    pure $ do
+      liftIO $ Log.info "Computing vector element" (key, inputPaths, outputPath)
+      runVectorElementScript (Proxy @a) inputPaths outputPath
 
 newtype VectorStatKey = MkVectorStatKey { size :: Int }
   deriving newtype(ToJSON)
@@ -191,7 +208,7 @@ instance LinearTransformContext a => ToStatKey (VectorKey a) where
   toStatKey key = mkStatKeyViaJSON $ MkVectorStatKey { size = layerInputVectorLength key.layerIndex key.ctx }
 
 
-instance ToJSON a => ToFileStatKey (VectorElementKey a) where
+instance LinearTransformContext a => ToFileStatKey (VectorElementKey a) where
   toFileSize = const 1
   -- TODO toFileStatKey
 
@@ -200,7 +217,7 @@ data VectorKey a = MkVectorKey
   , length     :: Int
   , ctx        :: a
   }
-  deriving (Eq, Ord, Show, Generic, Binary, ToJSON)
+  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ValueSerializable)
 
 instance (Typeable a, Static (Binary a)) => Static (Binary (VectorKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary a)
@@ -218,19 +235,23 @@ computeVectorM key
         , ctx = key.ctx
         }
 
+instance LinearTransformContext a => ComputeValue (VectorKey a) where
+  computeValueM _ _ = computeVectorM
+
+type instance DepKeys (VectorKey a) = '[VectorElementKey a]
+
 instance
  ( LinearTransformContext a
  , ToFileStatKey (VectorElementKey a)
  , ToFileStatKey (VectorKey a)
- ) => BuildKey (VectorKey a) where
-  type DepKeys (VectorKey a) = '[VectorElementKey a]
-  computeValueWithNumCpusM _ _ = computeVectorM
-  keyTaskMemoryEstimate _ = 1024 * 1024
-  keyTaskTag _ = Just "Vector"
+ ) => TaskKey (VectorKey a) where
+  -- type DepKeys (VectorKey a) = '[VectorElementKey a]
+  memoryEstimate _ = 1024 * 1024
+  tag _ = Just "Vector"
 
-instance ToJSON a =>ToFileStatKey (VectorKey a) where
+instance LinearTransformContext a => ToFileStatKey (VectorKey a) where
   toFileSize key = fromIntegral key.length
-  -- TODO toFileStatKey
+
 
 
 -- Take vector [1,2,..dim] and make a cyclic shift.
@@ -285,32 +306,32 @@ instance Typeable a => Static (PathResolver LinearPathResolver (VectorElementKey
 instance (Typeable a, Static(LinearTransformContext a)) => Static (PathResolver LinearPathResolver (VectorKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
 
-instance (Typeable a, Static(ToJSON a)) => Static (ToFileStatKey (MultiplyKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(ToJSON a)
-instance (Typeable a, Static(ToJSON a)) => Static (ToFileStatKey (VectorElementKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(ToJSON a)
-instance (Typeable a, Static(ToJSON a)) => Static (ToFileStatKey (VectorKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(ToJSON a)
+instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (MultiplyKey a)) where
+  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
+instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (VectorElementKey a)) where
+  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
+instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (VectorKey a)) where
+  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
 
 instance
   ( Typeable a
   , Static(LinearTransformContext a)
   , Static(ToJSON a)
-  ) => Static (BuildKey (MultiplyKey a)) where
+  ) => Static (TaskKey (MultiplyKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a, ToJSON a)
 
 instance
   ( Typeable a
   , Static(LinearTransformContext a)
   , Static(ToJSON a)
-  ) => Static (BuildKey (VectorElementKey a)) where
+  ) => Static (TaskKey (VectorElementKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a, ToJSON a)
 
 instance
   ( Typeable a
   , Static(LinearTransformContext a)
   , Static(ToJSON a)
-  ) => Static (BuildKey (VectorKey a)) where
+  ) => Static (TaskKey (VectorKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a, ToJSON a)
 
 instance Static (Binary LinearPathResolver) where
@@ -416,8 +437,8 @@ testJob getSchedulerConfig baseDir problem = do
   liftIO $ do
     removePathForcibly resolver.outDir
     createDirectoryIfMissing True resolver.outDir
-  taskMap <- toTaskEdges (taskChain resolver ()) outputVectorKey
-  newTaskRecords <- Scheduler.runTasks @Task schedulerConfig taskMap
+  taskMap <- mkTaskMap resolver () outputVectorKey
+  newTaskRecords <- Scheduler.runTasks schedulerConfig taskMap
 
   -- Write task stats
   let
@@ -430,7 +451,7 @@ testJob getSchedulerConfig baseDir problem = do
   writeTaskStats newTaskStatsFile newTaskStats
 
   -- Check result
-  outputValue <- liftIO $ readValue resolver outputVectorKey
+  outputValue <- lift $ readValue (pure outputVectorKey) (resolvePath resolver outputVectorKey)
   Log.info "Computed output vector: " outputValue
   let expectedValue = getOutputVector problem
   unless (expectedValue == outputValue) $

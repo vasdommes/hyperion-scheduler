@@ -7,21 +7,21 @@
 
 module Hyperion.Scheduler.RunTasks.TaskDistribution where
 
-import Data.List                          qualified as List
-import Data.Map.Strict                    (Map)
-import Data.Map.Strict                    qualified as Map
-import Data.Maybe                         (mapMaybe)
-import Data.MinMaxQueue                   qualified as MinMaxQueue
-import Data.Ord                           (Down (..))
-import Data.Set                           (Set)
-import Data.Set                           qualified as Set
-import Data.Time.Clock                    (NominalDiffTime)
-import Hyperion.Scheduler.Config          (Config)
-import Hyperion.Scheduler.FilePath        (VirtualFilePath, isNodeLocal)
-import Hyperion.Scheduler.IsTask (IsTask (..), RunStage (..),
-        taskMemoryCapped)
-import Hyperion.Scheduler.TaskKeyFileInfo (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Types           (FileSize, Node (..), NumCPUs)
+import Data.List                      qualified as List
+import Data.Map.Strict                (Map)
+import Data.Map.Strict                qualified as Map
+import Data.Maybe                     (mapMaybe)
+import Data.MinMaxQueue               qualified as MinMaxQueue
+import Data.Ord                       (Down (..))
+import Data.Set                       (Set)
+import Data.Set                       qualified as Set
+import Data.Time.Clock                (NominalDiffTime)
+import Hyperion.Scheduler.Config      (Config)
+import Hyperion.Scheduler.FilePath    (VirtualFilePath, isNodeLocal)
+import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..),
+                                       taskMemoryCapped)
+import Hyperion.Scheduler.Types       (FileSize, Node (..), NumCPUs)
 
 type CPUAllocation a = Map a NumCPUs
 

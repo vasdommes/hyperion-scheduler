@@ -4,20 +4,20 @@
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 
-module Hyperion.Scheduler.IsTask where
+module Hyperion.Scheduler.Task.IsTask where
 
-import Data.Aeson (ToJSON)
-import Data.Set (Set)
-import Data.Set qualified as Set
-import Data.Text (Text)
-import Data.Text qualified as Text
-import Data.Time.Clock (NominalDiffTime)
-import Data.Typeable (Typeable, typeOf)
-import Debug.Trace qualified as Debug
-import Hyperion (Closure, Process)
+import Data.Aeson                  (ToJSON)
+import Data.Set                    (Set)
+import Data.Set                    qualified as Set
+import Data.Text                   (Text)
+import Data.Text                   qualified as Text
+import Data.Time.Clock             (NominalDiffTime)
+import Data.Typeable               (Typeable, typeOf)
+import Debug.Trace                 qualified as Debug
+import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
-import Hyperion.Scheduler.TaskKeyFileInfo (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Types (MemorySize, NumCPUs)
+import Hyperion.Scheduler.StatKey  (TaskKeyFileInfo (..))
+import Hyperion.Scheduler.Types    (MemorySize, NumCPUs)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
 -- computation. TODO: Really, minThreads and maxThreads should be able

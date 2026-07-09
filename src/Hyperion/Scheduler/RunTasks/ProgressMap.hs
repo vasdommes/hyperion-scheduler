@@ -5,16 +5,16 @@
 
 module Hyperion.Scheduler.RunTasks.ProgressMap where
 
-import Control.Monad.IO.Class (MonadIO)
-import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes)
-import Data.Set (Set)
-import Data.Set qualified as Set
-import Data.Text qualified as Text
-import Hyperion.Log qualified as Log
-import Hyperion.Scheduler.IsTask (IsTask (..), Tag)
-import Text.Printf qualified as Printf
+import Control.Monad.IO.Class         (MonadIO)
+import Data.Map.Strict                (Map)
+import Data.Map.Strict                qualified as Map
+import Data.Maybe                     (catMaybes)
+import Data.Set                       (Set)
+import Data.Set                       qualified as Set
+import Data.Text                      qualified as Text
+import Hyperion.Log                   qualified as Log
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), Tag)
+import Text.Printf                    qualified as Printf
 
 data Progress = MkProgress
   { completed :: Int

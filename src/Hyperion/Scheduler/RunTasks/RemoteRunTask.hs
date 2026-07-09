@@ -12,23 +12,23 @@ module Hyperion.Scheduler.RunTasks.RemoteRunTask
   )
 where
 
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Reader          (local)
-import Data.Binary                   (Binary)
-import Data.Map.Strict               (Map)
-import Data.Map.Strict               qualified as Map
-import Data.Set (Set)
-import Data.Set qualified as Set
-import GHC.Generics                  (Generic)
-import Hyperion (Job, Static, cAp, cPure, setTaskCpus)
-import Hyperion                      qualified as Hyp
-import Hyperion.Log                  qualified as Log
-import Hyperion.Scheduler.FilePath (VirtualFilePath (VirtualFilePath))
-import Hyperion.Scheduler.IsTask (IsTask (..), taskOutputPaths)
-import Hyperion.Scheduler.Types      (FileSize (..), MemorySize (..), NumCPUs)
-import Hyperion.Scheduler.WorkerPool (TWorker, remoteRunOnNewWorker)
-import System.Directory.OsPath (getFileSize)
-import System.RUsage qualified as RUsage
+import Control.Monad.IO.Class         (MonadIO, liftIO)
+import Control.Monad.Reader           (local)
+import Data.Binary                    (Binary)
+import Data.Map.Strict                (Map)
+import Data.Map.Strict                qualified as Map
+import Data.Set                       (Set)
+import Data.Set                       qualified as Set
+import GHC.Generics                   (Generic)
+import Hyperion                       (Job, Static, cAp, cPure, setTaskCpus)
+import Hyperion                       qualified as Hyp
+import Hyperion.Log                   qualified as Log
+import Hyperion.Scheduler.FilePath    (VirtualFilePath (VirtualFilePath))
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), taskOutputPaths)
+import Hyperion.Scheduler.Types       (FileSize (..), MemorySize (..), NumCPUs)
+import Hyperion.Scheduler.WorkerPool  (TWorker, remoteRunOnNewWorker)
+import System.Directory.OsPath        (getFileSize)
+import System.RUsage                  qualified as RUsage
 
 data RemoteRunTaskResult = MkRemoteRunTaskResult
   { remoteTaskMemory    :: Maybe MemorySize

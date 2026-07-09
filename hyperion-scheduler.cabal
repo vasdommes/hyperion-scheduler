@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.39.1.
+-- This file has been generated from package.yaml by hpack version 0.39.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -23,7 +23,6 @@ library
       Hyperion.Scheduler.FileService.FileSender
       Hyperion.Scheduler.FileService.NodeLocalFileManager
       Hyperion.Scheduler.FileService.RetryTimeout
-      Hyperion.Scheduler.IsTask
       Hyperion.Scheduler.PathResolver
       Hyperion.Scheduler.RemoteUtil
       Hyperion.Scheduler.ReusableWorker
@@ -35,16 +34,16 @@ library
       Hyperion.Scheduler.RunTasks.TaskDistribution
       Hyperion.Scheduler.RunTasks.TaskPriority
       Hyperion.Scheduler.RunTasks.TChangeNotifier
+      Hyperion.Scheduler.StatKey
       Hyperion.Scheduler.Stats
       Hyperion.Scheduler.Task
-      Hyperion.Scheduler.Task.KeyTask
-      Hyperion.Scheduler.Task.KeyValue
-      Hyperion.Scheduler.Task.ListTask
-      Hyperion.Scheduler.Task.ToTaskGraph
+      Hyperion.Scheduler.Task.HasConfig
+      Hyperion.Scheduler.Task.IsTask
+      Hyperion.Scheduler.Task.Task
+      Hyperion.Scheduler.Task.TaskLink
       Hyperion.Scheduler.Task.Util
+      Hyperion.Scheduler.Task.WrappedTask
       Hyperion.Scheduler.TaskGraph
-      Hyperion.Scheduler.TaskKeyFileInfo
-      Hyperion.Scheduler.TaskLink
       Hyperion.Scheduler.TPrioQueue
       Hyperion.Scheduler.Types
       Hyperion.Scheduler.Util
