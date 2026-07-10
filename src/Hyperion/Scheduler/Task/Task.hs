@@ -2,12 +2,10 @@
 {-# LANGUAGE DataKinds               #-}
 {-# LANGUAGE DefaultSignatures       #-}
 {-# LANGUAGE DeriveAnyClass          #-}
-{-# LANGUAGE DerivingStrategies      #-}
 {-# LANGUAGE DerivingVia             #-}
 {-# LANGUAGE DuplicateRecordFields   #-}
 {-# LANGUAGE NoFieldSelectors        #-}
 {-# LANGUAGE OverloadedRecordDot     #-}
-{-# LANGUAGE OverloadedStrings       #-}
 {-# LANGUAGE StaticPointers          #-}
 {-# LANGUAGE TypeFamilies            #-}
 {-# LANGUAGE UndecidableInstances    #-}
@@ -140,7 +138,6 @@ class ( All Eq (DepKeys k)
       , ToJSON k
       , Binary k
       , Typeable k
-      , ToFileStatKey k
       , Binary (TaskConfig k)
       , ToJSON (TaskConfig k)
       ) => TaskKey k where
