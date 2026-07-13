@@ -176,12 +176,13 @@ vectorElementInputKeys key = map mkKey ks where
 -- $ vector_element.sh input_1.bin input_2.bin input_3.bin output.bin
 -- This is needed to test KeyType for the case
 -- when we cannot define instance ComputeValue (VectorElementKey a).
-runVectorElementScript :: forall (a :: Type) . Proxy a -> [OsPath] -> OsPath -> Process ()
-runVectorElementScript _ inputPaths outputPath = do
-  Log.info "runVectorElementScript" (inputPaths, outputPath)
-  values <- mapM (readValue (Proxy @(MultiplyKey a))) inputPaths
+runVectorElementScript :: [(MultiplyKey a, OsPath)] -> (VectorElementKey a, OsPath) -> Process ()
+runVectorElementScript inputs (outputKey, outputPath) = do
+  Log.info "runVectorElementScript" (map snd inputs, outputPath)
+  let readValue' (key, path) = readValue key path
+  values <- mapM readValue' inputs
   let result = sum values
-  saveValue (Proxy @(VectorElementKey a)) outputPath result
+  saveValue outputKey outputPath result
 
 
 type instance DepKeys (VectorElementKey a) = '[MultiplyKey a]
@@ -195,11 +196,12 @@ instance
   memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
   tag _ = Just "VectorElement"
   computeAndSaveValue numCpus config key = do
-    inputPaths <- for (vectorElementInputKeys key) getPath
+    let keys = vectorElementInputKeys key
+    inputs <- zip keys <$> for keys getPath
     outputPath <- getPath key
     pure $ do
-      liftIO $ Log.info "Computing vector element" (key, inputPaths, outputPath)
-      runVectorElementScript (Proxy @a) inputPaths outputPath
+      liftIO $ Log.info "Computing vector element" (key, inputs, outputPath)
+      runVectorElementScript inputs (key, outputPath)
 
 newtype VectorStatKey = MkVectorStatKey { size :: Int }
   deriving newtype(ToJSON)
@@ -451,7 +453,7 @@ testJob getSchedulerConfig baseDir problem = do
   writeTaskStats newTaskStatsFile newTaskStats
 
   -- Check result
-  outputValue <- lift $ readValue (pure outputVectorKey) (resolvePath resolver outputVectorKey)
+  outputValue <- lift $ readValue outputVectorKey (resolvePath resolver outputVectorKey)
   Log.info "Computed output vector: " outputValue
   let expectedValue = getOutputVector problem
   unless (expectedValue == outputValue) $

@@ -162,7 +162,7 @@ class ( All Eq (DepKeys k)
     getVal <- unWrappedProcess (computeValue numCpus cfg key)
     pure $ do
       val <- getVal
-      saveValue (Proxy @k) path val
+      saveValue key path val
 
   -- | Estimated memory in bytes
   memoryEstimate     :: k -> MemorySize
@@ -194,12 +194,12 @@ class ComputeValue k where
 type family ValueType k :: Type
 
 class ValueSerializable k where
-  readValue :: Proxy k -> OsPath -> Process (ValueType k)
-  default readValue :: (Binary (ValueType k)) => Proxy k -> OsPath -> Process (ValueType k)
+  readValue :: k -> OsPath -> Process (ValueType k)
+  default readValue :: (Binary (ValueType k)) => k -> OsPath -> Process (ValueType k)
   readValue _ path = liftIO $ Binary.decodeFile (OsString.toString path)
 
-  saveValue :: Proxy k -> OsPath -> ValueType k -> Process ()
-  default saveValue :: (Binary (ValueType k)) => Proxy k -> OsPath -> ValueType k -> Process ()
+  saveValue :: k -> OsPath -> ValueType k -> Process ()
+  default saveValue :: (Binary (ValueType k)) => k -> OsPath -> ValueType k -> Process ()
   saveValue _ path value = liftIO $ encodeBinaryFileAtomic path value
 
 type FetchesKey k = Fetches k (ValueType k)
@@ -216,7 +216,7 @@ newtype WrappedProcess f a = MkWrappedProcess (Compose f Process a)
   deriving newtype (Applicative, Functor)
 
 instance (Functor f, FetchesPath k f, ValueSerializable k, v ~ ValueType k) => Fetches k v (WrappedProcess f) where
-  fetch = MkWrappedProcess . Compose . fmap (readValue (Proxy @k)) . getPath
+  fetch key = MkWrappedProcess . Compose . fmap (readValue key) $ getPath key
 
 unWrappedProcess :: WrappedProcess f a -> f (Process a)
 unWrappedProcess (MkWrappedProcess (Compose x)) = x
