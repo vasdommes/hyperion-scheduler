@@ -15,8 +15,8 @@ import Control.Monad.State.Strict          (StateT, execStateT, gets, lift,
                                             modify')
 import Data.Aeson                          (ToJSON (..))
 import Data.Binary                         (Binary)
-import Data.Map                            (Map)
-import Data.Map                            qualified as Map
+import Data.Map.Strict                     (Map)
+import Data.Map.Strict                     qualified as Map
 import Data.Maybe                          (catMaybes)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set

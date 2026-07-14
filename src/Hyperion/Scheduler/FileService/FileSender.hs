@@ -56,8 +56,8 @@ import Control.Monad.Trans                         (lift)
 import Data.Binary                                 (Binary, Word64)
 import Data.ByteString                             qualified as B
 import Data.List                                   (intercalate)
-import Data.Map                                    (Map)
-import Data.Map                                    qualified as Map
+import Data.Map.Strict                             (Map)
+import Data.Map.Strict                             qualified as Map
 import Data.Ord                                    (Down (..))
 import Data.Text                                   (Text)
 import Data.Text                                   qualified as Text

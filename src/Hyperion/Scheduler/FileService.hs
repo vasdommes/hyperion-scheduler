@@ -38,8 +38,8 @@ import Control.Exception                                   (SomeException,
 import Control.Monad                                       (guard, unless)
 import Control.Monad.IO.Class                              (liftIO)
 import Data.List                                           (partition)
-import Data.Map                                            qualified as Map
 import Data.Map.Strict                                     (Map)
+import Data.Map.Strict                                     qualified as Map
 import Data.Set                                            (Set)
 import Hyperion
 import Hyperion.Log                                        qualified as Log
