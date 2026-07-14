@@ -53,7 +53,7 @@ displayLog progressMap = do
       (Just tag, prog) <- Map.toList progressMap
       pure $ Text.concat
         [ tag
-        , "s: "
+        , ": "
         , Text.replicate (maxLength - Text.length tag) " "
         , Log.showText (progressBar prog.completed prog.total)
         ]
