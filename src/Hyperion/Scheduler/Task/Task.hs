@@ -14,17 +14,14 @@
 
 module Hyperion.Scheduler.Task.Task where
 
-import Bootstrap.Build                     (All, AllCF, FetchConfig (..),
-                                            FetchT, Fetches (..),
-                                            GetDependencies, Keys, MemoFetchT,
-                                            getDependencies, runFetchT)
-import Bootstrap.Build.FList               (FList (..), HasLength (..),
-                                            Index (..), Length (..),
-                                            Variant (..), setsFromLists,
+import Bootstrap.Build                     (All, FetchConfig (..),
+                                            Fetches (..), FetchesAll, HasKVs,
+                                            Keys, getDependenciesOf,
+                                            runFetchTAll)
+import Bootstrap.Build.FList               (FList, HasLength (..),
+                                            Length (..), Variant (..), setsFromLists,
                                             toVariants)
 import Bootstrap.Build.FList               qualified as FList
-import Bootstrap.Build.KeyVal              (HasKeyVal (..))
-import Bootstrap.Build.KeyVal              qualified as KeyVal
 import Control.Distributed.Process         (Process)
 import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
@@ -40,7 +37,6 @@ import Data.Text                           qualified as Text
 import Data.Time                           (NominalDiffTime)
 import Data.Typeable                       (typeOf)
 import GHC.Generics                        (Generic)
-import GHC.Exts                            (withDict)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
 import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
@@ -110,110 +106,33 @@ keysAreKeysWitness = go (getLength @ks)
     go (LSucc l') = case go l' of
       Dict -> Dict
 
-monoidListWitness :: forall ks . HasLength ks => Dict (AllCF Monoid [] ks)
-monoidListWitness = go (getLength @ks)
+withPathsHasKVsWitness
+  :: forall ks . HasLength ks
+  => Proxy ks
+  -> Dict (HasKVs (WithPaths ks))
+withPathsHasKVsWitness _ = go (getLength @ks)
   where
-    go :: Length ks' -> Dict (AllCF Monoid [] ks')
+    go :: Length ks' -> Dict (HasKVs (WithPaths ks'))
     go LZero = Dict
     go (LSucc l') = case go l' of
       Dict -> Dict
 
-semigroupListWitness :: forall ks . HasLength ks => Dict (AllCF Semigroup [] ks)
-semigroupListWitness = go (getLength @ks)
+fetchesAllWithPathsWitness
+  :: forall ks f . (HasLength ks, FetchesAll (WithPaths ks) f)
+  => Proxy ks
+  -> Proxy f
+  -> Dict (FetchesPaths ks f)
+fetchesAllWithPathsWitness _ _ = go (getLength @ks)
   where
-    go :: Length ks' -> Dict (AllCF Semigroup [] ks')
+    go
+      :: FetchesAll (WithPaths ks') f
+      => Length ks'
+      -> Dict (FetchesPaths ks' f)
     go LZero = Dict
     go (LSucc l') = case go l' of
       Dict -> Dict
 
 type family DepKeys k :: [Type]
-
-type family HasKeyVals ks kvs :: Constraint where
-  HasKeyVals '[] kvs = ()
-  HasKeyVals (k ': ks) kvs = (HasKeyVal k OsPath kvs, HasKeyVals ks kvs)
-
-selfHasKeyVals :: Length ks -> Dict (HasKeyVals ks (WithPaths ks))
-selfHasKeyVals LZero = Dict
-selfHasKeyVals (LSucc @ks @k l') = case selfHasKeyVals l' of
-  Dict -> case weakenHasKeyVals (Proxy @k) (Proxy @(WithPaths ks)) l' of
-    Dict -> Dict
-
-weakenHasKeyVals
-  :: forall new keys kvs . HasKeyVals keys kvs
-  => Proxy new
-  -> Proxy kvs
-  -> Length keys
-  -> Dict (HasKeyVals keys ('(new, OsPath) ': kvs))
-weakenHasKeyVals _ _ LZero = Dict
-weakenHasKeyVals newKey kvs (LSucc @rest @current l') =
-  case weakenHasKeyVals newKey kvs l' of
-    Dict ->
-      withDict
-        @(HasKeyVal current OsPath ('(new, OsPath) ': kvs))
-        @(KeyVal.KeyValElem current OsPath ('(new, OsPath) ': kvs))
-        (KeyVal.There (keyValElem @current @OsPath @kvs))
-        (Dict :: Dict (HasKeyVals (current ': rest) ('(new, OsPath) ': kvs)))
-
-getDependenciesFetchesPathsWitness
-  :: forall ks . HasLength ks
-  => Proxy ks
-  -> Dict (FetchesPaths ks (GetDependencies (WithPaths ks)))
-getDependenciesFetchesPathsWitness _ =
-  case keysAreKeysWitness @ks of
-    Dict -> case monoidListWitness @ks of
-      Dict -> case semigroupListWitness @ks of
-        Dict -> case selfHasKeyVals (getLength @ks) of
-          Dict -> toFetchesPaths (Proxy @(WithPaths ks)) (getLength @ks)
-  where
-    toFetchesPaths
-      :: forall ks' kvs . ( HasKeyVals ks' kvs
-                          , HasLength (Keys kvs)
-                          , AllCF Monoid [] (Keys kvs)
-                          , AllCF Semigroup [] (Keys kvs)
-                          )
-      => Proxy kvs
-      -> Length ks'
-      -> Dict (FetchesPaths ks' (GetDependencies kvs))
-    toFetchesPaths _ LZero = Dict
-    toFetchesPaths kvs (LSucc l') = case toFetchesPaths kvs l' of
-      Dict -> Dict
-
-fetchTFetchesPathsWitness
-  :: forall ks m . HasLength ks
-  => Proxy ks
-  -> Proxy m
-  -> Dict (FetchesPaths ks (FetchT (WithPaths ks) m))
-fetchTFetchesPathsWitness _ _ = case selfHasKeyVals (getLength @ks) of
-  Dict -> go (Proxy @(WithPaths ks)) (Proxy @m) (getLength @ks)
-  where
-    go
-      :: forall ks' kvs m' . HasKeyVals ks' kvs
-      => Proxy kvs
-      -> Proxy m'
-      -> Length ks'
-      -> Dict (FetchesPaths ks' (FetchT kvs m'))
-    go _ _ LZero = Dict
-    go kvs monad (LSucc l') = case go kvs monad l' of
-      Dict -> Dict
-
-memoFetchTFetchesPathsWitness
-  :: forall ks m . (HasLength ks, All Ord ks, Monad m)
-  => Proxy ks
-  -> Proxy m
-  -> Dict (FetchesPaths ks (MemoFetchT (WithPaths ks) m))
-memoFetchTFetchesPathsWitness _ _ = case selfHasKeyVals (getLength @ks) of
-  Dict -> go (Proxy @(WithPaths ks)) (Proxy @m) (getLength @ks)
-  where
-    go
-      :: forall ks' kvs m' . (HasKeyVals ks' kvs, All Ord ks', Monad m')
-      => Proxy kvs
-      -> Proxy m'
-      -> Length ks'
-      -> Dict (FetchesPaths ks' (MemoFetchT kvs m'))
-    go _ _ LZero = Dict
-    go kvs monad (LSucc l') = case go kvs monad l' of
-      Dict -> Dict
-
 
 class ( All Eq (DepKeys k)
       , All Ord (DepKeys k)
@@ -316,24 +235,24 @@ joinWrapped (MkWrappedProcess (Compose f)) = MkWrappedProcess (Compose (fmap joi
 getPath :: Fetches k OsPath f => k -> f OsPath
 getPath = fetch
 
-
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
 outAndDependencies cfg key =
   case keysAreKeysWitness @(OutAndDepKeys k) of
-    Dict -> case getDependenciesFetchesPathsWitness (Proxy @(OutAndDepKeys k)) of
-      Dict -> case semigroupListWitness @(OutAndDepKeys k) of
-        Dict -> case monoidListWitness @(OutAndDepKeys k) of
-          Dict -> setsFromLists $ getDependencies @(OutAndDepsWithPaths k) $ computeAndSaveValue 1 cfg key
+    Dict -> case withPathsHasKVsWitness (Proxy @(OutAndDepKeys k)) of
+      Dict -> setsFromLists $ getDependenciesOf (Proxy @(OutAndDepsWithPaths k)) fetchAction
+  where
+    fetchAction
+      :: forall f . (Applicative f, FetchesAll (OutAndDepsWithPaths k) f)
+      => f (Process ())
+    fetchAction =
+      case fetchesAllWithPathsWitness (Proxy @(OutAndDepKeys k)) (Proxy @f) of
+        Dict -> computeAndSaveValue 1 cfg key
 
--- TODO: add function FList.tail
 dependencies :: forall k . TaskKey k => TaskConfig k -> k -> Set (Variant (DepKeys k))
-dependencies cfg key = case outAndDependencies cfg key of
-  _ ::: rest -> toVariants rest
+dependencies cfg key = toVariants . FList.tail $ outAndDependencies cfg key
 
 outKeys :: forall k . TaskKey k => TaskConfig k -> k -> Set (OutKey k)
-outKeys cfg key =
-  -- TODO: add function FList.head
-  FList.elemAt Here $ outAndDependencies cfg key
+outKeys cfg key = FList.head $ outAndDependencies cfg key
 
 computeAndWrite
   :: forall r k .
@@ -345,11 +264,16 @@ computeAndWrite
   -> Task r k
   -> Process ()
 computeAndWrite Dict numCpus task =
-  case fetchTFetchesPathsWitness (Proxy @(OutAndDepKeys k)) (Proxy @Process) of
-    Dict ->
-      join $
-      runFetchT (computeAndSaveValue numCpus task.config task.key) $
-      fetchWithResolver (Proxy @(OutKey k ': DepKeys k)) task.resolver
+  join $
+  runFetchTAll fetchAction $
+  fetchWithResolver (Proxy @(OutKey k ': DepKeys k)) task.resolver
+  where
+    fetchAction
+      :: forall f . (Applicative f, FetchesAll (OutAndDepsWithPaths k) f)
+      => f (Process ())
+    fetchAction =
+      case fetchesAllWithPathsWitness (Proxy @(OutAndDepKeys k)) (Proxy @f) of
+        Dict -> computeAndSaveValue numCpus task.config task.key
 
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
