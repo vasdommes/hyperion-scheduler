@@ -3,8 +3,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Hyperion.Scheduler.Task.HasConfig where
-import Bootstrap.Build       (All)
-import Bootstrap.Build.FList (HasIndex (..), HasLength (..), Index (..),
+import Bootstrap.Build       (All, HasIndex (..), KnownLength (..), Index (..),
                               Length (..))
 import Data.Aeson            (ToJSON, Value)
 import Data.Aeson.Types      (ToJSON (..))
@@ -27,11 +26,11 @@ deriving instance All Show cs => Show (Configs cs)
 deriving instance All Eq cs => Eq (Configs cs)
 deriving instance (All Eq cs, All Ord cs) => Ord (Configs cs)
 
-instance (HasLength cs, All Binary cs) => Binary (Configs cs) where
-  put xs = case (xs, getLength @cs) of
+instance (KnownLength cs, All Binary cs) => Binary (Configs cs) where
+  put xs = case (xs, knownLength @cs) of
     (CNil, LZero)          -> pure ()
     (CCons x xs', LSucc _) -> put x >> put xs'
-  get = case getLength @cs of
+  get = case knownLength @cs of
     LZero -> pure CNil
     LSucc (_ :: Length cs') -> do
       x <- get
@@ -53,4 +52,3 @@ instance {-# OVERLAPPABLE #-} HasIndex c cs => HasConfig (Configs cs) c where
       go :: Index a as -> Configs as -> a
       go Here (CCons cfg _)        = cfg
       go (There i') (CCons _ cfgs) = go i' cfgs
-

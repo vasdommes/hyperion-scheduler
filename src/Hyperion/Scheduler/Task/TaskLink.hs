@@ -10,7 +10,7 @@
 
 module Hyperion.Scheduler.Task.TaskLink where
 
-import Bootstrap.Build.FList               (Variant (..))
+import Bootstrap.Build                     (Variant (..))
 import Control.Monad.State.Strict          (StateT, execStateT, gets, lift,
                                             modify')
 import Data.Aeson                          (ToJSON (..))

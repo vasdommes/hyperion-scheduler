@@ -15,13 +15,11 @@
 module Hyperion.Scheduler.Task.Task where
 
 import Bootstrap.Build                     (All, FetchConfig (..),
-                                            Fetches (..), FetchesAll, HasKVs,
-                                            Keys, getDependenciesOf,
-                                            runFetchTAll)
-import Bootstrap.Build.FList               (FList, HasLength (..),
-                                            Length (..), Variant (..), setsFromLists,
-                                            toVariants)
-import Bootstrap.Build.FList               qualified as FList
+                                            Fetches (..), FetchesAll, KnownKeyVals,
+                                            KnownLength (..), Keys, Length (..),
+                                            Variant (..), getDependencies,
+                                            runFetchTAll, setsFromLists,
+                                            toVariants, vAll, headF, tailF, FList)
 import Control.Distributed.Process         (Process)
 import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
@@ -50,7 +48,7 @@ import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
                                             memoryToCpuTimeApprox)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
-import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic, vAll)
+import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
 import Hyperion.Scheduler.Types            (MemorySize, NumCPUs)
 import Hyperion.Util.MonadPathExists       (MonadPathExists (..))
@@ -87,42 +85,42 @@ fetchWithResolver
   :: forall ks r m .
      ( PathResolverForAll r ks
      , MonadIO m
-     , HasLength ks
+     , KnownLength ks
      )
   => Proxy ks
   -> r
   -> FetchConfig m (WithPaths ks)
-fetchWithResolver _ resolver = go (getLength @ks)
+fetchWithResolver _ resolver = go (knownLength @ks)
   where
     go :: (PathResolverForAll r ks') => Length ks' -> FetchConfig m (WithPaths ks')
     go LZero      = FetchNil
     go (LSucc l') = pure . resolvePath resolver :&: go l'
 
-keysAreKeysWitness :: forall ks . HasLength ks => Dict (Keys (WithPaths ks) ~ ks)
-keysAreKeysWitness = go (getLength @ks)
+keysAreKeysDict :: forall ks . KnownLength ks => Dict (Keys (WithPaths ks) ~ ks)
+keysAreKeysDict = go (knownLength @ks)
   where
     go :: Length ks' -> Dict (Keys (WithPaths ks') ~ ks')
     go LZero = Dict
     go (LSucc l') = case go l' of
       Dict -> Dict
 
-withPathsHasKVsWitness
-  :: forall ks . HasLength ks
+withPathsKnownKeyValsDict
+  :: forall ks . KnownLength ks
   => Proxy ks
-  -> Dict (HasKVs (WithPaths ks))
-withPathsHasKVsWitness _ = go (getLength @ks)
+  -> Dict (KnownKeyVals (WithPaths ks))
+withPathsKnownKeyValsDict _ = go (knownLength @ks)
   where
-    go :: Length ks' -> Dict (HasKVs (WithPaths ks'))
+    go :: Length ks' -> Dict (KnownKeyVals (WithPaths ks'))
     go LZero = Dict
     go (LSucc l') = case go l' of
       Dict -> Dict
 
-fetchesAllWithPathsWitness
-  :: forall ks f . (HasLength ks, FetchesAll (WithPaths ks) f)
+fetchesAllWithPathsDict
+  :: forall ks f . (KnownLength ks, FetchesAll (WithPaths ks) f)
   => Proxy ks
   -> Proxy f
   -> Dict (FetchesPaths ks f)
-fetchesAllWithPathsWitness _ _ = go (getLength @ks)
+fetchesAllWithPathsDict _ _ = go (knownLength @ks)
   where
     go
       :: FetchesAll (WithPaths ks') f
@@ -137,7 +135,7 @@ type family DepKeys k :: [Type]
 class ( All Eq (DepKeys k)
       , All Ord (DepKeys k)
       , All ToFileStatKey (DepKeys k)
-      , HasLength (DepKeys k)
+      , KnownLength (DepKeys k)
       , Eq (OutKey k)
       , Ord (OutKey k)
       , ToFileStatKey (OutKey k)
@@ -237,22 +235,22 @@ getPath = fetch
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
 outAndDependencies cfg key =
-  case keysAreKeysWitness @(OutAndDepKeys k) of
-    Dict -> case withPathsHasKVsWitness (Proxy @(OutAndDepKeys k)) of
-      Dict -> setsFromLists $ getDependenciesOf (Proxy @(OutAndDepsWithPaths k)) fetchAction
+  case keysAreKeysDict @(OutAndDepKeys k) of
+    Dict -> case withPathsKnownKeyValsDict (Proxy @(OutAndDepKeys k)) of
+      Dict -> setsFromLists $ getDependencies (Proxy @(OutAndDepsWithPaths k)) fetchAction
   where
     fetchAction
       :: forall f . (Applicative f, FetchesAll (OutAndDepsWithPaths k) f)
       => f (Process ())
     fetchAction =
-      case fetchesAllWithPathsWitness (Proxy @(OutAndDepKeys k)) (Proxy @f) of
+      case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
         Dict -> computeAndSaveValue 1 cfg key
 
 dependencies :: forall k . TaskKey k => TaskConfig k -> k -> Set (Variant (DepKeys k))
-dependencies cfg key = toVariants . FList.tail $ outAndDependencies cfg key
+dependencies cfg key = toVariants . tailF $ outAndDependencies cfg key
 
 outKeys :: forall k . TaskKey k => TaskConfig k -> k -> Set (OutKey k)
-outKeys cfg key = FList.head $ outAndDependencies cfg key
+outKeys cfg key = headF $ outAndDependencies cfg key
 
 computeAndWrite
   :: forall r k .
@@ -272,7 +270,7 @@ computeAndWrite Dict numCpus task =
       :: forall f . (Applicative f, FetchesAll (OutAndDepsWithPaths k) f)
       => f (Process ())
     fetchAction =
-      case fetchesAllWithPathsWitness (Proxy @(OutAndDepKeys k)) (Proxy @f) of
+      case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
         Dict -> computeAndSaveValue numCpus task.config task.key
 
 class ToTaskKeyFileInfo r k => FileInfo r k
