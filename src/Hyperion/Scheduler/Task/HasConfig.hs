@@ -3,12 +3,12 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Hyperion.Scheduler.Task.HasConfig where
-import Bootstrap.Build       (All, HasIndex (..), KnownLength (..), Index (..),
-                              Length (..))
-import Data.Aeson            (ToJSON, Value)
-import Data.Aeson.Types      (ToJSON (..))
-import Data.Binary           (Binary (..))
-import Data.Kind             (Type)
+import Bootstrap.Build  (All, HasIndex (..), Index (..), KnownLength (..),
+                         Length (..))
+import Data.Aeson       (ToJSON, Value)
+import Data.Aeson.Types (ToJSON (..))
+import Data.Binary      (Binary (..))
+import Data.Kind        (Type)
 
 class HasConfig a b where
   toConfig :: a -> b

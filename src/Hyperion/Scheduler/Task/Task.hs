@@ -7,19 +7,20 @@
 {-# LANGUAGE NoFieldSelectors        #-}
 {-# LANGUAGE OverloadedRecordDot     #-}
 {-# LANGUAGE StaticPointers          #-}
-{-# LANGUAGE TypeFamilies            #-}
 {-# LANGUAGE TypeAbstractions        #-}
+{-# LANGUAGE TypeFamilies            #-}
 {-# LANGUAGE UndecidableInstances    #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
 module Hyperion.Scheduler.Task.Task where
 
-import Bootstrap.Build                     (All, FetchConfig (..),
-                                            Fetches (..), FetchesAll, KnownKeyVals,
-                                            KnownLength (..), Keys, Length (..),
-                                            Variant (..), getDependencies,
-                                            runFetchTAll, setsFromLists,
-                                            toVariants, vAll, headF, tailF, FList)
+import Bootstrap.Build                     (All, FList, FetchConfig (..),
+                                            Fetches (..), FetchesAll, Keys,
+                                            KnownKeyVals, KnownLength (..),
+                                            Length (..), Variant (..),
+                                            getDependencies, headF,
+                                            runFetchTAll, setsFromLists, tailF,
+                                            toVariants, vAll)
 import Control.Distributed.Process         (Process)
 import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
