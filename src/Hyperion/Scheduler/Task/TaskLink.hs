@@ -1,20 +1,25 @@
 {-# LANGUAGE DataKinds             #-}
-{-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE StaticPointers        #-}
 {-# LANGUAGE UndecidableInstances  #-}
 
 module Hyperion.Scheduler.Task.TaskLink where
 
 import Bootstrap.Build                     (Variant (..))
+import Control.Exception                   (Exception)
+import Control.Monad                       (foldM, foldM_)
+import Control.Monad.Catch                 (MonadThrow, throwM)
 import Control.Monad.State.Strict          (StateT, execStateT, gets, lift,
                                             modify')
 import Data.Aeson                          (ToJSON (..))
 import Data.Binary                         (Binary)
+import Data.Graph                          (SCC (..), stronglyConnComp)
+import Data.List.NonEmpty                  qualified as NonEmpty
 import Data.Map.Strict                     (Map)
 import Data.Map.Strict                     qualified as Map
 import Data.Maybe                          (catMaybes)
@@ -24,8 +29,10 @@ import Data.Tree                           (Tree)
 import Data.Tree                           qualified as Tree
 import Data.Typeable                       (Typeable)
 import Data.Void                           (Void)
+import Hyperion.OsString                   (OsString, showOs)
 import Hyperion.Scheduler.StatKey          (ToStatKey (..))
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..))
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), taskInputPaths,
+                                            taskOutputPaths)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, wrapTask)
 
 data TaskLink m k d t = MkTaskLink
@@ -162,3 +169,56 @@ toTaskEdges chain initialKey = execStateT (go chain initialKey) Map.empty
 
 mkTaskMap :: (Monad m, HasTaskChain m r c k) => r -> c -> k -> m (Map WrappedTask (Set WrappedTask))
 mkTaskMap resolver cfg = toTaskEdges (taskChain resolver cfg)
+
+newtype InvalidTaskMap = InvalidTaskMap OsString
+  deriving (Show)
+
+instance Exception InvalidTaskMap
+
+-- | Check that task map is valid:
+-- - All tasks are in map keys
+-- - No circular dependencies
+-- - No duplicate output paths.
+-- - Each input path can be found in output paths of dependencies
+validateTaskMap :: (IsTask a, MonadThrow m) => Map a (Set a) -> m ()
+validateTaskMap taskMap = do
+  assertAllTasksAreInKeys
+  assertNoCycles
+  assertNoDuplicatePaths
+  assertCorrectDependencyPaths
+  where
+    assert cond msg = case cond of
+      True  -> pure ()
+      False -> throwM $ InvalidTaskMap msg
+
+    taskLabel t = (taskTag t, taskOutputPaths t)
+
+    assertAllTasksAreInKeys = do
+      let
+        keys = Map.keysSet taskMap
+        depKeys = Set.unions $ Map.elems taskMap
+        missingKeys = Set.toList $ Set.difference depKeys keys
+      assert (null missingKeys) $
+        "Tasks are missing from TaskMap keys: " <>
+        showOs (map taskLabel missingKeys)
+
+    assertNoCycles = assert (null cycles) $ "TaskMap contains cycles: " <> showOs (map showCycle cycles) where
+      edges = [(k, k, Set.toList ks) | (k, ks) <- Map.toList taskMap]
+      cycles = [c | NECyclicSCC c <- stronglyConnComp edges]
+      showCycle = map taskLabel . NonEmpty.toList
+
+    assertNoDuplicatePaths = foldM_ go Set.empty (Map.keys taskMap) where
+      go existingPaths task = foldM go' existingPaths (taskOutputPaths task)
+      go' existingPaths path = do
+        assert (Set.notMember path existingPaths) $
+          "Duplicate path: " <> showOs path
+        pure $ Set.insert path existingPaths
+
+    assertCorrectDependencyPaths = mapM_ go (Map.toList taskMap) where
+      go (t, deps) = do
+        let
+          depsOutputs = Set.unions $ Set.map taskOutputPaths deps
+          missingInputs = Set.toList $ Set.difference (taskInputPaths t) depsOutputs
+        assert (null missingInputs) $ "Task input paths are not found in dependencies!" <>
+          " Missing paths: " <> showOs missingInputs <>
+          " task: " <> showOs (taskLabel t)

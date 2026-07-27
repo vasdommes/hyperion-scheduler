@@ -80,10 +80,11 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
                                                      runWithRetry)
 import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats                     (TaskRecord (..))
-import Hyperion.Scheduler.Task.IsTask               (IsTask (..), RunStage (..),
+import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
                                                      taskInputPaths,
                                                      taskMemoryCapped,
-                                                     taskOutputPaths)
+                                                     taskOutputPaths,
+                                                     validateTaskMap)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
 import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
@@ -535,6 +536,9 @@ runTasks config taskMap = do
   let
     taskGraph = TaskGraph.fromEdges taskMap
     cleanupDependencies = buildCleanupDependenciesMap config taskMap
+  _ <- case validateTaskMap taskMap of
+    Left err -> Log.throw err
+    Right _  -> pure ()
   nodes <- getJobNodes config
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let
