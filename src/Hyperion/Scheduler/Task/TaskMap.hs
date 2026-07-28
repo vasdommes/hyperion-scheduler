@@ -81,3 +81,26 @@ validateTaskMap taskMap = do
         assert (null missingInputs) $ "Task input paths are not found in dependencies!" <>
           " Missing paths: " <> showOs missingInputs <>
           " task: " <> showOs (taskLabel t)
+
+-- | Replace each dummy task with a subtree (actual task + its dependencies), as specified by replacementMap.
+replaceTasks :: IsTask a => Map a (TaskMap a) -> TaskMap a -> TaskMap a
+replaceTasks replacementMap = addNewKeys . replaceDeps . removeOldKeys where
+  -- removeOldKeys :: TaskMap a -> TaskMap a
+  removeOldKeys taskMap = Map.withoutKeys taskMap tasksToReplace
+
+  -- replaceDeps :: TaskMap a -> TaskMap a
+  replaceDeps = Map.map updateDepsSet
+
+  -- addNewKeys :: TaskMap a -> TaskMap a
+  addNewKeys oldMap = Map.unionsWith (<>) (oldMap : Map.elems replacementMap)
+
+  -- tasksToReplace :: Set a
+  tasksToReplace = Map.keysSet replacementMap
+
+  -- updateDepsSet :: Set a -> Set a
+  updateDepsSet deps = Set.union toAdd $ Set.difference deps toRemove where
+    toRemove = Set.intersection deps tasksToReplace
+    toAdd = Set.unions $ Map.elems $ Map.restrictKeys taskReplacements toRemove
+
+  -- taskReplacements :: Map a (Set a)
+  taskReplacements = Map.map Map.keysSet replacementMap
