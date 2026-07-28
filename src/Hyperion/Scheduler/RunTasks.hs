@@ -81,7 +81,7 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
 import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats                     (TaskRecord (..))
 import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
-                                                     taskInputPaths,
+                                                     TaskMap, taskInputPaths,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
                                                      validateTaskMap)
@@ -530,7 +530,7 @@ type TaskRecords a = [TaskRecord a]
 runTasks
   :: IsTask a
   => Config
-  -> Map a (Set a)
+  -> TaskMap a
   -> Job (TaskRecords a)
 runTasks config taskMap = do
   let
@@ -665,7 +665,7 @@ type CleanupQueue = ConcurrentQueue (Maybe VirtualFilePath)
 buildCleanupDependenciesMap
   :: IsTask a
   => Config
-  -> Map a (Set a)
+  -> TaskMap a
   -> CleanupDependenciesMap
 buildCleanupDependenciesMap config taskMap = cleanupMap where
   tasks = Map.keys taskMap

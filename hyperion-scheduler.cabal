@@ -41,6 +41,7 @@ library
       Hyperion.Scheduler.Task.IsTask
       Hyperion.Scheduler.Task.Task
       Hyperion.Scheduler.Task.TaskLink
+      Hyperion.Scheduler.Task.TaskMap
       Hyperion.Scheduler.Task.Util
       Hyperion.Scheduler.Task.WrappedTask
       Hyperion.Scheduler.TaskGraph
