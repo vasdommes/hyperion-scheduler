@@ -57,6 +57,8 @@ class ToFileStatKey a where
   toFileSize    :: a -> FileSize
   toFileSize _ = 0
 
+-- TODO () means no files, is it correct to have FileStatKey for it?
+instance ToFileStatKey ()
 
 mkFileStatKeyViaJSON :: (ToJSON a, Typeable a) => a -> FileStatKey
 mkFileStatKeyViaJSON = MkFileStatKey . keyToJSONWithType
