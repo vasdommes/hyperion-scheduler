@@ -29,6 +29,13 @@ type TaskMap a = Map a (Set a)
 mkTaskMap :: (Monad m, HasTaskChain m r c k) => r -> c -> k -> m (TaskMap WrappedTask)
 mkTaskMap resolver cfg = toTaskEdges (taskChain resolver cfg)
 
+-- Update all tasks (keys and values) in a TaskMap
+updateTaskMap :: Ord b => (a -> b) -> TaskMap a -> TaskMap b
+updateTaskMap updateTask = updateKeys . updateValues where
+  updateKeys = Map.mapKeys updateTask
+  updateValues = Map.map $ Set.map updateTask
+
+
 newtype InvalidTaskMap = InvalidTaskMap OsString
   deriving (Show)
 

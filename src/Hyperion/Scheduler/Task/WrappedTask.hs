@@ -8,11 +8,7 @@
 {-# LANGUAGE StaticPointers            #-}
 {-# LANGUAGE TypeFamilies              #-}
 
-module Hyperion.Scheduler.Task.WrappedTask
-  ( WrappedTask
-  , wrapTask
-  , wrapTaskWithStats
-  ) where
+module Hyperion.Scheduler.Task.WrappedTask where
 
 import Data.Aeson                     (ToJSON (..))
 import Data.Binary                    (Binary (..))
@@ -96,14 +92,9 @@ wrapTask t = MkWrappedTask
   , runtimeEstimate = taskRuntimeEstimate t
   }
 
--- | Create a task whose memory and runtime are estimted with the
--- given 'TaskResourceMap's.
-wrapTaskWithStats
-  :: (IsTask a, ToStatKey a, Binary a)
-  => TaskAndFileStats
-  -> a
-  -> WrappedTask
-wrapTaskWithStats stats task = (wrapTask task)
+-- | Update memory, runtime and file size estimates using statistics from TaskAndFileStats.
+decorateTaskWithStats :: TaskAndFileStats -> WrappedTask -> WrappedTask
+decorateTaskWithStats stats task = task
   { memoryEstimate = memory
   , runtimeEstimate = runtime
   , inputs = inputs
@@ -118,3 +109,13 @@ wrapTaskWithStats stats task = (wrapTask task)
       fileSize = fromMaybe fileInfo.fileSize $ lookupMaxFileSize (fileInfo.fileStatKey) stats
     inputs = Set.map updateFileSize $ taskInputs task
     outputs = Set.map updateFileSize $ taskOutputs task
+
+-- | Create a task whose memory and runtime are estimted with the
+-- given 'TaskResourceMap's.
+-- TODO: if a ~ WrappedTask, should we wrap it again or do nothing?
+wrapTaskWithStats
+  :: (IsTask a, ToStatKey a, Binary a)
+  => TaskAndFileStats
+  -> a
+  -> WrappedTask
+wrapTaskWithStats stats = decorateTaskWithStats stats . wrapTask
