@@ -163,13 +163,13 @@ class ( All Eq (DepKeys k)
        , FetchesPaths (OutKey k ': DepKeys k) f
        )
     => NumCPUs -> TaskConfig k -> k -> f (Process ())
-  default computeAndSaveValue :: (Applicative f, ComputeValue k, ValueSerializable k, FetchesPaths (OutKey k ': DepKeys k) f, OutKey k ~ k) => NumCPUs -> TaskConfig k -> k -> f (Process ())
+  default computeAndSaveValue :: (Applicative f, ComputeValue k, ValueSerializableM Process k, FetchesPaths (OutKey k ': DepKeys k) f, OutKey k ~ k) => NumCPUs -> TaskConfig k -> k -> f (Process ())
   computeAndSaveValue numCpus cfg key = do
     path <- getPath key
     getVal <- unWrappedProcess (computeValue numCpus cfg key)
     pure $ do
       val <- getVal
-      saveValue key path val
+      saveValueM key path val
 
   -- | Estimated memory in bytes
   memoryEstimate     :: k -> MemorySize
@@ -201,13 +201,21 @@ class ComputeValue k where
 type family ValueType k :: Type
 
 class ValueSerializable k where
-  readValue :: k -> OsPath -> Process (ValueType k)
-  default readValue :: (Binary (ValueType k)) => k -> OsPath -> Process (ValueType k)
-  readValue _ path = liftIO $ Binary.decodeFile (OsString.toString path)
+  readValue :: k -> OsPath -> IO (ValueType k)
+  default readValue :: Binary (ValueType k) => k -> OsPath -> IO (ValueType k)
+  readValue _ path = Binary.decodeFile (OsString.toString path)
 
-  saveValue :: k -> OsPath -> ValueType k -> Process ()
-  default saveValue :: (Binary (ValueType k)) => k -> OsPath -> ValueType k -> Process ()
-  saveValue _ path value = liftIO $ encodeBinaryFileAtomic path value
+  saveValue :: k -> OsPath -> ValueType k -> IO ()
+  default saveValue :: Binary (ValueType k) => k -> OsPath -> ValueType k -> IO ()
+  saveValue _ path value = encodeBinaryFileAtomic path value
+
+class ValueSerializableM m k where
+  readValueM :: k -> OsPath -> m (ValueType k)
+  saveValueM :: k -> OsPath -> ValueType k -> m ()
+
+instance (MonadIO m, ValueSerializable k) => ValueSerializableM m k where
+  readValueM key = liftIO . readValue key
+  saveValueM key path = liftIO . saveValue key path
 
 type FetchesKey k = Fetches k (ValueType k)
 
@@ -222,8 +230,8 @@ type family FetchesKeys ks m :: Constraint where
 newtype WrappedProcess f a = MkWrappedProcess (Compose f Process a)
   deriving newtype (Applicative, Functor)
 
-instance (Functor f, FetchesPath k f, ValueSerializable k, v ~ ValueType k) => Fetches k v (WrappedProcess f) where
-  fetch key = MkWrappedProcess . Compose . fmap (readValue key) $ getPath key
+instance (Functor f, FetchesPath k f, ValueSerializableM Process k, v ~ ValueType k) => Fetches k v (WrappedProcess f) where
+  fetch key = MkWrappedProcess . Compose . fmap (readValueM key) $ getPath key
 
 unWrappedProcess :: WrappedProcess f a -> f (Process a)
 unWrappedProcess (MkWrappedProcess (Compose x)) = x

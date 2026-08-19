@@ -54,7 +54,8 @@ import Hyperion.Scheduler             qualified as Scheduler
 import Hyperion.Scheduler.Config      qualified as Scheduler
 import Hyperion.Scheduler.Task        (ComputeValue (..), DepKeys, FetchesKey,
                                        TaskKey (..), ValueSerializable (..),
-                                       ValueType, getPath, mkTaskMap)
+                                       ValueSerializableM (..), ValueType,
+                                       getPath, mkTaskMap)
 import Hyperion.Scheduler.Test.Config qualified as TestConfig
 import Hyperion.Slurm                 (SbatchOptions, sBatchOptionsParser)
 import Hyperion.Util                  (minute)
@@ -179,10 +180,10 @@ vectorElementInputKeys key = map mkKey ks where
 runVectorElementScript :: [(MultiplyKey a, OsPath)] -> (VectorElementKey a, OsPath) -> Process ()
 runVectorElementScript inputs (outputKey, outputPath) = do
   Log.info "runVectorElementScript" (map snd inputs, outputPath)
-  let readValue' (key, path) = readValue key path
+  let readValue' (key, path) = readValueM key path
   values <- mapM readValue' inputs
   let result = sum values
-  saveValue outputKey outputPath result
+  saveValueM outputKey outputPath result
 
 
 type instance DepKeys (VectorElementKey a) = '[MultiplyKey a]
@@ -453,7 +454,7 @@ testJob getSchedulerConfig baseDir problem = do
   writeTaskStats newTaskStatsFile newTaskStats
 
   -- Check result
-  outputValue <- lift $ readValue outputVectorKey (resolvePath resolver outputVectorKey)
+  outputValue <- readValueM outputVectorKey (resolvePath resolver outputVectorKey)
   Log.info "Computed output vector: " outputValue
   let expectedValue = getOutputVector problem
   unless (expectedValue == outputValue) $
