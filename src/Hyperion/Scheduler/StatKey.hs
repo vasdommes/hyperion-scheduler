@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
@@ -13,6 +14,7 @@ import Data.Aeson                      (FromJSON, FromJSONKey, ToJSON (..),
                                         ToJSONKey, (.=))
 import Data.Aeson                      qualified as Aeson
 import Data.Typeable                   (Typeable, typeOf)
+import Data.Void                       (Void)
 import GHC.Generics                    (Generic)
 import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
 import Hyperion.Scheduler.PathResolver (PathResolver (..))
@@ -57,8 +59,10 @@ class ToFileStatKey a where
   toFileSize    :: a -> FileSize
   toFileSize _ = 0
 
--- TODO () means no files, is it correct to have FileStatKey for it?
-instance ToFileStatKey ()
+
+-- OutKey k = Void means no files.
+instance ToFileStatKey Void where
+  toFileStatKey = \case {}
 
 mkFileStatKeyViaJSON :: (ToJSON a, Typeable a) => a -> FileStatKey
 mkFileStatKeyViaJSON = MkFileStatKey . keyToJSONWithType

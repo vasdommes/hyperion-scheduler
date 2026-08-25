@@ -4,6 +4,7 @@
 {-# LANGUAGE DeriveAnyClass          #-}
 {-# LANGUAGE DerivingVia             #-}
 {-# LANGUAGE DuplicateRecordFields   #-}
+{-# LANGUAGE LambdaCase              #-}
 {-# LANGUAGE NoFieldSelectors        #-}
 {-# LANGUAGE OverloadedRecordDot     #-}
 {-# LANGUAGE StaticPointers          #-}
@@ -28,6 +29,7 @@ import Data.Aeson                          (ToJSON (..))
 import Data.Binary                         (Binary (..))
 import Data.Binary                         qualified as Binary
 import Data.Data                           (Proxy (..))
+import Data.Foldable.Extra                 (allM, traverse_)
 import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
 import Data.Set                            (Set)
@@ -35,13 +37,14 @@ import Data.Set                            qualified as Set
 import Data.Text                           qualified as Text
 import Data.Time                           (NominalDiffTime)
 import Data.Typeable                       (typeOf)
+import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
 import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
 import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
-import Hyperion.Scheduler.StatKey          (ToFileStatKey, ToStatKey (..),
+import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
                                             ToTaskKeyFileInfo, mkStatKeyViaJSON,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
@@ -189,6 +192,11 @@ class ( All Eq (DepKeys k)
   priority :: k -> Int
   priority = const 0
 
+  checkCreated :: (PathResolver r (OutKey k), MonadPathExists m) => TaskConfig k -> r -> k -> m Bool
+  checkCreated cfg resolver key =
+    allM (doesPathExist . resolvePath resolver) $ outKeys cfg key
+
+
 class ComputeValue k where
   {-# MINIMAL computeValue | computeValueM #-}
 
@@ -207,7 +215,7 @@ class ValueSerializable k where
 
   saveValue :: k -> OsPath -> ValueType k -> IO ()
   default saveValue :: Binary (ValueType k) => k -> OsPath -> ValueType k -> IO ()
-  saveValue _ path value = encodeBinaryFileAtomic path value
+  saveValue _ = encodeBinaryFileAtomic
 
 class ValueSerializableM m k where
   readValueM :: k -> OsPath -> m (ValueType k)
@@ -218,10 +226,6 @@ instance (MonadIO m, ValueSerializable k) => ValueSerializableM m k where
   saveValueM key path = liftIO . saveValue key path
 
 type FetchesKey k = Fetches k (ValueType k)
-
--- type family ToKeyVals ks where
---   ToKeyVals '[] = '[]
---   ToKeyVals (k ': ks) = '(k, ValueType k) ': ToKeyVals ks
 
 type family FetchesKeys ks m :: Constraint where
   FetchesKeys '[] m = ()
@@ -325,13 +329,13 @@ instance {-# OVERLAPPABLE #-} ToStatKey k => ToStatKey (Task r k) where
   toStatKey t = toStatKey t.key
 
 taskLink
-  :: forall r c k m. (MonadPathExists m, HasConfig c (TaskConfig k), TaskKey k, PathResolver r k)
+  :: forall r c k m. (MonadPathExists m, HasConfig c (TaskConfig k), TaskKey k, PathResolver r (OutKey k))
   => r
   -> c
   -> TaskLink m k (Variant (DepKeys k)) (Task r k)
 taskLink resolver cfg' = MkTaskLink
   { dependencies = dependencies @k cfg
-  , checkCreated = doesPathExist . resolvePath resolver
+  , checkCreated = checkCreated cfg resolver
   , toTask = MkTask resolver cfg
   }
   where
@@ -342,7 +346,7 @@ instance {-# OVERLAPPABLE #-}
   , HasTaskChain m r c (Variant (DepKeys k))
   , MonadPathExists m
   , HasConfig c (TaskConfig k)
-  , Static (PathResolver r k)
+  , Static (PathResolver r (OutKey k))
   , Static (PathResolverForAll r (DepKeys k))
   , All (FileInfo r) (DepKeys k)
   , Static (Binary r)
@@ -350,3 +354,27 @@ instance {-# OVERLAPPABLE #-}
   , IsTask (Task r k)
   ) => HasTaskChain m r c k where
   taskChain resolver cfg = TaskNode (wrapTask <$> taskLink resolver cfg) (taskChain resolver cfg)
+
+
+newtype ListTaskKey k = MkListTaskKey [k]
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (Binary, ToJSON)
+
+type instance DepKeys (ListTaskKey k) = '[k]
+instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
+  type OutKey (ListTaskKey k) = Void
+
+  -- TODO: this will still create a taskClosure and execute it remotely.
+  -- It created extra overhead comapred to TaskLink.ListTask
+  computeAndSaveValue _ _ (MkListTaskKey keys) = do
+    traverse_ getPath keys
+    pure $ pure ()
+
+  checkCreated _ _ _ = pure False
+
+instance (Typeable k , Static(Binary k)) => Static (Binary (ListTaskKey k)) where
+  closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary k)
+instance (Static(Ord k), Static(TaskKey k), Static(ToFileStatKey k)) => Static (TaskKey (ListTaskKey k)) where
+  closureDict = static (\Dict -> Dict) `cAp` closureDict @(Ord k, TaskKey k, ToFileStatKey k)
+instance (Typeable k , Static(Ord k)) => Static (Ord (ListTaskKey k)) where
+  closureDict = static (\Dict -> Dict) `cAp` closureDict @(Ord k)
