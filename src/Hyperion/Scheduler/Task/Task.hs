@@ -45,7 +45,7 @@ import Hyperion.Scheduler.StatKey          (ToFileStatKey, ToStatKey (..),
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
-                                            memoryToCpuTimeApprox)
+                                            defaultRuntimeEstimate)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
@@ -175,7 +175,7 @@ class ( All Eq (DepKeys k)
   memoryEstimate = const 0
   -- | Estimated runtime in seconds, as a function of NumCPUs
   runtimeEstimate    :: k -> NumCPUs -> NominalDiffTime
-  runtimeEstimate t numCpus = memoryToCpuTimeApprox (memoryEstimate t) / fromIntegral numCpus
+  runtimeEstimate t = defaultRuntimeEstimate (memoryEstimate t)
   -- | Maximum possible threads for the task
   -- TODO: get rid of RunStage?
   maxThreads :: RunStage -> k -> NumCPUs

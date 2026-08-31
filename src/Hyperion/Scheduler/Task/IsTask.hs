@@ -38,7 +38,7 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskMemoryEstimate = const 0
   -- | Estimated runtime in seconds, as a function of NumCPUs
   taskRuntimeEstimate    :: a -> NumCPUs -> NominalDiffTime
-  taskRuntimeEstimate t numCpus = memoryToCpuTimeApprox (taskMemoryEstimate t) / fromIntegral numCpus
+  taskRuntimeEstimate t = defaultRuntimeEstimate (taskMemoryEstimate t)
   -- | Maximum possible threads for the task
   -- TODO: get rid of RunStage?
   taskMaxThreads :: RunStage -> a -> NumCPUs
@@ -72,6 +72,13 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 -- The constant 1.7e-6 originally came from our blocks_3d tests on Expanse.
 memoryToCpuTimeApprox :: MemorySize -> NominalDiffTime
 memoryToCpuTimeApprox mem = 1.7e-6 * fromIntegral mem
+
+-- | Estimate runtime from memory when no task-specific estimate is available.
+-- Zero CPUs is valid for scheduler-only tasks which do not perform computation.
+defaultRuntimeEstimate :: MemorySize -> NumCPUs -> NominalDiffTime
+defaultRuntimeEstimate _   0       = 0
+defaultRuntimeEstimate _   numCpus | numCpus < 0 = error "defaultRuntimeEstimate: negative CPU count"
+defaultRuntimeEstimate mem numCpus = memoryToCpuTimeApprox mem / fromIntegral numCpus
 
 -- Returns min(maxMemory, taskMemory t)
 taskMemoryCapped :: IsTask a => MemorySize -> a -> MemorySize
