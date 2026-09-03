@@ -52,10 +52,10 @@ emptyTaskChain = TaskNode emptyTaskLink TaskNil
 class HasTaskChain m r c k where
   taskChain :: r -> c -> TaskChain m k WrappedTask
 
-instance {-# OVERLAPPING #-} Applicative m => HasTaskChain m r c (Variant '[]) where
+instance Applicative m => HasTaskChain m r c (Variant '[]) where
   taskChain _ _ = emptyTaskChain
 
-instance {-# OVERLAPPING #-} (HasTaskChain m r c k, HasTaskChain m r c (Variant ks)) => HasTaskChain m r c (Variant (k ': ks)) where
+instance (HasTaskChain m r c k, HasTaskChain m r c (Variant ks)) => HasTaskChain m r c (Variant (k ': ks)) where
   taskChain resolver cfg = TaskMerge (taskChain resolver cfg) (taskChain resolver cfg)
 
 newtype ListTask k = MkListTask { keys :: [k] }
