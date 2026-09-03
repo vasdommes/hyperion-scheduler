@@ -48,7 +48,9 @@ import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
                                             defaultRuntimeEstimate)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
-import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
+import Data.Store                          (Store)
+import Hyperion.Scheduler.Task.Util        (decodeStoreFile,
+                                            encodeStoreFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
 import Hyperion.Scheduler.Types            (MemorySize, NumCPUs)
 import Hyperion.Util.MonadPathExists       (MonadPathExists (..))
@@ -201,12 +203,12 @@ type family ValueType k :: Type
 
 class ValueSerializable k where
   readValue :: k -> OsPath -> Process (ValueType k)
-  default readValue :: (Binary (ValueType k)) => k -> OsPath -> Process (ValueType k)
-  readValue _ path = liftIO $ Binary.decodeFile (OsString.toString path)
+  default readValue :: (Store (ValueType k)) => k -> OsPath -> Process (ValueType k)
+  readValue _ path = liftIO $ decodeStoreFile path
 
   saveValue :: k -> OsPath -> ValueType k -> Process ()
-  default saveValue :: (Binary (ValueType k)) => k -> OsPath -> ValueType k -> Process ()
-  saveValue _ path value = liftIO $ encodeBinaryFileAtomic path value
+  default saveValue :: (Store (ValueType k)) => k -> OsPath -> ValueType k -> Process ()
+  saveValue _ path value = liftIO $ encodeStoreFileAtomic path value
 
 type FetchesKey k = Fetches k (ValueType k)
 
