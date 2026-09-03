@@ -82,6 +82,7 @@ library
     , pqueue
     , rusage
     , stm
+    , store
     , strict-concurrency
     , text
     , time

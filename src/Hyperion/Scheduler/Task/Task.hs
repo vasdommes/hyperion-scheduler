@@ -29,7 +29,6 @@ import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
 import Data.Aeson                          (ToJSON (..))
 import Data.Binary                         (Binary (..))
-import Data.Binary                         qualified as Binary
 import Data.Data                           (Proxy (..))
 import Data.Foldable.Extra                 (allM, traverse_)
 import Data.Functor                        (($>))
@@ -55,7 +54,9 @@ import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
                                             defaultRuntimeEstimate)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
-import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
+import Data.Store                          (Store)
+import Hyperion.Scheduler.Task.Util        (decodeStoreFile,
+                                            encodeStoreFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
 import Hyperion.Scheduler.Types            (MemorySize, NumCPUs)
 import Hyperion.Util.MonadPathExists       (MonadPathExists (..))
@@ -255,12 +256,12 @@ type family ValueType k :: Type
 
 class ValueSerializable k where
   readValue :: k -> OsPath -> IO (ValueType k)
-  default readValue :: Binary (ValueType k) => k -> OsPath -> IO (ValueType k)
-  readValue _ path = Binary.decodeFile (OsString.toString path)
+  default readValue :: Store (ValueType k) => k -> OsPath -> IO (ValueType k)
+  readValue _ = decodeStoreFile
 
   saveValue :: k -> OsPath -> ValueType k -> IO ()
-  default saveValue :: Binary (ValueType k) => k -> OsPath -> ValueType k -> IO ()
-  saveValue _ = encodeBinaryFileAtomic
+  default saveValue :: Store (ValueType k) => k -> OsPath -> ValueType k -> IO ()
+  saveValue _ = encodeStoreFileAtomic
 
 class ValueSerializableM m k where
   readValueM :: k -> OsPath -> m (ValueType k)
