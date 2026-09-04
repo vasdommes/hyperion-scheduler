@@ -16,12 +16,13 @@
 module Hyperion.Scheduler.Task.Task where
 
 import Bootstrap.Build                     (All, FList, FetchConfig (..),
-                                            Fetches (..), FetchesAll, Keys,
-                                            KnownKeyVals, KnownLength (..),
-                                            Length (..), Variant (..),
-                                            getDependencies, headF,
-                                            runFetchTAll, setsFromLists, tailF,
-                                            toVariants, vAll)
+                                            Fetches (..), FetchesAll,
+                                            HasForce (..), Keys, KnownKeyVals,
+                                            KnownLength (..), Length (..),
+                                            Variant (..), getDependencies,
+                                            headF, runFetchTAll, setsFromLists,
+                                            tailF, toVariants, vAll)
+import Control.DeepSeq                     (deepseq)
 import Control.Distributed.Process         (Process)
 import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
@@ -233,6 +234,13 @@ type family FetchesKeys ks m :: Constraint where
 
 newtype WrappedProcess f a = MkWrappedProcess (Compose f Process a)
   deriving newtype (Applicative, Functor)
+
+instance Applicative f => HasForce (WrappedProcess f) where
+  forceM (MkWrappedProcess (Compose go)) = MkWrappedProcess $ Compose $ do
+    getVal <- go
+    pure $ do
+      x <- getVal
+      x `deepseq` pure x
 
 instance (Functor f, FetchesPath k f, ValueSerializableM Process k, v ~ ValueType k) => Fetches k v (WrappedProcess f) where
   fetch key = MkWrappedProcess . Compose . fmap (readValueM key) $ getPath key
