@@ -19,10 +19,11 @@ import Data.Map.Strict                     qualified as Map
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Hyperion.OsString                   (OsString, showOs)
+import Hyperion.Scheduler.Stats            (TaskAndFileStats)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), taskInputPaths,
                                             taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
-import Hyperion.Scheduler.Task.WrappedTask (WrappedTask)
+import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
 
 type TaskMap a = Map a (Set a)
 
@@ -35,6 +36,8 @@ updateTaskMap updateTask = updateKeys . updateValues where
   updateKeys = Map.mapKeys updateTask
   updateValues = Map.map $ Set.map updateTask
 
+decorateTaskMapWithStats :: TaskAndFileStats -> TaskMap WrappedTask -> TaskMap WrappedTask
+decorateTaskMapWithStats = updateTaskMap . decorateTaskWithStats
 
 newtype InvalidTaskMap = InvalidTaskMap OsString
   deriving (Show)
