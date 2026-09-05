@@ -90,7 +90,8 @@ validateTaskMap taskMap = do
           missingInputs = Set.toList $ Set.difference (taskInputPaths t) depsOutputs
         assert (null missingInputs) $ "Task input paths are not found in dependencies!" <>
           " Missing paths: " <> showOs missingInputs <>
-          " task: " <> showOs (taskLabel t)
+          " task: " <> showOs (taskLabel t) <>
+          " dependencies: " <> showOs (map taskLabel $ Set.toList deps)
 
 -- | Replace each dummy task with a subtree (actual task + its dependencies), as specified by replacementMap.
 replaceTasks :: IsTask a => Map a (TaskMap a) -> TaskMap a -> TaskMap a
