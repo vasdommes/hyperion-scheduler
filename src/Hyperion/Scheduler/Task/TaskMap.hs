@@ -48,7 +48,9 @@ instance Exception InvalidTaskMap
 -- - All tasks are in map keys
 -- - No circular dependencies
 -- - No duplicate output paths.
--- - Each input path can be found in output paths of dependencies
+-- - Each input path produced by some task in the map can be found in output
+--   paths of dependencies (input paths produced by no task in the map are
+--   assumed to already exist on disk -- see 'assertCorrectDependencyPaths')
 validateTaskMap :: (IsTask a, MonadThrow m) => TaskMap a -> m ()
 validateTaskMap taskMap = do
   assertAllTasksAreInKeys
@@ -83,12 +85,24 @@ validateTaskMap taskMap = do
           "Duplicate path: " <> showOs path
         pure $ Set.insert path existingPaths
 
+    -- Each input path for a task either:
+    -- 1. Is produced by some task in the TaskMap
+    -- or
+    -- 2. Already exists on disk
+    -- or should be in the task's dependencies outputs.
+    -- In the first case, the input path should be in dependencies outputs - we check this.
+    -- In the second case, the input path is not in any task's outputs, so we ignore it.
+    -- TODO: call validateTaskMap in (MonadPathExists m) and check that path exists in the second case?
     assertCorrectDependencyPaths = mapM_ go (Map.toList taskMap) where
+      allOutputPaths = Set.unions $ map taskOutputPaths $ Map.keys taskMap
       go (t, deps) = do
         let
           depsOutputs = Set.unions $ Set.map taskOutputPaths deps
-          missingInputs = Set.toList $ Set.difference (taskInputPaths t) depsOutputs
-        assert (null missingInputs) $ "Task input paths are not found in dependencies!" <>
+          missingInputs =
+            Set.toList $
+            Set.intersection allOutputPaths $
+            Set.difference (taskInputPaths t) depsOutputs
+        assert (null missingInputs) $ "Task input paths are produced in this TaskMap, but not by the task's dependencies!" <>
           " Missing paths: " <> showOs missingInputs <>
           " task: " <> showOs (taskLabel t) <>
           " dependencies: " <> showOs (map taskLabel $ Set.toList deps)
