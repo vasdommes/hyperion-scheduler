@@ -113,5 +113,10 @@ replaceTasks replacementMap = addNewKeys . replaceDeps . removeOldKeys where
     toRemove = Set.intersection deps tasksToReplace
     toAdd = Set.unions $ Map.elems $ Map.restrictKeys taskReplacements toRemove
 
+  -- Dependents of a replaced task are connected only to the roots of its
+  -- replacement TaskMap. The rest is reachable through the roots.
   -- taskReplacements :: Map a (Set a)
-  taskReplacements = Map.map Map.keysSet replacementMap
+  taskReplacements = Map.map roots replacementMap
+  roots taskMap = Set.difference keys depKeys where
+    keys = Map.keysSet taskMap
+    depKeys = Set.unions $ Map.elems taskMap
