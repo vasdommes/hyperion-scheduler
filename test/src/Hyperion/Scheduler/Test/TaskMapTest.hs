@@ -28,7 +28,8 @@ import Hyperion.Scheduler.StatKey      (TaskKeyFileInfo (..),
                                         ToFileStatKey (..),
                                         mkFileStatKeyViaJSON)
 import Hyperion.Scheduler.Task.IsTask  (IsTask (..), taskInputPaths)
-import Hyperion.Scheduler.Task.Task    (DepKeys, TaskKey (..), TaskKind (..),
+import Hyperion.Scheduler.Task.Task    (DepKeys, ListTaskKey (..),
+                                        TaskKey (..), TaskKind (..),
                                         dependencies, outKeys)
 import Hyperion.Scheduler.Task.TaskMap (TaskMap, placeholdersOfType,
                                         replaceTasks, validateTaskMap)
@@ -168,6 +169,16 @@ testPlaceholderTaskKeySemantics = do
   expect "placeholder has no dependencies" $
     Set.null (dependencies () key)
 
+-- | NoOpTask semantics via ListTaskKey: no outputs, one dependency edge per
+-- element.
+testNoOpTaskKeySemantics :: IO ()
+testNoOpTaskKeySemantics = do
+  let listKey = MkListTaskKey [MkPKey "a", MkPKey "b"]
+  expect "list task has no outputs" $
+    Set.null (outKeys () listKey)
+  expect "list task depends on all its elements" $
+    Set.size (dependencies () listKey) == 2
+
 -- | placeholdersOfType finds placeholders via taskPlaceholderKey.
 testPlaceholdersOfType :: IO ()
 testPlaceholdersOfType = do
@@ -191,5 +202,6 @@ runTest = do
   testUnreplacedPlaceholderIsInvalid
   testReplaceTasksConnectsToRootsOnly
   testPlaceholderTaskKeySemantics
+  testNoOpTaskKeySemantics
   testPlaceholdersOfType
   putStrLn "All TaskMap tests passed."

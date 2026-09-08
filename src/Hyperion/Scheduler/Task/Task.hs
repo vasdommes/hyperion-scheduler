@@ -32,6 +32,7 @@ import Data.Binary                         (Binary (..))
 import Data.Binary                         qualified as Binary
 import Data.Data                           (Proxy (..))
 import Data.Foldable.Extra                 (allM, traverse_)
+import Data.Functor                        (($>))
 import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
 import Data.Set                            (Set)
@@ -169,6 +170,16 @@ data TaskKind k where
     :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
         => NumCPUs -> TaskConfig k -> k -> f (Process ()))
     -> TaskKind k
+  -- | A task performing no computation: a pure grouping node whose only role
+  -- is to depend on other tasks (@OutKey k ~ Void@: no output files). The
+  -- given action must 'getPath' each dependency -- that is what declares the
+  -- dependency edges. No closure is created for it and nothing is executed
+  -- remotely, and it occupies zero worker threads (cf. 'remoteRunTask', which
+  -- completes closure-less tasks instantly).
+  NoOpTask
+    :: OutKey k ~ Void
+    => (forall f . (Applicative f, FetchesPaths (DepKeys k) f) => k -> f ())
+    -> TaskKind k
 
 class ( All Eq (DepKeys k)
       , All Ord (DepKeys k)
@@ -220,8 +231,13 @@ class ( All Eq (DepKeys k)
   priority = const 0
 
   checkCreated :: (PathResolver r (OutKey k), MonadPathExists m) => TaskConfig k -> r -> k -> m Bool
-  checkCreated cfg resolver key =
-    allM (doesPathExist . resolvePath resolver) $ outKeys cfg key
+  -- NB: a 'NoOpTask' has no output files, so the 'allM' check would be
+  -- vacuously True and the task (with its dependency edges!) would always be
+  -- pruned from the graph -- hence the explicit False.
+  checkCreated cfg resolver key = case taskKind @k of
+    NoOpTask _ -> pure False
+    _ ->
+      allM (doesPathExist . resolvePath resolver) $ outKeys cfg key
 
 
 class ComputeValue k where
@@ -306,6 +322,7 @@ computeAndSaveValue numCpus cfg key = case taskKind @k of
     pure $ do
       error $ "computeAndSaveValue: unreplaced placeholder task " <> show (typeOf key)
   CustomTask go -> go numCpus cfg key
+  NoOpTask go -> go key $> pure ()
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
 outAndDependencies cfg key =
@@ -371,17 +388,28 @@ instance
   taskMemoryEstimate t   = memoryEstimate t.key
   taskRuntimeEstimate t  = runtimeEstimate t.key
   -- TODO reorder arguments?
-  taskMaxThreads stage t = maxThreads stage t.key
-  taskMinThreads stage t = minThreads stage t.key
+  -- NoOpTask's perform no computation, so they occupy no worker threads
+  -- (cf. TaskLink.ListTask).
+  taskMaxThreads stage t = case taskKind @k of
+    NoOpTask _ -> 0
+    _          -> maxThreads stage t.key
+  taskMinThreads stage t = case taskKind @k of
+    NoOpTask _ -> 0
+    _          -> minThreads stage t.key
   taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
     toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
   taskOutputs t          = Set.map (toTaskKeyFileInfo t.resolver) $ outKeys t.config t.key
   taskDefaultPriority t  = priority t.key
   taskTag t              = tag t.key
-  taskClosure numCpus t  = Just $ static computeAndWrite
-    `cAp` closureDict
-    `cAp` cPure numCpus
-    `cAp` cPure t
+  -- A closure-less task completes instantly without a worker round-trip
+  -- (see 'Hyperion.Scheduler.RunTasks.RemoteRunTask.remoteRunTask'), which is
+  -- all a NoOpTask needs.
+  taskClosure numCpus t  = case taskKind @k of
+    NoOpTask _ -> Nothing
+    _ -> Just $ static computeAndWrite
+      `cAp` closureDict
+      `cAp` cPure numCpus
+      `cAp` cPure t
   taskIsPlaceholder _ = case taskKind @k of
     PlaceholderTask -> True
     _               -> False
@@ -431,13 +459,7 @@ type instance DepKeys (ListTaskKey k) = '[k]
 instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
   type OutKey (ListTaskKey k) = Void
 
-  -- TODO: this will still create a taskClosure and execute it remotely.
-  -- It creates extra overhead compared to TaskLink.ListTask
-  taskKind = CustomTask $ \_ _ (MkListTaskKey keys) -> do
-    traverse_ getPath keys
-    pure $ pure ()
-
-  checkCreated _ _ _ = pure False
+  taskKind = NoOpTask $ \(MkListTaskKey keys) -> traverse_ getPath keys
 
 instance (Typeable k , Static(Binary k)) => Static (Binary (ListTaskKey k)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary k)
