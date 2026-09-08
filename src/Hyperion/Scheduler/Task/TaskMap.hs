@@ -18,6 +18,7 @@ import Data.Map.Strict                     (Map)
 import Data.Map.Strict                     qualified as Map
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
+import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), taskInputPaths,
@@ -46,6 +47,7 @@ instance Exception InvalidTaskMap
 
 -- | Check that task map is valid:
 -- - All tasks are in map keys
+-- - No unreplaced placeholder tasks (see 'Hyperion.Scheduler.Task.Task.TaskKind')
 -- - No circular dependencies
 -- - No duplicate output paths.
 -- - Each input path produced by some task in the map can be found in output
@@ -54,6 +56,7 @@ instance Exception InvalidTaskMap
 validateTaskMap :: (IsTask a, MonadThrow m) => TaskMap a -> m ()
 validateTaskMap taskMap = do
   assertAllTasksAreInKeys
+  assertNoPlaceholders
   assertNoCycles
   assertNoDuplicatePaths
   assertCorrectDependencyPaths
@@ -72,6 +75,12 @@ validateTaskMap taskMap = do
       assert (null missingKeys) $
         "Tasks are missing from TaskMap keys: " <>
         showOs (map taskLabel missingKeys)
+
+    assertNoPlaceholders = do
+      let placeholders = filter taskIsPlaceholder $ Map.keys taskMap
+      assert (null placeholders) $
+        "TaskMap contains unreplaced placeholder tasks: " <>
+        showOs (map taskLabel placeholders)
 
     assertNoCycles = assert (null cycles) $ "TaskMap contains cycles: " <> showOs (map showCycle cycles) where
       edges = [(k, k, Set.toList ks) | (k, ks) <- Map.toList taskMap]
@@ -107,7 +116,7 @@ validateTaskMap taskMap = do
           " task: " <> showOs (taskLabel t) <>
           " dependencies: " <> showOs (map taskLabel $ Set.toList deps)
 
--- | Replace each dummy task with a subtree (actual task + its dependencies), as specified by replacementMap.
+-- | Replace each placeholder task with a subtree (actual task + its dependencies), as specified by replacementMap.
 replaceTasks :: IsTask a => Map a (TaskMap a) -> TaskMap a -> TaskMap a
 replaceTasks replacementMap = addNewKeys . replaceDeps . removeOldKeys where
   -- removeOldKeys :: TaskMap a -> TaskMap a
@@ -134,3 +143,10 @@ replaceTasks replacementMap = addNewKeys . replaceDeps . removeOldKeys where
   roots taskMap = Set.difference keys depKeys where
     keys = Map.keysSet taskMap
     depKeys = Set.unions $ Map.elems taskMap
+
+-- | Collect all placeholder tasks (see 'Hyperion.Scheduler.Task.Task.TaskKind')
+-- with underlying key type @k@ appearing in a TaskMap, paired with the task
+-- they came from - ready to be used as 'replaceTasks' keys.
+placeholdersOfType :: (IsTask a, Typeable k) => TaskMap a -> [(a, k)]
+placeholdersOfType taskMap =
+  [ (t, k) | t <- Map.keys taskMap, Just k <- [taskPlaceholderKey t] ]

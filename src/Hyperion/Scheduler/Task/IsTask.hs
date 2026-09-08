@@ -61,6 +61,19 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 
   taskClosure :: NumCPUs -> a -> Maybe (Closure (Process ()))
 
+  -- | Whether this task is a placeholder (see 'Hyperion.Scheduler.Task.Task.TaskKind')
+  -- that must be replaced before running.
+  -- 'Hyperion.Scheduler.Task.TaskMap.validateTaskMap' rejects maps still containing placeholders.
+  taskIsPlaceholder :: a -> Bool
+  taskIsPlaceholder = const False
+
+  -- | For a placeholder task with underlying key of type @k@, recover the
+  -- key. This lets replacement machinery (e.g. blocks-3d's expandBlockTasks)
+  -- find placeholders of a given key type in a TaskMap without knowing the
+  -- resolver or config types hidden inside the task.
+  taskPlaceholderKey :: Typeable k => a -> Maybe k
+  taskPlaceholderKey _ = Nothing
+
 -- TODO: remove (Stats.ToStatKey a) and use (IsTask a) everywhere in Stats instead?
 --  taskStatKey :: a -> StatKey
 --  -- | A default implementation for the case where we wish to retain

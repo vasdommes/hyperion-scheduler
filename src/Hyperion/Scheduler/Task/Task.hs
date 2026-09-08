@@ -4,6 +4,7 @@
 {-# LANGUAGE DeriveAnyClass          #-}
 {-# LANGUAGE DerivingVia             #-}
 {-# LANGUAGE DuplicateRecordFields   #-}
+{-# LANGUAGE GADTs                   #-}
 {-# LANGUAGE LambdaCase              #-}
 {-# LANGUAGE NoFieldSelectors        #-}
 {-# LANGUAGE OverloadedRecordDot     #-}
@@ -37,7 +38,7 @@ import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           qualified as Text
 import Data.Time                           (NominalDiffTime)
-import Data.Typeable                       (typeOf)
+import Data.Typeable                       (cast, typeOf)
 import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
@@ -137,6 +138,38 @@ fetchesAllWithPathsDict _ _ = go (knownLength @ks)
 
 type family DepKeys k :: [Type]
 
+-- | How a task computes and saves its value. This is a GADT so that each
+-- constructor carries exactly the evidence its implementation needs: matching
+-- on 'ComputeValueTask' brings 'ComputeValue' etc. into scope, so placeholder
+-- tasks need no 'ComputeValue' instance, and vice versa. Every kind is
+-- executable-or-rejected by construction -- there is no "forgot to implement
+-- computeAndSaveValue" state (cf. the old class-method design, where a dummy
+-- instance that forgot to fetch its output path silently produced an empty
+-- 'outKeys' and was vacuously considered created).
+data TaskKind k where
+  -- | Compute the value with 'ComputeValue' and save it with
+  -- 'ValueSerializable'. This is 'taskKind''s default.
+  ComputeValueTask
+    :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k)
+    => TaskKind k
+  -- | A stand-in for another task producing the same output file (@OutKey k ~
+  -- k@ by construction, so the output is definitionally the key's own path,
+  -- with no dependencies). It cannot be executed: it must be replaced (via
+  -- 'Hyperion.Scheduler.Task.TaskMap.replaceTasks') before the map reaches
+  -- 'Hyperion.Scheduler.RunTasks.runTasks', whose validation rejects
+  -- unreplaced placeholders.
+  PlaceholderTask
+    :: (OutKey k ~ k, DepKeys k ~ '[])
+    => TaskKind k
+  -- | A fully custom computation. NB: it MUST 'getPath' every input it reads
+  -- and every output it writes -- the task graph (outputs, dependency edges)
+  -- is derived from exactly these calls, so a missed 'getPath' silently
+  -- corrupts the graph.
+  CustomTask
+    :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
+        => NumCPUs -> TaskConfig k -> k -> f (Process ()))
+    -> TaskKind k
+
 class ( All Eq (DepKeys k)
       , All Ord (DepKeys k)
       , All ToFileStatKey (DepKeys k)
@@ -159,21 +192,14 @@ class ( All Eq (DepKeys k)
   type TaskConfig k :: Type
   type TaskConfig k = ()
 
-  -- This will be called with two f's:
+  -- | How this task computes and saves its value -- see 'TaskKind'.
+  -- The actual computation ('computeAndSaveValue', a plain function dispatching on this)
+  -- is run with two f's:
   -- 1. GetDependencies (OutAndDepsWithPaths k) to get the dependencies of the key.
   -- 2. FetchT (OutAndDepsWithPaths k) Process to actually compute the value and write it to disk
-  computeAndSaveValue
-    :: ( Applicative f
-       , FetchesPaths (OutKey k ': DepKeys k) f
-       )
-    => NumCPUs -> TaskConfig k -> k -> f (Process ())
-  default computeAndSaveValue :: (Applicative f, ComputeValue k, ValueSerializableM Process k, FetchesPaths (OutKey k ': DepKeys k) f, OutKey k ~ k) => NumCPUs -> TaskConfig k -> k -> f (Process ())
-  computeAndSaveValue numCpus cfg key = do
-    path <- getPath key
-    getVal <- unWrappedProcess (computeValue numCpus cfg key)
-    pure $ do
-      val <- getVal
-      saveValueM key path val
+  taskKind :: TaskKind k
+  default taskKind :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k) => TaskKind k
+  taskKind = ComputeValueTask
 
   -- | Estimated memory in bytes
   memoryEstimate     :: k -> MemorySize
@@ -254,6 +280,33 @@ joinWrapped (MkWrappedProcess (Compose f)) = MkWrappedProcess (Compose (fmap joi
 getPath :: Fetches k OsPath f => k -> f OsPath
 getPath = fetch
 
+-- | Compute the task's value and save it to disk, according to its
+-- 'taskKind'. Not a class method: dispatching on the 'TaskKind' GADT here
+-- means each kind's constraints come from its constructor, and every kind has
+-- a consistent planning/execution behaviour by construction.
+computeAndSaveValue
+  :: forall k f .
+     ( TaskKey k
+     , Applicative f
+     , FetchesPaths (OutKey k ': DepKeys k) f
+     )
+  => NumCPUs -> TaskConfig k -> k -> f (Process ())
+computeAndSaveValue numCpus cfg key = case taskKind @k of
+  ComputeValueTask -> do
+    path <- getPath key
+    getVal <- unWrappedProcess (computeValue numCpus cfg key)
+    pure $ do
+      val <- getVal
+      saveValueM key path val
+  -- The 'getPath' call declares the placeholder's output (OutKey k ~ k),
+  -- so its graph node has the same output path as the real task it stands in for.
+  -- It should never execute: validateTaskMap rejects unreplaced placeholders.
+  PlaceholderTask -> do
+    _ <- getPath key
+    pure $ do
+      error $ "computeAndSaveValue: unreplaced placeholder task " <> show (typeOf key)
+  CustomTask go -> go numCpus cfg key
+
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
 outAndDependencies cfg key =
   case keysAreKeysDict @(OutAndDepKeys k) of
@@ -329,6 +382,12 @@ instance
     `cAp` closureDict
     `cAp` cPure numCpus
     `cAp` cPure t
+  taskIsPlaceholder _ = case taskKind @k of
+    PlaceholderTask -> True
+    _               -> False
+  taskPlaceholderKey t = case taskKind @k of
+    PlaceholderTask -> cast t.key
+    _               -> Nothing
 
 instance {-# OVERLAPPABLE #-} TaskKey k => ToStatKey k where
   toStatKey = mkStatKeyViaJSON
@@ -373,8 +432,8 @@ instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
   type OutKey (ListTaskKey k) = Void
 
   -- TODO: this will still create a taskClosure and execute it remotely.
-  -- It created extra overhead comapred to TaskLink.ListTask
-  computeAndSaveValue _ _ (MkListTaskKey keys) = do
+  -- It creates extra overhead compared to TaskLink.ListTask
+  taskKind = CustomTask $ \_ _ (MkListTaskKey keys) -> do
     traverse_ getPath keys
     pure $ pure ()
 

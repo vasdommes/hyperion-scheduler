@@ -76,6 +76,8 @@ instance IsTask WrappedTask where
   taskDefaultPriority (MkWrappedTask { task = t }) = taskDefaultPriority t
   taskTag (MkWrappedTask { task = t }) = taskTag t
   taskClosure numCpus (MkWrappedTask { task = t }) = taskClosure numCpus t
+  taskIsPlaceholder (MkWrappedTask { task = t }) = taskIsPlaceholder t
+  taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
 
 instance ToStatKey WrappedTask where
   toStatKey (MkWrappedTask { task = t }) = toStatKey t

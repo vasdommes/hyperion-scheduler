@@ -53,7 +53,8 @@ import Hyperion.Scheduler             (PathResolver (..), StatKey (..),
 import Hyperion.Scheduler             qualified as Scheduler
 import Hyperion.Scheduler.Config      qualified as Scheduler
 import Hyperion.Scheduler.Task        (ComputeValue (..), DepKeys, FetchesKey,
-                                       TaskKey (..), ValueSerializable (..),
+                                       TaskKey (..), TaskKind (..),
+                                       ValueSerializable (..),
                                        ValueSerializableM (..), ValueType,
                                        getPath, mkTaskMap)
 import Hyperion.Scheduler.Test.Config qualified as TestConfig
@@ -196,7 +197,7 @@ instance
   -- type DepKeys (VectorElementKey a) = '[MultiplyKey a]
   memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
   tag _ = Just "VectorElement"
-  computeAndSaveValue numCpus config key = do
+  taskKind = CustomTask $ \_numCpus _config key -> do
     let keys = vectorElementInputKeys key
     inputs <- zip keys <$> for keys getPath
     outputPath <- getPath key
