@@ -93,6 +93,7 @@ executable hyperion-scheduler-test
   other-modules:
       Hyperion.Scheduler.Test.Config
       Hyperion.Scheduler.Test.LinearTransform
+      Hyperion.Scheduler.Test.TaskMapTest
       Paths_hyperion_scheduler
   hs-source-dirs:
       test/src
