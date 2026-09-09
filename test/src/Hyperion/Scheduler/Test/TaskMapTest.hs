@@ -28,9 +28,8 @@ import Hyperion.Scheduler.StatKey      (TaskKeyFileInfo (..),
                                         ToFileStatKey (..),
                                         mkFileStatKeyViaJSON)
 import Hyperion.Scheduler.Task.IsTask  (IsTask (..), taskInputPaths)
-import Hyperion.Scheduler.Task.Task    (DepKeys, ListTaskKey (..),
-                                        TaskKey (..), TaskKind (..),
-                                        dependencies, outKeys)
+import Hyperion.Scheduler.Task.Task    (DepKeys, ListTaskKey (..), TaskKey (..),
+                                        TaskKind (..), dependencies, outKeys)
 import Hyperion.Scheduler.Task.TaskMap (TaskMap, placeholdersOfType,
                                         replaceTasks, validateTaskMap)
 
