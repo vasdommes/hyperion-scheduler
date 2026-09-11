@@ -6,7 +6,7 @@ extra-deps:
 - git: https://gitlab.com/davidsd/hyperion-util.git
   commit: f8d99c7e89ca52728f76fa3890974773e7ea63b4
 - git: https://gitlab.com/davidsd/bootstrap-build.git
-  commit: df93d1407ce8dc0785a50d43ec122add963fec3a
+  commit: 8e90932d3daaf93a9154557967f95824cf0647f5
 resolver: github:pkravchuk/hyperionage:snapshots/hyp-2.0.0.yaml
 flags:
   crypton:

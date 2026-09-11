@@ -296,6 +296,10 @@ joinWrapped (MkWrappedProcess (Compose f)) = MkWrappedProcess (Compose (fmap joi
 getPath :: Fetches k OsPath f => k -> f OsPath
 getPath = fetch
 
+getPathVariant :: FetchesPaths ks f => Variant ks -> f OsPath
+getPathVariant (VLeft x)  = getPath x
+getPathVariant (VRight y) = getPathVariant y
+
 -- | Compute the task's value and save it to disk, according to its
 -- 'taskKind'. Not a class method: dispatching on the 'TaskKind' GADT here
 -- means each kind's constraints come from its constructor, and every kind has
