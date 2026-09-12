@@ -20,7 +20,8 @@ import Hyperion.Scheduler.StatKey  (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Types    (MemorySize, NumCPUs)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
--- computation. TODO: Really, minThreads and maxThreads should be able
+-- computation (and, at the 'Hyperion.Scheduler.Task.Task.TaskKey' level, on
+-- the task config). TODO: Really, minThreads and maxThreads should be able
 -- to depend on stats. How do we achieve that?
 data RunStage = InitialRun | InProgressRun
 

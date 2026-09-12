@@ -111,7 +111,7 @@ instance
   , ToFileStatKey (MultiplyKey a)
   , ToFileStatKey (VectorKey a)
   ) => TaskKey (MultiplyKey a) where
-  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
   tag _ = Just "Multiply"
 
 instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
@@ -158,7 +158,7 @@ instance
   , ToFileStatKey (MultiplyKey a)
   , ToFileStatKey (VectorElementKey a)
   ) => TaskKey (VectorElementKey a) where
-  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
   tag _ = Just "VectorElement"
   taskKind = CustomTask $ \_numCpus _config key -> do
     let keys = vectorElementInputKeys key
@@ -206,7 +206,7 @@ instance
  , ToFileStatKey (VectorElementKey a)
  , ToFileStatKey (VectorKey a)
  ) => TaskKey (VectorKey a) where
-  memoryEstimate _ = 1024 * 1024
+  memoryEstimate _ _ = 1024 * 1024
   tag _ = Just "Vector"
 
 instance LinearTransformContext a => ToFileStatKey (VectorKey a) where

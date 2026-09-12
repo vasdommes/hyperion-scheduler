@@ -200,6 +200,8 @@ class ( All Eq (DepKeys k)
   type OutKey k :: Type
   type OutKey k = k
 
+  -- | TaskKey defines WHAT to compute, TaskConfig - HOW to compute it:
+  -- e.g. which executable to call, which dependencies to fetch, how to parallelize etc.
   type TaskConfig k :: Type
   type TaskConfig k = ()
 
@@ -212,19 +214,19 @@ class ( All Eq (DepKeys k)
   default taskKind :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k) => TaskKind k
   taskKind = ComputeValueTask
 
-  -- | Estimated memory in bytes
-  memoryEstimate     :: k -> MemorySize
-  memoryEstimate = const 0
+  -- | Estimated memory in bytes.
+  memoryEstimate     :: TaskConfig k -> k -> MemorySize
+  memoryEstimate _ _ = 0
   -- | Estimated runtime in seconds, as a function of NumCPUs
-  runtimeEstimate    :: k -> NumCPUs -> NominalDiffTime
-  runtimeEstimate t = defaultRuntimeEstimate (memoryEstimate t)
-  -- | Maximum possible threads for the task
+  runtimeEstimate    :: TaskConfig k -> k -> NumCPUs -> NominalDiffTime
+  runtimeEstimate cfg t = defaultRuntimeEstimate (memoryEstimate cfg t)
+  -- | Maximum possible threads for the task.
   -- TODO: get rid of RunStage?
-  maxThreads :: RunStage -> k -> NumCPUs
-  maxThreads _ _ = 1
+  maxThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
+  maxThreads _ _ _ = 1
   -- | Minimum possible threads for the keyTask
-  minThreads :: RunStage -> k -> NumCPUs
-  minThreads _ _ = 1
+  minThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
+  minThreads _ _ _ = 1
   tag        :: k -> Maybe Tag
   tag = Just . Text.pack . show . typeOf
   priority :: k -> Int
@@ -389,17 +391,17 @@ instance
   , Typeable (TaskConfig k)
   , Typeable (PathResolverForAll r (DepKeys k))
   ) => IsTask (Task r k) where
-  taskMemoryEstimate t   = memoryEstimate t.key
-  taskRuntimeEstimate t  = runtimeEstimate t.key
+  taskMemoryEstimate t   = memoryEstimate t.config t.key
+  taskRuntimeEstimate t  = runtimeEstimate t.config t.key
   -- TODO reorder arguments?
   -- NoOpTask's perform no computation, so they occupy no worker threads
   -- (cf. TaskLink.ListTask).
   taskMaxThreads stage t = case taskKind @k of
     NoOpTask _ -> 0
-    _          -> maxThreads stage t.key
+    _          -> maxThreads stage t.config t.key
   taskMinThreads stage t = case taskKind @k of
     NoOpTask _ -> 0
-    _          -> minThreads stage t.key
+    _          -> minThreads stage t.config t.key
   taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
     toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
   taskOutputs t          = Set.map (toTaskKeyFileInfo t.resolver) $ outKeys t.config t.key
