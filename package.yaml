@@ -62,19 +62,29 @@ executables:
     - base
     - binary
     - bootstrap-build
-    - bytestring-conversion
-    - containers
+    - concurrent-output
     - directory
-    - distributed-process
-    - extra
     - hyperion
     - hyperion-scheduler
-    - hyperion-util
     - matrix
     - mtl
-    - lens
     - optparse-applicative
-    - time
-    - text
     - vector
-    ghc-options : -threaded
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+
+tests:
+  hyperion-scheduler-unit-test:
+    main: Main.hs
+    source-dirs: test/unit
+    dependencies:
+    - aeson
+    - base
+    - binary
+    - containers
+    - hyperion
+    - hyperion-scheduler
+    - text
+    ghc-options: -threaded

@@ -93,29 +93,40 @@ executable hyperion-scheduler-test
   other-modules:
       Hyperion.Scheduler.Test.Config
       Hyperion.Scheduler.Test.LinearTransform
-      Hyperion.Scheduler.Test.TaskMapTest
       Paths_hyperion_scheduler
   hs-source-dirs:
       test/src
-  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -O2 -Wunused-packages -Wno-x-partial -Werror=missing-fields -threaded
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -O2 -Wunused-packages -Wno-x-partial -Werror=missing-fields -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson
     , base
     , binary
     , bootstrap-build
-    , bytestring-conversion
-    , containers
+    , concurrent-output
     , directory
-    , distributed-process
-    , extra
     , hyperion
     , hyperion-scheduler
-    , hyperion-util
-    , lens
     , matrix
     , mtl
     , optparse-applicative
-    , text
-    , time
     , vector
+  default-language: GHC2021
+
+test-suite hyperion-scheduler-unit-test
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  other-modules:
+      Hyperion.Scheduler.Test.TaskMapTest
+      Paths_hyperion_scheduler
+  hs-source-dirs:
+      test/unit
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -O2 -Wunused-packages -Wno-x-partial -Werror=missing-fields -threaded
+  build-depends:
+      aeson
+    , base
+    , binary
+    , containers
+    , hyperion
+    , hyperion-scheduler
+    , text
   default-language: GHC2021

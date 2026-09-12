@@ -38,16 +38,17 @@ import Control.Concurrent.MVar.Strict     (MVar, modifyMVar_, newMVar, putMVar,
 import Control.DeepSeq                    (NFData)
 import Control.Monad                      (forM, replicateM, when)
 import Control.Monad.Catch                (MonadMask, bracket, bracketOnError)
+import Control.Monad.Reader               (asks)
 import Control.Monad.Trans                (MonadIO, lift, liftIO)
 import Data.Binary
 import Data.Map.Strict                    (Map, (!))
 import Data.Map.Strict                    qualified as Map
-import Data.Maybe                         (fromJust)
 import Data.Set                           qualified as Set
 import Data.Time.Clock                    (NominalDiffTime)
 import Data.Typeable                      (Typeable)
 import GHC.Clock                          (getMonotonicTimeNSec)
-import Hyperion                           (Closure, Job, Process, Static (..),
+import Hyperion                           (Closure, Job, JobEnv (..), Process,
+                                           ProgramInfo (..), Static (..),
                                            WorkerAddr,
                                            remoteEvalOnWorkerWithCustomLog)
 import Hyperion.Log                       qualified as Log
@@ -194,8 +195,10 @@ data WorkerPool = WorkerPool
 
 newWorkerPool :: [Node] -> Job WorkerPool
 newWorkerPool nodes = do
+  -- 'Log.getLogFile' is unset when logs go to stderr, e.g. under 'runJobLocal'.
+  programLogDir <- asks ((.programLogDir) . jobProgramInfo)
   maybeLogFile <- Log.getLogFile
-  let logDir = dropExtension $ fromJust maybeLogFile
+  let logDir = maybe (programLogDir </> "workers") dropExtension maybeLogFile
   nodeMap <- fmap Map.fromList $
     forM nodes $ \node -> do
       pool <- newNodeWorkerPool node.address node.cpus logDir

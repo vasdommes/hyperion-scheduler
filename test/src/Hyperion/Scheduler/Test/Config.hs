@@ -1,105 +1,137 @@
-{-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE StaticPointers        #-}
-{-# LANGUAGE TypeFamilies          #-}
 
+-- | Per-site configuration for the scheduler tests: one 'Site' per HPC
+-- cluster, plus the settings used when running locally without SLURM.
 module Hyperion.Scheduler.Test.Config where
 
 import Control.Monad.IO.Class    (liftIO)
 import Data.Binary               (Binary)
-import Data.Maybe                (fromMaybe)
+import Data.List                 (intercalate)
 import GHC.Generics              (Generic)
-import Hyperion                  (CommandTransport (..), HostNameStrategy (..),
+import Hyperion                  (Dict (..), HostNameStrategy (..),
                                   HyperionConfig (..),
-                                  HyperionStaticConfig (..), Job,
+                                  HyperionStaticConfig (..), Job, Static (..),
                                   defaultHyperionConfig,
                                   defaultHyperionStaticConfig)
 import Hyperion.OsPath           (OsPath, normalise, (</>))
-import Hyperion.OsString         (OsString, fromString, isPrefixOf)
+import Hyperion.OsString         (fromString, isPrefixOf)
 import Hyperion.Scheduler.Config qualified as Scheduler
+import Hyperion.Slurm            (SbatchOptions (..))
 import Hyperion.Slurm            qualified as Slurm
-import System.Directory.OsPath   (makeAbsolute)
 import System.Environment        (getEnv)
 
---data Config = MkConfig
---  { hyperionStaticConfig :: HyperionStaticConfig
---  , getHyperionConfig    :: IO HyperionConfig
---  , getSchedulerConfig   :: Closure (Job Scheduler.Config)
---  }
---
---
---expanseConfig :: Config
---expanseConfig = MkConfig
---  { hyperionStaticConfig = defaultHyperionStaticConfig
---      { hostNameStrategy = GetHostEntriesExternal }
---  , getHyperionConfig = do
---      user <- getEnv "USER"
---      pure $ (defaultHyperionConfig $ "/expanse/lustre/scratch" </> fromString user </> "temp_project")
---        { defaultSbatchOptions = Slurm.defaultSbatchOptions
---          { Slurm.partition = Just "compute"
---          , Slurm.account   = Just "yun124"
---          }
---        , maxSlurmJobs      = Just 64
---        }
---  , getSchedulerConfig = closure $ do
---      user <- liftIO $ getEnv "USER"
---      slurmJobId <- liftIO $ getEnv "SLURM_JOB_ID"
---      let localStoragePath = "/scratch" </> fromString user </> "job_" <> fromString slurmJobId
---      pure $ Scheduler.MkConfig
---        { nodeMemory           = 240 * 1024 * 1024 * 1024
---        , nodeLocalStorageSize = 900 * 1000 * 1000 * 1000
---        , localStoragePath     = localStoragePath
---        , isLocalPath          = isPrefixOf localStoragePath . normalise
---        , reportInterval       = 10
---        }
---  }
+-- * Sites
 
-type HPCName = OsString
+-- | An HPC cluster we know how to run on. Add a constructor (and fill in the
+-- case split below) to support a new cluster.
+data Site = Expanse
+  deriving (Eq, Ord, Show, Enum, Bounded, Generic, Binary)
 
-hyperionStaticConfig :: HPCName -> HyperionStaticConfig
-hyperionStaticConfig key = case key of
-  "expanse" -> defaultHyperionStaticConfig
-    { hostNameStrategy = GetHostEntriesExternal
-    -- , commandTransport = SRun $ Just ("srun", ["--nodes=1", "--ntasks=1", "--immediate", "--overlap"])
+instance Static (Binary Site) where
+  closureDict = static Dict
+
+siteName :: Site -> String
+siteName = \case
+  Expanse -> "expanse"
+
+allSites :: [Site]
+allSites = [minBound .. maxBound]
+
+defaultSite :: Site
+defaultSite = Expanse
+
+parseSite :: String -> Either String Site
+parseSite s = case [site | site <- allSites, siteName site == s] of
+  site : _ -> Right site
+  []       -> Left $
+    "unknown site " <> show s <> ", expected one of: " <>
+    intercalate ", " (map siteName allSites)
+
+-- * Cluster configuration
+
+-- | Static (compile-time) config, available to both master and workers.
+hyperionStaticConfig :: Site -> HyperionStaticConfig
+hyperionStaticConfig = \case
+  Expanse -> defaultHyperionStaticConfig
+    { hostNameStrategy           = GetHostEntriesExternal
     , nodeLauncherTimeoutRetries = Just (10, 5)
     }
-  _         -> defaultHyperionStaticConfig
 
-getScratchDir :: HPCName ->IO OsPath
-getScratchDir "expanse" = do
-  user <- getEnv "USER"
-  pure $ "/expanse/lustre/scratch" </> fromString user </> "temp_project/hyperion-scheduler/test"
-getScratchDir _ = undefined
+-- | Default base directory, used when @--base-dir@ is not given.
+getScratchDir :: Site -> IO OsPath
+getScratchDir = \case
+  Expanse -> do
+    user <- getEnv "USER"
+    pure $ "/expanse/lustre/scratch" </> fromString user </> "temp_project/hyperion-scheduler/test"
 
-getHyperionConfig :: HPCName -> Maybe OsPath -> IO HyperionConfig
-getHyperionConfig key mDir = case key of
-  "expanse" -> do
-    scratchDir <- getScratchDir key
-    workDir <- makeAbsolute $ fromMaybe scratchDir mDir
-    pure $ (defaultHyperionConfig workDir)
-      { defaultSbatchOptions = Slurm.defaultSbatchOptions
-        { Slurm.partition = Just "compute"
-        , Slurm.account   = Just "yun124"
-        }
-      , maxSlurmJobs      = Just 64
-      }
-  _ -> undefined
+-- | Site defaults for @sbatch@. Anything given on the command line wins; see
+-- 'withSiteDefaults'.
+siteSbatchOptions :: Site -> SbatchOptions
+siteSbatchOptions = \case
+  Expanse -> Slurm.defaultSbatchOptions
+    { partition = Just "compute"
+    , account   = Just "yun124"
+    }
 
-getSchedulerConfig :: HPCName -> Job Scheduler.Config
-getSchedulerConfig key = case key of
-  "expanse" -> do
+-- | Fill in the optional @sbatch@ settings the user did not specify. Fields
+-- that always have a value ('nodes', 'nTasksPerNode', 'time', ...) are taken
+-- from the command line, which supplies its own defaults.
+withSiteDefaults :: Site -> SbatchOptions -> SbatchOptions
+withSiteDefaults site opts = opts
+  { jobName        = opts.jobName    `orElse` defaults.jobName
+  , chdir          = opts.chdir      `orElse` defaults.chdir
+  , output         = opts.output     `orElse` defaults.output
+  , mem            = opts.mem        `orElse` defaults.mem
+  , mailType       = opts.mailType   `orElse` defaults.mailType
+  , mailUser       = opts.mailUser   `orElse` defaults.mailUser
+  , partition      = opts.partition  `orElse` defaults.partition
+  , constraint     = opts.constraint `orElse` defaults.constraint
+  , account        = opts.account    `orElse` defaults.account
+  , qos            = opts.qos        `orElse` defaults.qos
+  , scriptPreamble = opts.scriptPreamble `orElse` defaults.scriptPreamble
+  }
+  where
+    defaults = siteSbatchOptions site
+    orElse x y = maybe y Just x
+
+getHyperionConfig :: Site -> OsPath -> SbatchOptions -> HyperionConfig
+getHyperionConfig site workDir sbatchOptions = (defaultHyperionConfig workDir)
+  { defaultSbatchOptions = withSiteDefaults site sbatchOptions
+  , maxSlurmJobs         = Just 64
+  }
+
+-- | Scheduler config for a compute node of @site@. Runs on the node, so it can
+-- read the SLURM environment to locate node-local scratch.
+getSchedulerConfig :: Site -> Job Scheduler.Config
+getSchedulerConfig = \case
+  Expanse -> do
     user <- liftIO $ getEnv "USER"
     slurmJobId <- liftIO $ getEnv "SLURM_JOB_ID"
     let localStoragePath = "/scratch" </> fromString user </> "job_" <> fromString slurmJobId
-    pure $ Scheduler.MkConfig
+    pure Scheduler.MkConfig
       { nodeMemory           = 240 * 1024 * 1024 * 1024
       , nodeLocalStorageSize = 900 * 1000 * 1000 * 1000
       , localStoragePath     = localStoragePath
       , isLocalPath          = isPrefixOf localStoragePath . normalise
       , reportInterval       = 10
       }
-  _ -> undefined
+
+-- * Local (no SLURM) configuration
+
+-- | Scheduler config for a single local "node". @localStoragePath@ stands in
+-- for node-local scratch, so the file-service and cleanup logic is exercised
+-- locally too.
+localSchedulerConfig :: OsPath -> Scheduler.Config
+localSchedulerConfig localStoragePath = Scheduler.MkConfig
+  { nodeMemory           = 4 * 1024 * 1024 * 1024
+  , nodeLocalStorageSize = 1024 * 1024 * 1024
+  , localStoragePath     = localStoragePath
+  , isLocalPath          = isPrefixOf localStoragePath . normalise
+  , reportInterval       = 5
+  }

@@ -2,7 +2,7 @@ packages:
 - .
 extra-deps:
 - git: https://github.com/davidsd/hyperion.git
-  commit: d7d2484dc208cf4b15a98d0a9e504eb2858316bd
+  commit: 0340aabbe3ce701149049aa1dc1143f2e1ced950
 - git: https://gitlab.com/davidsd/hyperion-util.git
   commit: f8d99c7e89ca52728f76fa3890974773e7ea63b4
 - git: https://gitlab.com/davidsd/bootstrap-build.git
