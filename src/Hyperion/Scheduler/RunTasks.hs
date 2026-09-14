@@ -6,8 +6,13 @@
 {-# LANGUAGE StaticPointers        #-}
 
 module Hyperion.Scheduler.RunTasks
-(runTasks)
-where
+  ( runTasks
+  , SchedulerEnv (..)
+  , ResourcePool (..)
+  , withSchedulerEnv
+  , runTasksIn
+  , TaskRecords
+  ) where
 
 import Control.Concurrent.STM                       (TVar, atomically, check,
                                                      newTVarIO, readTVar,
@@ -520,10 +525,37 @@ monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finished
 
 type TaskRecords a = [TaskRecord a]
 
--- | Run the given tasks on the given list of nodes by initially
+-- | Services shared by every scheduler instance of one top-level run: the
+-- configuration and the node-local file bookkeeping. A nested scheduler
+-- (see 'runTasksIn') reuses its parent's 'SchedulerEnv' so that reference
+-- counts of node-local files are kept in one place.
+data SchedulerEnv = MkSchedulerEnv
+  { config      :: Config
+  , fileService :: FileService
+  }
+
+-- | The resources one scheduler instance may use: the capacities it may fill
+-- (one 'Node' per address; a 'Node' may describe a slice of a physical node)
+-- and the worker slots it runs tasks on. The top-level run uses every node
+-- of the job and a 'WorkerPool' with one slot per CPU.
+data ResourcePool = MkResourcePool
+  { nodes      :: [Node]
+  , workerPool :: WorkerPool
+  }
+
+-- | Start the services shared by all scheduler instances of a run.
+withSchedulerEnv :: Config -> [Node] -> (SchedulerEnv -> Job a) -> Job a
+withSchedulerEnv config nodes go =
+  withFileService config nodes $ \fileService ->
+    go MkSchedulerEnv { config = config, fileService = fileService }
+
+-- | Run the given tasks on all nodes of the job by initially
 -- distributing largest memory tasks to nodes until we can't fit any
 -- more. As tasks finish on a node, we start new tasks on that node,
 -- given the newly available memory and cpus.
+--
+-- This is 'runTasksIn' with a fresh 'SchedulerEnv' and a 'ResourcePool'
+-- covering every node of the job.
 --
 -- TODO: Check that no tasks require more memory than an entire node.
 runTasks
@@ -532,110 +564,127 @@ runTasks
   -> Map a (Set a)
   -> Job (TaskRecords a)
 runTasks config taskMap = do
+  nodes <- getJobNodes config
+  withSchedulerEnv config nodes $ \env ->
+    withWorkerPool nodes $ \workerPool ->
+      runTasksIn env MkResourcePool { nodes = nodes, workerPool = workerPool } taskMap
+
+-- | Run the given tasks on the given resources. The 'ResourcePool' must not
+-- exceed the capacity of the underlying nodes; the caller is responsible for
+-- reserving it (see 'runTasks' for the top-level case).
+runTasksIn
+  :: IsTask a
+  => SchedulerEnv
+  -> ResourcePool
+  -> Map a (Set a)
+  -> Job (TaskRecords a)
+runTasksIn env pool taskMap = do
   let
+    config = env.config
+    fileService = env.fileService
+    nodes = pool.nodes
+    workerPool = pool.workerPool
     taskGraph = TaskGraph.fromEdges taskMap
     cleanupDependencies = buildCleanupDependenciesMap config taskMap
-  nodes <- getJobNodes config
-  withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
-      let
-        getTaskPriority = taskPriority $ mkTaskPriorityHelper nodes taskGraph
-        -- TODO: check disk space when computing initialAllocs
-        -- TODO: seems that it is non-deterministic and often returns empty allocations, how???
-        (initialAllocs, moreIndependentTasks) =
-          --distributeTasksToNodes nodes (TaskGraph.independentKeys taskGraph)
-          distributeTasksToNodesWithScores 0.75 config nodes (TaskGraph.independentKeys taskGraph) getTaskPriority
+  let
+    getTaskPriority = taskPriority $ mkTaskPriorityHelper nodes taskGraph
+    -- TODO: check disk space when computing initialAllocs
+    -- TODO: seems that it is non-deterministic and often returns empty allocations, how???
+    (initialAllocs, moreIndependentTasks) =
+      --distributeTasksToNodes nodes (TaskGraph.independentKeys taskGraph)
+      distributeTasksToNodesWithScores 0.75 config nodes (TaskGraph.independentKeys taskGraph) getTaskPriority
 
-        toFileInfos t = Set.toList $ Set.union (taskInputs t) (taskOutputs t)
-        toFileSizeMap t = Map.fromList $ map (\fileInfo -> (fileInfo.path, fileInfo.fileSize)) $ toFileInfos t
-        fileSizeEstimates = Map.unions $ map toFileSizeMap $ Set.toList $ TaskGraph.keys taskGraph
+    toFileInfos t = Set.toList $ Set.union (taskInputs t) (taskOutputs t)
+    toFileSizeMap t = Map.fromList $ map (\fileInfo -> (fileInfo.path, fileInfo.fileSize)) $ toFileInfos t
+    fileSizeEstimates = Map.unions $ map toFileSizeMap $ Set.toList $ TaskGraph.keys taskGraph
 
-      -- TODO for debug
-      Log.info "initialAllocs (node, numTasks)" $ Map.map Map.size initialAllocs
-      -- NB: don't forget to call `notifyChangeM taskQueueNotifier` on any event
-      --   that should trigger retrying in `blockUntilNewTask`!
-      -- Currently, it's called when:
-      -- 1. We add tasks to the queue (`TPrioQueue.write` in `monitorProgressAndDeps`)
-      -- 2. We take a task from the queue (`TPrioQueue.read` in `dequeueTask`)
-      -- 3. We finish task in `remoteRunAndUpdateNodeStatus`
-      --   (i.e. available memory, CPUs and disk space are updated)
-      -- TODO: the third case could be handled via separate notifiers for each node.
-      taskQueueNotifier <- liftIO newChangeNotifierIO
-      taskQueue <- TPrioQueue.new getTaskPriority
-      -- A lock to ensure that `dequeueTask` is atomic.
-      taskQueueLock <- liftIO mkExclusiveLock
-      -- Will be updated with actual file sizes as they are created.
-      fileSizeMapVar <- liftIO $ newShared fileSizeEstimates
-      pathResolveMapVar <- liftIO $ newShared Map.empty
-      finishedTaskQueue <- newQueue
-      taskRecordQueue <- newQueue
-      cleanupQueue <- newQueue
-      -- NB: here we don't need taskQueueNotifier and taskQueueLock,
-      -- since no one is accessing taskQueue yet.
-      mapM_ (TPrioQueue.write taskQueue) moreIndependentTasks
-      nodeLoopMap :: Map Node ((Shared IO NodeStatus, TVar (IsNodeStalling a)), Async ()) <- flip Map.traverseWithKey initialAllocs $
-        \node alloc -> do
-          nodeStatusVar <- liftIO $ newShared NodeStatus.empty
-          isNodeStallingVar <- liftIO $ newTVarIO NotStalling
-          -- TODO: move workerPool to nodeStatusVar?
-          loopHandle <- asyncLinkedLocalJob $ do
-            -- NB: If we don't catch an exception here, then
-            -- `withReusableWorkerPool.release` will be called before rethrowing (and logging) it.
-            -- `release` will kill other workers, causing other exceptions (DiedDisconnect).
-            -- Thus the original exception will be lost.
-            -- To prevent that, we catch, log and rethrow it.
-            -- NB: `cancelWait` send `kill`signal to `runNodeLoop`,
-            -- thus catching @SomeException will lead to logging unnecessary error message:
-            --   ERROR: killed-by=pid://exp-9-55.expanse.sdsc.edu:41403:0:26,reason=cancel
-            -- Thus we choose catch only certain popular exception types.
-            -- (Exception type for `kill` is not exposed, so we cannot ignore `kill` and catch everything else.)
-            -- For example, AsyncFailedException is thrown when a remote task throws exception.
-            -- TODO: what other exceptions should we catch?
-            -- TODO: implement graceful exit for runNodeLoop.
-            runNodeLoop
-              config
-              node
-              fileService
-              workerPool
-              nodeStatusVar
-              isNodeStallingVar
-              taskQueue
-              taskQueueNotifier
-              taskQueueLock
-              fileSizeMapVar
-              pathResolveMapVar
-              finishedTaskQueue
-              taskRecordQueue
-              alloc
-              `catches`
-                [ Handler (Log.throw @_ @IOError)
-                , Handler (Log.throw  @_ @AsyncFailedException)
-                , Handler (Log.throw  @_ @RemoteError)
-                ]
-          lift $ throwOnAsyncFailed loopHandle
-          pure ((nodeStatusVar, isNodeStallingVar), loopHandle)
-      let
-        nodeLoopHandleMap = fmap snd nodeLoopMap
-        nodeStatusMap  = fmap fst nodeLoopMap
+  -- TODO for debug
+  Log.info "initialAllocs (node, numTasks)" $ Map.map Map.size initialAllocs
+  -- NB: don't forget to call `notifyChangeM taskQueueNotifier` on any event
+  --   that should trigger retrying in `blockUntilNewTask`!
+  -- Currently, it's called when:
+  -- 1. We add tasks to the queue (`TPrioQueue.write` in `monitorProgressAndDeps`)
+  -- 2. We take a task from the queue (`TPrioQueue.read` in `dequeueTask`)
+  -- 3. We finish task in `remoteRunAndUpdateNodeStatus`
+  --   (i.e. available memory, CPUs and disk space are updated)
+  -- TODO: the third case could be handled via separate notifiers for each node.
+  taskQueueNotifier <- liftIO newChangeNotifierIO
+  taskQueue <- TPrioQueue.new getTaskPriority
+  -- A lock to ensure that `dequeueTask` is atomic.
+  taskQueueLock <- liftIO mkExclusiveLock
+  -- Will be updated with actual file sizes as they are created.
+  fileSizeMapVar <- liftIO $ newShared fileSizeEstimates
+  pathResolveMapVar <- liftIO $ newShared Map.empty
+  finishedTaskQueue <- newQueue
+  taskRecordQueue <- newQueue
+  cleanupQueue <- newQueue
+  -- NB: here we don't need taskQueueNotifier and taskQueueLock,
+  -- since no one is accessing taskQueue yet.
+  mapM_ (TPrioQueue.write taskQueue) moreIndependentTasks
+  nodeLoopMap :: Map Node ((Shared IO NodeStatus, TVar (IsNodeStalling a)), Async ()) <- flip Map.traverseWithKey initialAllocs $
+    \node alloc -> do
+      nodeStatusVar <- liftIO $ newShared NodeStatus.empty
+      isNodeStallingVar <- liftIO $ newTVarIO NotStalling
+      -- TODO: move workerPool to nodeStatusVar?
+      loopHandle <- asyncLinkedLocalJob $ do
+        -- NB: If we don't catch an exception here, then
+        -- `withReusableWorkerPool.release` will be called before rethrowing (and logging) it.
+        -- `release` will kill other workers, causing other exceptions (DiedDisconnect).
+        -- Thus the original exception will be lost.
+        -- To prevent that, we catch, log and rethrow it.
+        -- NB: `cancelWait` send `kill`signal to `runNodeLoop`,
+        -- thus catching @SomeException will lead to logging unnecessary error message:
+        --   ERROR: killed-by=pid://exp-9-55.expanse.sdsc.edu:41403:0:26,reason=cancel
+        -- Thus we choose catch only certain popular exception types.
+        -- (Exception type for `kill` is not exposed, so we cannot ignore `kill` and catch everything else.)
+        -- For example, AsyncFailedException is thrown when a remote task throws exception.
+        -- TODO: what other exceptions should we catch?
+        -- TODO: implement graceful exit for runNodeLoop.
+        runNodeLoop
+          config
+          node
+          fileService
+          workerPool
+          nodeStatusVar
+          isNodeStallingVar
+          taskQueue
+          taskQueueNotifier
+          taskQueueLock
+          fileSizeMapVar
+          pathResolveMapVar
+          finishedTaskQueue
+          taskRecordQueue
+          alloc
+          `catches`
+            [ Handler (Log.throw @_ @IOError)
+            , Handler (Log.throw  @_ @AsyncFailedException)
+            , Handler (Log.throw  @_ @RemoteError)
+            ]
+      lift $ throwOnAsyncFailed loopHandle
+      pure ((nodeStatusVar, isNodeStallingVar), loopHandle)
+  let
+    nodeLoopHandleMap = fmap snd nodeLoopMap
+    nodeStatusMap  = fmap fst nodeLoopMap
 
-      cleanupLoopHandle <- asyncLinkedLocalJob $ cleanupLoop config fileService taskQueueNotifier cleanupQueue
-      lift $ throwOnAsyncFailed cleanupLoopHandle
+  cleanupLoopHandle <- asyncLinkedLocalJob $ cleanupLoop config fileService taskQueueNotifier cleanupQueue
+  lift $ throwOnAsyncFailed cleanupLoopHandle
 
-      monitorProgressAndDeps
-        config
-        taskQueue
-        taskQueueNotifier
-        taskQueueLock
-        finishedTaskQueue
-        taskGraph
-        cleanupDependencies
-        cleanupQueue
-        nodeStatusMap
-        (ProgressMap.fromTasksTodo (TaskGraph.keys taskGraph))
-      -- NB: we use cancelWait instead of e.g. cancelKill to ensure that nodeLoop task will finish with AsyncCancelled.
-      -- Finishing with AsyncFailed or AsyncLinkFailed will trigger throwOnAsyncFailed.
-      mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
-      _ <- lift $ Async.wait cleanupLoopHandle
-      flushQueue taskRecordQueue
+  monitorProgressAndDeps
+    config
+    taskQueue
+    taskQueueNotifier
+    taskQueueLock
+    finishedTaskQueue
+    taskGraph
+    cleanupDependencies
+    cleanupQueue
+    nodeStatusMap
+    (ProgressMap.fromTasksTodo (TaskGraph.keys taskGraph))
+  -- NB: we use cancelWait instead of e.g. cancelKill to ensure that nodeLoop task will finish with AsyncCancelled.
+  -- Finishing with AsyncFailed or AsyncLinkFailed will trigger throwOnAsyncFailed.
+  mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
+  _ <- lift $ Async.wait cleanupLoopHandle
+  flushQueue taskRecordQueue
 
 
 -- Files that can be removed (if there are no other dependencies)
