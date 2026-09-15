@@ -88,6 +88,6 @@ addTasksWith handle buildTasks = do
     }
   reply <- receiveChan replyRecvPort
   case reply of
-    AddTasksDone _      -> Log.info "Tasks added (handle)" handle.handleId
+    AddTasksDone        -> Log.info "Tasks added (handle)" handle.handleId
     AddTasksRefused msg -> Log.throwError $
       "Adding tasks on handle " <> show handle.handleId <> " was refused: " <> msg

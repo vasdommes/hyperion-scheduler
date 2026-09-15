@@ -58,6 +58,6 @@ data AddTasksRequest = MkAddTasksRequest
   } deriving (Show, Generic, Binary)
 
 data AddTasksReply
-  = AddTasksDone ByteString
+  = AddTasksDone
   | AddTasksRefused String
   deriving (Show, Generic, Binary)

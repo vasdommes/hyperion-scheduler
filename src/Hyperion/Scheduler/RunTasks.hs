@@ -7,10 +7,6 @@
 
 module Hyperion.Scheduler.RunTasks
   ( runTasks
-  , SchedulerEnv (..)
-  , ResourcePool (..)
-  , withSchedulerEnv
-  , runTasksIn
   , TaskRecords
   ) where
 
@@ -78,8 +74,7 @@ import Hyperion.Scheduler.RemoteUtil                (AsyncFailedException (..),
                                                      asyncLinkedLocalJob,
                                                      getJobNodes,
                                                      throwOnAsyncFailed)
-import Hyperion.Scheduler.RunTasks.Env              (ResourcePool (..),
-                                                     SchedulerEnv (..),
+import Hyperion.Scheduler.RunTasks.Env              (SchedulerEnv (..),
                                                      isHandleActive,
                                                      newHandleRegistry,
                                                      registerHandle,
@@ -619,7 +614,7 @@ monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock pr
             (catMaybes (Set.toList (Set.map taskTag newKeys)), Set.size newKeys, length runnable)
           withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) runnable
           notifyChangeM taskQueueNotifier
-          lift $ sendChan replyPort (AddTasksDone mempty)
+          lift $ sendChan replyPort AddTasksDone
           pure st'
 
     -- Wait until all nodes are stalling.
@@ -697,27 +692,10 @@ fileSizeEstimates tasks = Map.unions $ map toFileSizeMap $ Set.toList tasks
 
 type TaskRecords a = [TaskRecord a]
 
--- | Start the services shared by all scheduler instances of a run (see
--- "Hyperion.Scheduler.RunTasks.Env").
-withSchedulerEnv :: Config -> [Node] -> (SchedulerEnv -> Job a) -> Job a
-withSchedulerEnv config nodes go =
-  withFileService config nodes $ \fileService -> do
-    handles <- liftIO newHandleRegistry
-    handleCounter <- liftIO $ newIORef 0
-    go MkSchedulerEnv
-      { config       = config
-      , fileService  = fileService
-      , handles       = handles
-      , handleCounter = handleCounter
-      }
-
 -- | Run the given tasks on all nodes of the job by initially
 -- distributing largest memory tasks to nodes until we can't fit any
 -- more. As tasks finish on a node, we start new tasks on that node,
 -- given the newly available memory and cpus.
---
--- This is 'runTasksIn' with a fresh 'SchedulerEnv' and a 'ResourcePool'
--- covering every node of the job.
 --
 -- TODO: Check that no tasks require more memory than an entire node.
 runTasks
@@ -730,25 +708,31 @@ runTasks config taskMap = do
     Left err -> Log.throw err
     Right _  -> pure ()
   nodes <- getJobNodes config
-  withSchedulerEnv config nodes $ \env ->
+  withFileService config nodes $ \fileService ->
     withWorkerPool nodes $ \workerPool ->
-      runTasksIn env MkResourcePool { nodes = nodes, workerPool = workerPool } taskMap
+      runTasksWith config nodes fileService workerPool taskMap
 
--- | Run the given tasks on the given resources. The 'ResourcePool' must not
--- exceed the capacity of the underlying nodes; the caller is responsible for
--- reserving it (see 'runTasks' for the top-level case).
-runTasksIn
+-- | 'runTasks' once the job's nodes, the file service and the worker pool
+-- are in hand.
+runTasksWith
   :: IsTask a
-  => SchedulerEnv
-  -> ResourcePool
+  => Config
+  -> [Node]
+  -> FileService
+  -> WorkerPool
   -> TaskMap a
   -> Job (TaskRecords a)
-runTasksIn env pool taskMap = do
+runTasksWith config nodes fileService workerPool taskMap = do
+  handles <- liftIO newHandleRegistry
+  handleCounter <- liftIO $ newIORef 0
   let
-    config = env.config
-    fileService = env.fileService
-    nodes = pool.nodes
-    workerPool = pool.workerPool
+    -- What the node loops and the request handler need of this run.
+    env = MkSchedulerEnv
+      { config        = config
+      , fileService   = fileService
+      , handles       = handles
+      , handleCounter = handleCounter
+      }
     taskGraph = TaskGraph.fromEdges taskMap
   let
     initialPriorityHelper = mkTaskPriorityHelper nodes taskGraph

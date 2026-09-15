@@ -7,15 +7,13 @@
 {-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE UndecidableInstances  #-}
 
--- | State shared by the scheduler instances of one run.
---
--- 'Hyperion.Scheduler.RunTasks.runTasksIn' runs one scheduling loop over a
--- 'ResourcePool'; the top-level run owns every node of the job. Instances
--- share one 'SchedulerEnv': the configuration, the node-local file
--- bookkeeping and the registry of handles held by running tasks.
+-- | What one scheduler run keeps besides its graph: the configuration, the
+-- node-local file bookkeeping, and the registry of handles held by running
+-- tasks (see "Hyperion.Scheduler.SchedulerHandle"). Built by
+-- 'Hyperion.Scheduler.RunTasks.runTasks' and passed to the node loops and
+-- the request handler.
 module Hyperion.Scheduler.RunTasks.Env
   ( SchedulerEnv (..)
-  , ResourcePool (..)
   , StaticTaskMap (..)
   , HandleRegistry
   , newHandleRegistry
@@ -36,8 +34,6 @@ import Hyperion.Scheduler.Config      (Config)
 import Hyperion.Scheduler.FileService (FileService)
 import Hyperion.Scheduler.SchedulerHandle (HandleId)
 import Hyperion.Scheduler.Task.IsTask (IsTask)
-import Hyperion.Scheduler.Types       (Node)
-import Hyperion.Scheduler.WorkerPool  (WorkerPool)
 
 -- | Services and state shared by every scheduler instance of one run.
 data SchedulerEnv = MkSchedulerEnv
@@ -45,18 +41,13 @@ data SchedulerEnv = MkSchedulerEnv
   , fileService  :: FileService
     -- | Handles currently held by running tasks.
   , handles       :: HandleRegistry
-    -- | Source of handle ids, shared by every instance so that ids are unique
-    -- across the whole run.
+    -- | Source of handle ids, unique within the run.
   , handleCounter :: IORef Int
   }
 
 -- | The resources one scheduler instance may use: the capacities it may fill
 -- (one 'Node' per address; a 'Node' may describe a slice of a physical node)
 -- and the worker slots it runs tasks on.
-data ResourcePool = MkResourcePool
-  { nodes      :: [Node]
-  , workerPool :: WorkerPool
-  }
 
 -- | The handles the scheduler has handed out and not taken back: a request
 -- on any other id is refused.
