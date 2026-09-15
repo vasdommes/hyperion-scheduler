@@ -7,8 +7,8 @@
 
 -- | Growing the task graph during a run.
 --
--- A running task may add tasks to the run it belongs to, through its 'Lease'
--- ("Hyperion.Scheduler.Lease"). The new tasks join the graph like any other:
+-- A running task may add tasks to the run it belongs to, through its
+-- 'SchedulerHandle' ("Hyperion.Scheduler.SchedulerHandle"). The new tasks join the graph like any other:
 -- they get priorities, records, progress reporting and file bookkeeping, and
 -- they may depend on tasks already in the run (finished or not) or on each
 -- other. The task that adds them does not wait for them to run, so no
@@ -41,8 +41,9 @@ import Data.Map.Strict                 (Map)
 import Data.Set                        (Set)
 import Hyperion                        (Closure, Static (..), cAp, cPure)
 import Hyperion.Log                    qualified as Log
-import Hyperion.Scheduler.Lease        (Lease (..), LeaseReply (..),
-                                        LeaseRequest (..))
+import Hyperion.Scheduler.SchedulerHandle (AddTasksReply (..),
+                                           AddTasksRequest (..),
+                                           SchedulerHandle (..))
 import Hyperion.Scheduler.RunTasks.Env (StaticTaskMap (..))
 import Hyperion.Scheduler.Task.IsTask  (IsTask)
 
@@ -50,7 +51,7 @@ import Hyperion.Scheduler.Task.IsTask  (IsTask)
 pureStaticTaskMap :: StaticTaskMap a -> Process (Map a (Set a))
 pureStaticTaskMap (MkStaticTaskMap taskMap) = pure taskMap
 
--- | Add tasks to the run that owns the lease, and return once the scheduler
+-- | Add tasks to the run the handle belongs to, and return once the scheduler
 -- has accepted them. Call this from inside a task, in the 'Process' monad on
 -- a worker, before the task returns. Throws if the scheduler refuses: a
 -- dependency that is not a task of the run, a dependency added to a task
@@ -63,12 +64,12 @@ pureStaticTaskMap (MkStaticTaskMap taskMap) = pure taskMap
 -- instance; use 'addTasksWith' there).
 addTasks
   :: forall a
-   . (IsTask a, Static (IsTask a), Static (Binary a))
-  => Lease
+   . (Static (IsTask a), Static (Binary a))
+  => SchedulerHandle
   -> Map a (Set a)
   -> Process ()
-addTasks lease taskMap =
-  addTasksWith lease $
+addTasks handle taskMap =
+  addTasksWith handle $
     static pureStaticTaskMap `cAp` cPure (MkStaticTaskMap taskMap)
 
 -- | Like 'addTasks', but the tasks are built on the scheduler's side by the
@@ -76,17 +77,17 @@ addTasks lease taskMap =
 -- the task type cannot be sent over the wire, or when building the tasks
 -- needs a check on the scheduler's side (for example, skipping tasks whose
 -- outputs already exist).
-addTasksWith :: Lease -> Closure (Process (Map a (Set a))) -> Process ()
-addTasksWith lease buildTasks = do
+addTasksWith :: SchedulerHandle -> Closure (Process (Map a (Set a))) -> Process ()
+addTasksWith handle buildTasks = do
   (replySendPort, replyRecvPort) <- newChan
-  Log.info "Requesting to add tasks on lease" lease.leaseId
-  sendChan lease.requestPort MkLeaseRequest
-    { leaseId   = lease.leaseId
+  Log.info "Requesting to add tasks (handle)" handle.handleId
+  sendChan handle.requestPort MkAddTasksRequest
+    { handleId  = handle.handleId
     , payload   = Binary.encode buildTasks
     , replyPort = replySendPort
     }
   reply <- receiveChan replyRecvPort
   case reply of
-    LeaseReplyDone _    -> Log.info "Tasks added on lease" lease.leaseId
-    LeaseReplyError msg -> Log.throwError $
-      "Adding tasks on lease " <> show lease.leaseId <> " was refused: " <> msg
+    AddTasksDone _      -> Log.info "Tasks added (handle)" handle.handleId
+    AddTasksRefused msg -> Log.throwError $
+      "Adding tasks on handle " <> show handle.handleId <> " was refused: " <> msg

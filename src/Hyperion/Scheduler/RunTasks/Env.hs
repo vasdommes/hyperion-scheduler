@@ -12,16 +12,16 @@
 -- 'Hyperion.Scheduler.RunTasks.runTasksIn' runs one scheduling loop over a
 -- 'ResourcePool'; the top-level run owns every node of the job. Instances
 -- share one 'SchedulerEnv': the configuration, the node-local file
--- bookkeeping and the registry of leases held by running tasks.
+-- bookkeeping and the registry of handles held by running tasks.
 module Hyperion.Scheduler.RunTasks.Env
   ( SchedulerEnv (..)
   , ResourcePool (..)
   , StaticTaskMap (..)
-  , LeaseRegistry
-  , newLeaseRegistry
-  , registerLease
-  , unregisterLease
-  , isLeaseActive
+  , HandleRegistry
+  , newHandleRegistry
+  , registerHandle
+  , unregisterHandle
+  , isHandleActive
   ) where
 
 import Data.Binary                    (Binary)
@@ -34,7 +34,7 @@ import Data.Typeable                  (Typeable)
 import Hyperion                       (Dict (..), Static (..), cAp)
 import Hyperion.Scheduler.Config      (Config)
 import Hyperion.Scheduler.FileService (FileService)
-import Hyperion.Scheduler.Lease       (LeaseId)
+import Hyperion.Scheduler.SchedulerHandle (HandleId)
 import Hyperion.Scheduler.Task.IsTask (IsTask)
 import Hyperion.Scheduler.Types       (Node)
 import Hyperion.Scheduler.WorkerPool  (WorkerPool)
@@ -43,11 +43,11 @@ import Hyperion.Scheduler.WorkerPool  (WorkerPool)
 data SchedulerEnv = MkSchedulerEnv
   { config       :: Config
   , fileService  :: FileService
-    -- | Leases currently held by running tasks.
-  , leases       :: LeaseRegistry
-    -- | Source of lease ids, shared by every instance so that ids are unique
+    -- | Handles currently held by running tasks.
+  , handles       :: HandleRegistry
+    -- | Source of handle ids, shared by every instance so that ids are unique
     -- across the whole run.
-  , leaseCounter :: IORef Int
+  , handleCounter :: IORef Int
   }
 
 -- | The resources one scheduler instance may use: the capacities it may fill
@@ -58,23 +58,23 @@ data ResourcePool = MkResourcePool
   , workerPool :: WorkerPool
   }
 
--- | The leases the scheduler has handed out and not taken back: a request on
--- any other lease id is refused.
-newtype LeaseRegistry = MkLeaseRegistry (IORef (Set LeaseId))
+-- | The handles the scheduler has handed out and not taken back: a request
+-- on any other id is refused.
+newtype HandleRegistry = MkHandleRegistry (IORef (Set HandleId))
 
-newLeaseRegistry :: IO LeaseRegistry
-newLeaseRegistry = MkLeaseRegistry <$> newIORef Set.empty
+newHandleRegistry :: IO HandleRegistry
+newHandleRegistry = MkHandleRegistry <$> newIORef Set.empty
 
-registerLease :: LeaseRegistry -> LeaseId -> IO ()
-registerLease (MkLeaseRegistry ref) leaseId =
-  atomicModifyIORef' ref $ \s -> (Set.insert leaseId s, ())
+registerHandle :: HandleRegistry -> HandleId -> IO ()
+registerHandle (MkHandleRegistry ref) handleId =
+  atomicModifyIORef' ref $ \s -> (Set.insert handleId s, ())
 
-unregisterLease :: LeaseRegistry -> LeaseId -> IO ()
-unregisterLease (MkLeaseRegistry ref) leaseId =
-  atomicModifyIORef' ref $ \s -> (Set.delete leaseId s, ())
+unregisterHandle :: HandleRegistry -> HandleId -> IO ()
+unregisterHandle (MkHandleRegistry ref) handleId =
+  atomicModifyIORef' ref $ \s -> (Set.delete handleId s, ())
 
-isLeaseActive :: LeaseRegistry -> LeaseId -> IO Bool
-isLeaseActive (MkLeaseRegistry ref) leaseId = Set.member leaseId <$> readIORef ref
+isHandleActive :: HandleRegistry -> HandleId -> IO Bool
+isHandleActive (MkHandleRegistry ref) handleId = Set.member handleId <$> readIORef ref
 
 -- | A task map together with the 'Static' dictionaries needed to put it in a
 -- closure, so that it can travel from a task to the scheduler (see

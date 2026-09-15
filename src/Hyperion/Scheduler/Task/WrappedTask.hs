@@ -79,7 +79,7 @@ instance IsTask WrappedTask where
   taskClosure numCpus (MkWrappedTask { task = t }) = taskClosure numCpus t
   taskIsPlaceholder (MkWrappedTask { task = t }) = taskIsPlaceholder t
   taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
-  taskClosureWithLease lease (MkWrappedTask { task = t }) = taskClosureWithLease lease t
+  taskClosureWithHandle numCpus handle (MkWrappedTask { task = t }) = taskClosureWithHandle numCpus handle t
 
 instance ToStatKey WrappedTask where
   toStatKey (MkWrappedTask { task = t }) = toStatKey t

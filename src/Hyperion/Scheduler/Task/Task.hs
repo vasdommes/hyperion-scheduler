@@ -49,7 +49,7 @@ import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
                                             ToTaskKeyFileInfo, mkStatKeyViaJSON,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
-import Hyperion.Scheduler.Lease            (Lease (..))
+import Hyperion.Scheduler.SchedulerHandle  (SchedulerHandle)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
                                             defaultRuntimeEstimate)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
@@ -172,13 +172,13 @@ data TaskKind k where
         => NumCPUs -> TaskConfig k -> k -> f (Process ()))
     -> TaskKind k
   -- | Like 'CustomTask', but the computation also receives the task's
-  -- 'Lease', through which it may add tasks to the run
-  -- ("Hyperion.Scheduler.Dynamic"). The lease is 'Nothing' while the task
+  -- 'SchedulerHandle', through which it may add tasks to the run
+  -- ("Hyperion.Scheduler.Dynamic"). The handle is 'Nothing' while the task
   -- graph is being derived from the 'getPath' calls, and when the task is
   -- run without one; a body that needs it should fail loudly then.
-  CustomTaskWithLease
+  CustomTaskWithHandle
     :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
-        => Maybe Lease -> TaskConfig k -> k -> f (Process ()))
+        => NumCPUs -> Maybe SchedulerHandle -> TaskConfig k -> k -> f (Process ()))
     -> TaskKind k
   -- | A task performing no computation: a pure grouping node whose only role
   -- is to depend on other tasks (@OutKey k ~ Void@: no output files). The
@@ -344,21 +344,21 @@ computeAndSaveValue numCpus cfg key = case taskKind @k of
     pure $ do
       error $ "computeAndSaveValue: unreplaced placeholder task " <> show (typeOf key)
   CustomTask go -> go numCpus cfg key
-  CustomTaskWithLease go -> go Nothing cfg key
+  CustomTaskWithHandle go -> go numCpus Nothing cfg key
   NoOpTask go -> go key $> pure ()
 
--- | 'computeAndSaveValue' with the task's 'Lease': a 'CustomTaskWithLease'
--- receives it, every other kind runs as with the lease's CPU count.
-computeAndSaveValueWithLease
+-- | 'computeAndSaveValue' with the task's 'SchedulerHandle': a
+-- 'CustomTaskWithHandle' receives it, every other kind ignores it.
+computeAndSaveValueWithHandle
   :: forall k f .
      ( TaskKey k
      , Applicative f
      , FetchesPaths (OutKey k ': DepKeys k) f
      )
-  => Lease -> TaskConfig k -> k -> f (Process ())
-computeAndSaveValueWithLease lease cfg key = case taskKind @k of
-  CustomTaskWithLease go -> go (Just lease) cfg key
-  _ -> computeAndSaveValue lease.numCpus cfg key
+  => NumCPUs -> SchedulerHandle -> TaskConfig k -> k -> f (Process ())
+computeAndSaveValueWithHandle numCpus handle cfg key = case taskKind @k of
+  CustomTaskWithHandle go -> go numCpus (Just handle) cfg key
+  _ -> computeAndSaveValue numCpus cfg key
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
 outAndDependencies cfg key =
@@ -400,17 +400,18 @@ computeAndWrite Dict numCpus task =
       case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
         Dict -> computeAndSaveValue numCpus task.config task.key
 
--- | 'computeAndWrite' with the task's 'Lease'.
-computeAndWriteWithLease
+-- | 'computeAndWrite' with the task's 'SchedulerHandle'.
+computeAndWriteWithHandle
   :: forall r k .
      Dict ( PathResolverForAll r (DepKeys k)
           , PathResolver r (OutKey k)
           , TaskKey k
           )
-  -> Lease
+  -> Int
+  -> SchedulerHandle
   -> Task r k
   -> Process ()
-computeAndWriteWithLease Dict lease task =
+computeAndWriteWithHandle Dict numCpus handle task =
   join $
   runFetchTAll fetchAction $
   fetchWithResolver (Proxy @(OutKey k ': DepKeys k)) task.resolver
@@ -420,7 +421,7 @@ computeAndWriteWithLease Dict lease task =
       => f (Process ())
     fetchAction =
       case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
-        Dict -> computeAndSaveValueWithLease lease task.config task.key
+        Dict -> computeAndSaveValueWithHandle numCpus handle task.config task.key
 
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
@@ -475,11 +476,12 @@ instance
   taskPlaceholderKey t = case taskKind @k of
     PlaceholderTask -> cast t.key
     _               -> Nothing
-  taskClosureWithLease lease t = case taskKind @k of
+  taskClosureWithHandle numCpus handle t = case taskKind @k of
     NoOpTask _ -> Nothing
-    _ -> Just $ static computeAndWriteWithLease
+    _ -> Just $ static computeAndWriteWithHandle
       `cAp` closureDict
-      `cAp` cPure lease
+      `cAp` cPure numCpus
+      `cAp` cPure handle
       `cAp` cPure t
 
 instance {-# OVERLAPPABLE #-} TaskKey k => ToStatKey k where

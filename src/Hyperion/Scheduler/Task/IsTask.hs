@@ -16,7 +16,7 @@ import Data.Typeable               (Typeable, typeOf)
 import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
-import Hyperion.Scheduler.Lease    (Lease (..))
+import Hyperion.Scheduler.SchedulerHandle (SchedulerHandle)
 import Hyperion.Scheduler.StatKey  (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Types    (MemorySize, NumCPUs)
 
@@ -82,11 +82,11 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   -- resolver or config types hidden inside the task.
   taskPlaceholderKey :: Typeable k => a -> Maybe k
   taskPlaceholderKey _ = Nothing
-  -- | Like 'taskClosure', but the task also receives its 'Lease', through
-  -- which it may add tasks to the run ("Hyperion.Scheduler.Dynamic"). The
-  -- default ignores the lease.
-  taskClosureWithLease :: Lease -> a -> Maybe (Closure (Process ()))
-  taskClosureWithLease lease = taskClosure lease.numCpus
+  -- | Like 'taskClosure', but the task also receives its 'SchedulerHandle',
+  -- through which it may add tasks to the run ("Hyperion.Scheduler.Dynamic").
+  -- The default ignores the handle.
+  taskClosureWithHandle :: NumCPUs -> SchedulerHandle -> a -> Maybe (Closure (Process ()))
+  taskClosureWithHandle numCpus _ = taskClosure numCpus
 
 -- TODO: remove (Stats.ToStatKey a) and use (IsTask a) everywhere in Stats instead?
 --  taskStatKey :: a -> StatKey

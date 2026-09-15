@@ -4,7 +4,7 @@ module Hyperion.Scheduler
 where
 
 import Hyperion.Scheduler.Dynamic       as Exports
-import Hyperion.Scheduler.Lease         as Exports
+import Hyperion.Scheduler.SchedulerHandle         as Exports
 import Hyperion.Scheduler.PathResolver as Exports
 import Hyperion.Scheduler.RunTasks     as Exports
 import Hyperion.Scheduler.StatKey      as Exports

@@ -39,7 +39,7 @@ import Hyperion
 import Hyperion.Log                   qualified as Log
 import Hyperion.OsPath                (OsPath, (<.>), (</>))
 import Hyperion.OsString              (showOs)
-import Hyperion.Scheduler             (IsTask (..), Lease (..),
+import Hyperion.Scheduler             (IsTask (..), SchedulerHandle,
                                        TaskKeyFileInfo (..), ToStatKey (..),
                                        addTasks, mkFileStatKeyViaJSON,
                                        mkStatKeyViaJSON, recordToTaskStats,
@@ -124,8 +124,8 @@ roundTasks s r =
     [ (b, if r == 0 then Set.empty else Set.singleton b { round = r - 1 })
     | b <- blocks s r ]
 
-roundTaskClosure :: Lease -> RoundTask -> Process ()
-roundTaskClosure lease t = do
+roundTaskClosure :: SchedulerHandle -> RoundTask -> Process ()
+roundTaskClosure handle t = do
   liftIO $ createDirectoryIfMissing True t.search.dataDir
   case t of
     Block{} -> do
@@ -145,7 +145,7 @@ roundTaskClosure lease t = do
           | otherwise = roundTasks s (t.round + 1)
       Log.info "Decision (round, values, stop)" (t.round, values, stop)
       -- Before this task finishes, so that the run cannot end without them.
-      addTasks lease next
+      addTasks handle next
       writeInt (decisionPath s t.round) (if stop then 1 else 0)
     Final{} -> do
       values <- forM (blocks t.search t.round) $ \b -> readInt (valuePath b.search b.round b.index)
@@ -175,7 +175,7 @@ instance IsTask RoundTask where
   taskTag Decide{} = Just "Decide"
   taskTag Final{}  = Just "Final"
   taskClosure _ _ = Nothing
-  taskClosureWithLease lease t = Just $ static roundTaskClosure `cAp` cPure lease `cAp` cPure t
+  taskClosureWithHandle _ handle t = Just $ static roundTaskClosure `cAp` cPure handle `cAp` cPure t
 
 instance ToStatKey RoundTask where
   toStatKey = mkStatKeyViaJSON

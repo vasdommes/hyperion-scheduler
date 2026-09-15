@@ -57,9 +57,10 @@ import Hyperion.Scheduler.ConcurrentQueue           (ConcurrentQueue,
                                                      readQueue, writeListQueue,
                                                      writeQueue)
 import Hyperion.Scheduler.Config                    (Config (..))
-import Hyperion.Scheduler.Lease                     (Lease (..), LeaseId (..),
-                                                     LeaseReply (..),
-                                                     LeaseRequest (..))
+import Hyperion.Scheduler.SchedulerHandle           (AddTasksReply (..),
+                                                     AddTasksRequest (..),
+                                                     HandleId (..),
+                                                     SchedulerHandle (..))
 import Hyperion.Scheduler.FilePath                  (ClusterFilePath (..),
                                                      VirtualFilePath (..),
                                                      isNodeLocal,
@@ -79,10 +80,10 @@ import Hyperion.Scheduler.RemoteUtil                (AsyncFailedException (..),
                                                      throwOnAsyncFailed)
 import Hyperion.Scheduler.RunTasks.Env              (ResourcePool (..),
                                                      SchedulerEnv (..),
-                                                     isLeaseActive,
-                                                     newLeaseRegistry,
-                                                     registerLease,
-                                                     unregisterLease)
+                                                     isHandleActive,
+                                                     newHandleRegistry,
+                                                     registerHandle,
+                                                     unregisterHandle)
 import Hyperion.Scheduler.RunTasks.NodeStatus       (NodeStatus)
 import Hyperion.Scheduler.RunTasks.NodeStatus       qualified as NodeStatus
 import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
@@ -168,7 +169,7 @@ runNodeLoop
   -> Shared IO FilePathResolveMap
   -> ConcurrentQueue (SchedulerEvent a)
   -> ConcurrentQueue (TaskRecord a)
-  -> SendPort LeaseRequest
+  -> SendPort AddTasksRequest
   -> CPUAllocation a
   -> Job ()
 runNodeLoop
@@ -184,7 +185,7 @@ runNodeLoop
   pathResolveMapVar
   eventQueue
   taskRecordQueue
-  leaseRequestPort
+  addTasksRequestPort
   initialAllocation = do
 
   forM_ (Map.keys initialAllocation) $ \task -> do
@@ -392,19 +393,18 @@ runNodeLoop
       Log.info "remoteRunTask (masterPid,workerId,tag,numCPUs,priority,outputPaths)"
         (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, taskTag task, numCpus, priority, taskOutputPaths task)
 
-      -- The lease is the task's handle to this scheduler instance while it
-      -- runs: its id is valid until the task returns.
-      leaseId <- liftIO $ atomicModifyIORef' env.leaseCounter $ \n -> (n + 1, MkLeaseId n)
+      -- The task's handle to this scheduler instance while it runs: its id
+      -- is valid until the task returns.
+      handleId <- liftIO $ atomicModifyIORef' env.handleCounter $ \n -> (n + 1, MkHandleId n)
       let
-        lease = MkLease
-          { leaseId     = leaseId
-          , numCpus     = numCpus
-          , requestPort = leaseRequestPort
+        handle = MkSchedulerHandle
+          { handleId    = handleId
+          , requestPort = addTasksRequestPort
           }
-      liftIO $ registerLease env.leases leaseId
+      liftIO $ registerHandle env.handles handleId
       start <- liftIO getCurrentTime
-      res <- remoteRunTask firstWorker lease task
-        `finally` liftIO (unregisterLease env.leases leaseId)
+      res <- remoteRunTask firstWorker numCpus handle task
+        `finally` liftIO (unregisterHandle env.handles handleId)
       end <- liftIO getCurrentTime
       let
         -- TODO: currently afterReturnRemoteRunTaskResult measures file sizes only for taskOutputs
@@ -479,14 +479,14 @@ cleanupLoop config fileService taskQueueNotifier cleanupQueue = lift go where
     unless shouldExit go
 
 
--- | What the node loops and the lease handler report to
+-- | What the node loops and the request handler report to
 -- 'monitorProgressAndDeps', which owns every piece of graph state.
 data SchedulerEvent a
   = TaskFinished a
     -- | Tasks that a running task asked to add to the run (see
     -- "Hyperion.Scheduler.Dynamic"). The reply is sent once they are part of
     -- the graph, or when they are refused.
-  | TasksAdded (Map a (Set a)) (SendPort LeaseReply)
+  | TasksAdded (Map a (Set a)) (SendPort AddTasksReply)
 
 -- | The graph state of one scheduler instance while it runs.
 data MonitorState a = MkMonitorState
@@ -602,12 +602,12 @@ monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock pr
         , lastReport  = lastReport'
         }
 
-    tasksAdded :: MonitorState a -> Map a (Set a) -> SendPort LeaseReply -> Job (MonitorState a)
+    tasksAdded :: MonitorState a -> Map a (Set a) -> SendPort AddTasksReply -> Job (MonitorState a)
     tasksAdded st newEdges replyPort =
       case insertTasks config st newEdges of
         Left err -> do
           Log.warn "Refusing to add tasks" err
-          lift $ sendChan replyPort (LeaseReplyError err)
+          lift $ sendChan replyPort (AddTasksRefused err)
           pure st
         Right (st', runnable, newKeys) -> do
           -- New tasks get critical-path priorities from the grown graph;
@@ -619,7 +619,7 @@ monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock pr
             (catMaybes (Set.toList (Set.map taskTag newKeys)), Set.size newKeys, length runnable)
           withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) runnable
           notifyChangeM taskQueueNotifier
-          lift $ sendChan replyPort (LeaseReplyDone mempty)
+          lift $ sendChan replyPort (AddTasksDone mempty)
           pure st'
 
     -- Wait until all nodes are stalling.
@@ -702,13 +702,13 @@ type TaskRecords a = [TaskRecord a]
 withSchedulerEnv :: Config -> [Node] -> (SchedulerEnv -> Job a) -> Job a
 withSchedulerEnv config nodes go =
   withFileService config nodes $ \fileService -> do
-    leases <- liftIO newLeaseRegistry
-    leaseCounter <- liftIO $ newIORef 0
+    handles <- liftIO newHandleRegistry
+    handleCounter <- liftIO $ newIORef 0
     go MkSchedulerEnv
       { config       = config
       , fileService  = fileService
-      , leases       = leases
-      , leaseCounter = leaseCounter
+      , handles       = handles
+      , handleCounter = handleCounter
       }
 
 -- | Run the given tasks on all nodes of the job by initially
@@ -783,9 +783,9 @@ runTasksIn env pool taskMap = do
   eventQueue <- newQueue
   taskRecordQueue <- newQueue
   cleanupQueue <- newQueue
-  (leaseRequestPort, leaseRequestRecvPort) <- lift newChan
-  leaseHandlerHandle <- asyncLinkedLocalJob $ handleLeaseRequests env leaseRequestRecvPort eventQueue
-  lift $ throwOnAsyncFailed leaseHandlerHandle
+  (addTasksRequestPort, addTasksRequestRecvPort) <- lift newChan
+  requestHandler <- asyncLinkedLocalJob $ handleAddTasksRequests env addTasksRequestRecvPort eventQueue
+  lift $ throwOnAsyncFailed requestHandler
   -- NB: here we don't need taskQueueNotifier and taskQueueLock,
   -- since no one is accessing taskQueue yet.
   mapM_ (TPrioQueue.write taskQueue) moreIndependentTasks
@@ -821,7 +821,7 @@ runTasksIn env pool taskMap = do
           pathResolveMapVar
           eventQueue
           taskRecordQueue
-          leaseRequestPort
+          addTasksRequestPort
           alloc
           `catches`
             [ Handler (Log.throw @_ @IOError)
@@ -853,30 +853,31 @@ runTasksIn env pool taskMap = do
   -- Finishing with AsyncFailed or AsyncLinkFailed will trigger throwOnAsyncFailed.
   mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
   _ <- lift $ Async.wait cleanupLoopHandle
-  _ <- lift $ Async.cancelWait leaseHandlerHandle
+  _ <- lift $ Async.cancelWait requestHandler
   flushQueue taskRecordQueue
 
--- | Answer the requests that running tasks send through their 'Lease' (see
+-- | Answer the requests that running tasks send through their
+-- 'SchedulerHandle' (see
 -- "Hyperion.Scheduler.Dynamic"): tasks to add to this run. The payload is a
 -- closure that builds the task map on this side, with this run's task type,
 -- so the scheduler need not know how the requesting task represents tasks;
 -- the monitor then decides whether they can join the graph and replies.
 -- Refusals are reported to the requesting task, not thrown here.
-handleLeaseRequests
+handleAddTasksRequests
   :: forall a . IsTask a
   => SchedulerEnv
-  -> ReceivePort LeaseRequest
+  -> ReceivePort AddTasksRequest
   -> ConcurrentQueue (SchedulerEvent a)
   -> Job ()
-handleLeaseRequests env recvPort eventQueue = forever $ do
+handleAddTasksRequests env recvPort eventQueue = forever $ do
   request <- lift $ receiveChan recvPort
   let
     refuse msg = do
-      Log.warn "Refusing lease request" (request.leaseId, msg)
-      lift $ sendChan request.replyPort (LeaseReplyError msg)
-  active <- liftIO $ isLeaseActive env.leases request.leaseId
+      Log.warn "Refusing request to add tasks (handle, reason)" (request.handleId, msg)
+      lift $ sendChan request.replyPort (AddTasksRefused msg)
+  active <- liftIO $ isHandleActive env.handles request.handleId
   if not active
-    then refuse $ "unknown lease " <> show request.leaseId
+    then refuse $ "unknown or expired handle " <> show request.handleId
     else do
       built <- try $ do
         buildTasks <- lift $ unClosure (Binary.decode request.payload :: Closure (Process (Map a (Set a))))
@@ -885,7 +886,7 @@ handleLeaseRequests env recvPort eventQueue = forever $ do
       case built of
         Left (e :: SomeException) -> refuse $ "could not build the tasks to add: " <> show e
         Right taskMap -> do
-          Log.info "Tasks to add requested on lease (lease, count)" (request.leaseId, Map.size taskMap)
+          Log.info "Tasks to add requested (handle, count)" (request.handleId, Map.size taskMap)
           liftIO $ writeQueue eventQueue (TasksAdded taskMap request.replyPort)
 
 -- Files that can be removed (if there are no other dependencies)

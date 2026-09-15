@@ -24,7 +24,7 @@ library
       Hyperion.Scheduler.FileService.NodeLocalFileManager
       Hyperion.Scheduler.FileService.RetryTimeout
       Hyperion.Scheduler.Dynamic
-      Hyperion.Scheduler.Lease
+      Hyperion.Scheduler.SchedulerHandle
       Hyperion.Scheduler.PathResolver
       Hyperion.Scheduler.RemoteUtil
       Hyperion.Scheduler.ReusableWorker

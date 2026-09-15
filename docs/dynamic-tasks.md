@@ -7,15 +7,15 @@ document says how, what the scheduler guarantees, and what it refuses.
 
 | name | module | role |
 |---|---|---|
-| `Lease` | `Hyperion.Scheduler.Lease` | What a running task holds: the CPUs reserved for it and a port to the scheduler instance that runs it, valid until the task returns. |
-| `taskClosureWithLease` | `Hyperion.Scheduler.Task.IsTask` | Like `taskClosure`, but the task receives its `Lease`. Default: `taskClosure lease.numCpus`. |
-| `CustomTaskWithLease`, `keepOutputs` | `Hyperion.Scheduler.Task.Task` | The `TaskKind` whose computation receives `Maybe Lease` (`Nothing` while the graph is derived), and the keep flag below. |
-| `addTasks`, `addTasksWith` | `Hyperion.Scheduler.Dynamic` | Called inside the task: sends a task map through the lease and returns once the tasks are part of the graph. |
+| `SchedulerHandle` | `Hyperion.Scheduler.SchedulerHandle` | What a running task holds: an id and a port to the scheduler instance that runs it, valid until the task returns. |
+| `taskClosureWithHandle` | `Hyperion.Scheduler.Task.IsTask` | Like `taskClosure`, but the task also receives its `SchedulerHandle`. Default: ignore the handle. |
+| `CustomTaskWithHandle`, `keepOutputs` | `Hyperion.Scheduler.Task.Task` | The `TaskKind` whose computation receives `Maybe SchedulerHandle` (`Nothing` while the graph is derived), and the keep flag below. |
+| `addTasks`, `addTasksWith` | `Hyperion.Scheduler.Dynamic` | Called inside the task: sends a task map through the handle and returns once the tasks are part of the graph. |
 | `taskKeepOutputs` | `Hyperion.Scheduler.Task.IsTask` | Keep the task's node-local outputs until the run ends, for readers added later. |
 
 ## Adding tasks
 
-`addTasks lease taskMap` sends a task map to the scheduler and returns once the
+`addTasks handle taskMap` sends a task map to the scheduler and returns once the
 tasks are part of the graph. The task does not wait for them to run, so
 nothing is held across the addition and the scheduler's deadlock argument is
 unchanged. The new tasks may depend on tasks already in the run, finished or
