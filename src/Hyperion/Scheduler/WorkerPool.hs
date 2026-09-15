@@ -165,14 +165,17 @@ newNodeWorkerPool :: WorkerAddr -> Int -> OsPath -> Job NodeWorkerPool
 newNodeWorkerPool addr maxWorkers logDir = do
   let
     ids = map (WorkerCpuId addr) [0 .. maxWorkers - 1]
-  workerMap <- fmap Map.fromList $ forM ids $ \w -> do
-    tWorker <- newTWorker w $ getLogPath logDir w
-    return (w, tWorker)
-  liftIO $ do
-    idle <- newQueue
-    mapM_ (writeQueue idle) ids
-    cpuTimeVar <- newMVar 0
-    return $ NodeWorkerPool workerMap idle cpuTimeVar
+  workers <- forM ids $ \w -> newTWorker w $ getLogPath logDir w
+  liftIO $ newNodeWorkerPoolFromWorkers workers
+
+-- | A pool over existing worker slots. All of them start idle.
+newNodeWorkerPoolFromWorkers :: [TWorker] -> IO NodeWorkerPool
+newNodeWorkerPoolFromWorkers workers = do
+  let workerMap = Map.fromList [(w.workerId, w) | w <- workers]
+  idle <- newQueue
+  mapM_ (writeQueue idle) (Map.keys workerMap)
+  cpuTimeVar <- newMVar 0
+  return $ NodeWorkerPool workerMap idle cpuTimeVar
 
 deleteNodeWorkerPool :: NodeWorkerPool -> Job ()
 deleteNodeWorkerPool pool = do

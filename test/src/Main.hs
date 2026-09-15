@@ -25,6 +25,7 @@
 -- inherited through @sbatch@, a flag would not be.
 module Main where
 
+import Control.Monad                           (forM_)
 import Control.Monad.IO.Class                  (liftIO)
 import Control.Monad.Reader                    (local)
 import Data.Maybe                              (fromMaybe)
@@ -33,8 +34,10 @@ import Hyperion                                hiding (opts)
 import Hyperion.Log                            qualified as Log
 import Hyperion.OsPath                         (OsPath, (</>))
 import Hyperion.OsString                       (fromString, showOs)
+import Hyperion.Util                           (minute)
 import Hyperion.Scheduler.Test.Config          (Site)
 import Hyperion.Scheduler.Test.Config          qualified as TestConfig
+import Hyperion.Scheduler.Test.FollowUps       qualified as FollowUps
 import Hyperion.Scheduler.Test.LinearTransform (CyclicShiftProblem (..),
                                                 linearTransformJob)
 import Hyperion.Slurm                          (SbatchOptions (..),
@@ -163,6 +166,29 @@ runOnCluster site =
         `cAp` cPure (workDir baseDir opts)
         `cAp` cPure (toProblem opts.problem)
 
+-- | The follow-ups test (tasks that add tasks) on the cluster: every
+-- scenario of 'FollowUps.defaultProblems' in turn, one SLURM job each, all
+-- inside one 'hyperionMain'. The same executable serves as the worker, and
+-- its 'main' must not reach 'hyperionMain' more than once: the worker branch
+-- returns when its job is done, and a second call would start a second
+-- worker against a master that has already finished. The problem options of
+-- 'masterOptsParser' are accepted and ignored, except @--base-dir@.
+runFollowUpsOnCluster :: Site -> IO ()
+runFollowUpsOnCluster site =
+  hyperionMain masterOptsParser mkHyperionConfig (TestConfig.hyperionStaticConfig site) clusterComputation
+  where
+    mkHyperionConfig opts =
+      TestConfig.getHyperionConfig site (fromMaybe "." opts.problem.baseDir) opts.sbatchOptions
+
+    clusterComputation opts = do
+      baseDir <- liftIO $ maybe (TestConfig.getScratchDir site) makeAbsolute opts.problem.baseDir
+      forM_ FollowUps.defaultProblems $ \problem ->
+        local (setJobTime (20 * minute) . setJobType (MPIJob 1 problem.nodeCpus)) $
+          remoteEvalJob $ static FollowUps.followUpsJob
+            `cAp` (static TestConfig.getSchedulerConfig `cAp` cPure site)
+            `cAp` cPure (baseDir </> "followups" </> "mpi_1_" <> showOs problem.nodeCpus)
+            `cAp` cPure problem
+
 -- * Entry point
 
 usage :: String
@@ -172,16 +198,20 @@ usage = unlines
   , "Commands:"
   , "  local   Run the LinearTransform test in this process, without SLURM"
   , "  master  Run the LinearTransform test on a SLURM cluster"
+  , "  followups  Run the tasks-that-add-tasks test (Test.FollowUps) on a SLURM cluster"
   , "  worker  Run a worker process (launched automatically by the master)"
   , ""
   , "Pass --help after a command for its options."
   , "Set " <> siteEnvVar <> " to select the HPC site for master/worker."
   ]
 
+-- | Select the test with HYPERION_SCHEDULER_TEST=linear (default) or
+-- =followups.
 main :: IO ()
 main = getArgs >>= \case
   "local" : rest    -> withProgName "hyperion-scheduler-test local" $
                        withArgs rest $ execParser localOptsInfo >>= runLocal
+  "followups" : rest -> withArgs rest $ getSite >>= runFollowUpsOnCluster
   args | needsUsage -> putStr usage >> exitSuccess
        | otherwise  -> getSite >>= runOnCluster
     where needsUsage = null args || head args `elem` ["-h", "--help", "help"]

@@ -50,6 +50,7 @@ import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
                                             ToTaskKeyFileInfo, mkStatKeyViaJSON,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
+import Hyperion.Scheduler.Lease            (Lease (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
                                             defaultRuntimeEstimate)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
@@ -171,6 +172,15 @@ data TaskKind k where
     :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
         => NumCPUs -> TaskConfig k -> k -> f (Process ()))
     -> TaskKind k
+  -- | Like 'CustomTask', but the computation also receives the task's
+  -- 'Lease', through which it may add tasks to the run
+  -- ("Hyperion.Scheduler.Dynamic"). The lease is 'Nothing' while the task
+  -- graph is being derived from the 'getPath' calls, and when the task is
+  -- run without one; a body that needs it should fail loudly then.
+  CustomTaskWithLease
+    :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
+        => Maybe Lease -> TaskConfig k -> k -> f (Process ()))
+    -> TaskKind k
   -- | A task performing no computation: a pure grouping node whose only role
   -- is to depend on other tasks (@OutKey k ~ Void@: no output files). The
   -- given action must 'getPath' each dependency -- that is what declares the
@@ -214,6 +224,12 @@ class ( All Eq (DepKeys k)
   taskKind :: TaskKind k
   default taskKind :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k) => TaskKind k
   taskKind = ComputeValueTask
+
+  -- | Keep the task's node-local output files until the end of the run, see
+  -- 'Hyperion.Scheduler.Task.IsTask.taskKeepOutputs'. For outputs read by
+  -- tasks added later in the run ("Hyperion.Scheduler.Dynamic").
+  keepOutputs :: k -> Bool
+  keepOutputs = const False
 
   -- | Estimated memory in bytes.
   memoryEstimate     :: TaskConfig k -> k -> MemorySize
@@ -329,7 +345,21 @@ computeAndSaveValue numCpus cfg key = case taskKind @k of
     pure $ do
       error $ "computeAndSaveValue: unreplaced placeholder task " <> show (typeOf key)
   CustomTask go -> go numCpus cfg key
+  CustomTaskWithLease go -> go Nothing cfg key
   NoOpTask go -> go key $> pure ()
+
+-- | 'computeAndSaveValue' with the task's 'Lease': a 'CustomTaskWithLease'
+-- receives it, every other kind runs as with the lease's CPU count.
+computeAndSaveValueWithLease
+  :: forall k f .
+     ( TaskKey k
+     , Applicative f
+     , FetchesPaths (OutKey k ': DepKeys k) f
+     )
+  => Lease -> TaskConfig k -> k -> f (Process ())
+computeAndSaveValueWithLease lease cfg key = case taskKind @k of
+  CustomTaskWithLease go -> go (Just lease) cfg key
+  _ -> computeAndSaveValue lease.numCpus cfg key
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
 outAndDependencies cfg key =
@@ -371,6 +401,28 @@ computeAndWrite Dict numCpus task =
       case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
         Dict -> computeAndSaveValue numCpus task.config task.key
 
+-- | 'computeAndWrite' with the task's 'Lease'.
+computeAndWriteWithLease
+  :: forall r k .
+     Dict ( PathResolverForAll r (DepKeys k)
+          , PathResolver r (OutKey k)
+          , TaskKey k
+          )
+  -> Lease
+  -> Task r k
+  -> Process ()
+computeAndWriteWithLease Dict lease task =
+  join $
+  runFetchTAll fetchAction $
+  fetchWithResolver (Proxy @(OutKey k ': DepKeys k)) task.resolver
+  where
+    fetchAction
+      :: forall f . (Applicative f, FetchesAll (OutAndDepsWithPaths k) f)
+      => f (Process ())
+    fetchAction =
+      case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
+        Dict -> computeAndSaveValueWithLease lease task.config task.key
+
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
 
@@ -393,6 +445,7 @@ instance
   , Typeable (PathResolverForAll r (DepKeys k))
   ) => IsTask (Task r k) where
   taskMemoryEstimate t   = memoryEstimate t.config t.key
+  taskKeepOutputs t      = keepOutputs t.key
   taskRuntimeEstimate t  = runtimeEstimate t.config t.key
   -- TODO reorder arguments?
   -- NoOpTask's perform no computation, so they occupy no worker threads
@@ -423,6 +476,12 @@ instance
   taskPlaceholderKey t = case taskKind @k of
     PlaceholderTask -> cast t.key
     _               -> Nothing
+  taskClosureWithLease lease t = case taskKind @k of
+    NoOpTask _ -> Nothing
+    _ -> Just $ static computeAndWriteWithLease
+      `cAp` closureDict
+      `cAp` cPure lease
+      `cAp` cPure t
 
 instance {-# OVERLAPPABLE #-} TaskKey k => ToStatKey k where
   toStatKey = mkStatKeyViaJSON

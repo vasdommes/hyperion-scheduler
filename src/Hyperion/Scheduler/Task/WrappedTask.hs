@@ -68,6 +68,7 @@ instance ToJSON WrappedTask where
 
 instance IsTask WrappedTask where
   taskMemoryEstimate t = t.memoryEstimate
+  taskKeepOutputs (MkWrappedTask { task = t }) = taskKeepOutputs t
   taskRuntimeEstimate t = t.runtimeEstimate
   taskMaxThreads stage (MkWrappedTask { task = t }) = taskMaxThreads stage t
   taskMinThreads stage (MkWrappedTask { task = t }) = taskMinThreads stage t
@@ -78,6 +79,7 @@ instance IsTask WrappedTask where
   taskClosure numCpus (MkWrappedTask { task = t }) = taskClosure numCpus t
   taskIsPlaceholder (MkWrappedTask { task = t }) = taskIsPlaceholder t
   taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
+  taskClosureWithLease lease (MkWrappedTask { task = t }) = taskClosureWithLease lease t
 
 instance ToStatKey WrappedTask where
   toStatKey (MkWrappedTask { task = t }) = toStatKey t

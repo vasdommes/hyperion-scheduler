@@ -24,6 +24,7 @@ import Hyperion                       (Job, Static, cAp, cPure, setTaskCpus)
 import Hyperion                       qualified as Hyp
 import Hyperion.Log                   qualified as Log
 import Hyperion.Scheduler.FilePath    (VirtualFilePath (VirtualFilePath))
+import Hyperion.Scheduler.Lease       (Lease (..))
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), taskOutputPaths)
 import Hyperion.Scheduler.Types       (FileSize (..), MemorySize (..), NumCPUs)
 import Hyperion.Scheduler.WorkerPool  (TWorker, remoteRunOnNewWorker)
@@ -65,14 +66,16 @@ afterReturnRemoteRunTaskResultM files go = do
   fileSizes <- Map.fromList <$> (mapM pathAndSize $ Set.toList files)
   return $ MkRemoteRunTaskResult { remoteTaskMemory = mem, remoteTaskFileSizes = fileSizes }
 
-remoteRunTask :: IsTask a => Maybe TWorker -> NumCPUs -> a -> Job RemoteRunTaskResult
-remoteRunTask mWorker numCpus task = case taskClosure numCpus task of
+-- | Run a task on the given worker with the given 'Lease'. The lease's CPU
+-- count is the number of CPUs reserved for the task.
+remoteRunTask :: IsTask a => Maybe TWorker -> Lease -> a -> Job RemoteRunTaskResult
+remoteRunTask mWorker lease task = case taskClosureWithLease lease task of
   Nothing -> pure emptyRemoteRunTaskResult
   Just closure -> case mWorker of
     Nothing -> Log.throwError "remoteRunTask expected (Just TWorker), but got Nothing"
     Just w -> do
       -- TODO: is setTaskCpus really needed?
-      local (setTaskCpus (Hyp.NumCPUs numCpus)) $
+      local (setTaskCpus (Hyp.NumCPUs lease.numCpus)) $
         remoteRunOnNewWorker w $
         static afterReturnRemoteRunTaskResultM
         -- TODO: measure input file sizes too?

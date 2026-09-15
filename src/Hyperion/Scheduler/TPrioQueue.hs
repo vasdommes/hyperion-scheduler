@@ -12,22 +12,29 @@ import Data.PQueue.Prio.Max   qualified as MaxQueue
 import Prelude                hiding (read)
 
 -- | An STM-based priority queue. Values are sorted from high to low
--- priority.
+-- priority. The priority of an element is computed, in IO, when the element
+-- is written, so that it may depend on state that changes while the queue is
+-- in use (the scheduler's task graph grows during a run).
 data TPrioQueue k a = MkTPrioQueue
   { queueVar     :: TVar (MaxQueue.MaxPQueue k a)
-  , elemPriority :: a -> k
+  , elemPriority :: a -> IO k
   }
 
 -- | Create a new TPrioQueue with the given priority function.
 new :: MonadIO m => (a -> k) -> m (TPrioQueue k a)
-new prio = liftIO $ do
+new prio = newIO (pure . prio)
+
+-- | Create a new TPrioQueue whose priority function runs in IO.
+newIO :: MonadIO m => (a -> IO k) -> m (TPrioQueue k a)
+newIO prio = liftIO $ do
   qVar <- newTVarIO MaxQueue.empty
   pure (MkTPrioQueue qVar prio)
 
--- | Add an element to the TPrioQueue.
+-- | Add an element to the TPrioQueue, with the priority it has now.
 write :: (MonadIO m, Ord k) => TPrioQueue k a -> a -> m ()
-write (MkTPrioQueue qVar prio) x =
-  liftIO $ atomically $ modifyTVar qVar (MaxQueue.insert (prio x) x)
+write (MkTPrioQueue qVar prio) x = liftIO $ do
+  k <- prio x
+  atomically $ modifyTVar qVar (MaxQueue.insert k x)
 
 -- | Read the first element of a TPrioQueue and remove it from the
 -- queue. Blocks if the queue is empty. Modeled on 'readTQueue'

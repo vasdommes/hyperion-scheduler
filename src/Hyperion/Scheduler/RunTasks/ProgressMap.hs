@@ -35,6 +35,12 @@ fromTasksTodo tasks =
   t <- Set.toList tasks
   pure (taskTag t, 1)
 
+-- | Account for tasks added to the run: their tags' totals grow.
+addTasks :: IsTask a => Set a -> ProgressMap -> ProgressMap
+addTasks tasks progressMap = Map.unionWith addTotals progressMap (fromTasksTodo tasks)
+  where
+    addTotals p q = p { total = p.total + q.total }
+
 -- | Update a Progress Map to account for a finished task
 update :: IsTask a => a -> ProgressMap -> ProgressMap
 update task =

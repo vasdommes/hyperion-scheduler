@@ -23,10 +23,13 @@ library
       Hyperion.Scheduler.FileService.FileSender
       Hyperion.Scheduler.FileService.NodeLocalFileManager
       Hyperion.Scheduler.FileService.RetryTimeout
+      Hyperion.Scheduler.Dynamic
+      Hyperion.Scheduler.Lease
       Hyperion.Scheduler.PathResolver
       Hyperion.Scheduler.RemoteUtil
       Hyperion.Scheduler.ReusableWorker
       Hyperion.Scheduler.RunTasks
+      Hyperion.Scheduler.RunTasks.Env
       Hyperion.Scheduler.RunTasks.NodeStatus
       Hyperion.Scheduler.RunTasks.ProgressMap
       Hyperion.Scheduler.RunTasks.RemoteRunTask
@@ -94,6 +97,7 @@ executable hyperion-scheduler-test
   other-modules:
       Hyperion.Scheduler.Test.Config
       Hyperion.Scheduler.Test.LinearTransform
+      Hyperion.Scheduler.Test.FollowUps
       Paths_hyperion_scheduler
   hs-source-dirs:
       test/src
@@ -103,8 +107,14 @@ executable hyperion-scheduler-test
     , base
     , binary
     , bootstrap-build
+    , bytestring
+    , bytestring-conversion
     , concurrent-output
+    , containers
     , directory
+    , distributed-process
+    , extra
+    , file-io
     , hyperion
     , hyperion-scheduler
     , matrix
