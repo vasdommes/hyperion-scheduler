@@ -16,6 +16,7 @@ import Data.Typeable               (Typeable, typeOf)
 import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
+import Hyperion.Scheduler.Lease    (Lease (..))
 import Hyperion.Scheduler.StatKey  (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Types    (MemorySize, NumCPUs)
 
@@ -36,6 +37,13 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   -- | Estimated memory in bytes
   taskMemoryEstimate     :: a -> MemorySize
   taskMemoryEstimate = const 0
+  -- | Keep the task's node-local output files until the end of the run,
+  -- instead of deleting them once every task that declared them has
+  -- finished. Needed when tasks added during the run
+  -- ("Hyperion.Scheduler.Dynamic") will read them: the scheduler refuses a
+  -- late task that asks for a file it has already deleted.
+  taskKeepOutputs :: a -> Bool
+  taskKeepOutputs = const False
   -- | Estimated runtime in seconds, as a function of NumCPUs
   taskRuntimeEstimate    :: a -> NumCPUs -> NominalDiffTime
   taskRuntimeEstimate t = defaultRuntimeEstimate (taskMemoryEstimate t)
@@ -61,6 +69,12 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 
   taskClosure :: NumCPUs -> a -> Maybe (Closure (Process ()))
 
+  -- | Like 'taskClosure', but the task also receives its 'Lease', through
+  -- which it may add tasks to the run ("Hyperion.Scheduler.Dynamic"). The
+  -- default ignores the lease.
+  taskClosureWithLease :: Lease -> a -> Maybe (Closure (Process ()))
+  taskClosureWithLease lease = taskClosure lease.numCpus
+
 -- TODO: remove (Stats.ToStatKey a) and use (IsTask a) everywhere in Stats instead?
 --  taskStatKey :: a -> StatKey
 --  -- | A default implementation for the case where we wish to retain
@@ -80,7 +94,7 @@ defaultRuntimeEstimate _   0       = 0
 defaultRuntimeEstimate _   numCpus | numCpus < 0 = error "defaultRuntimeEstimate: negative CPU count"
 defaultRuntimeEstimate mem numCpus = memoryToCpuTimeApprox mem / fromIntegral numCpus
 
--- Returns min(maxMemory, taskMemory t)
+-- Returns min(maxMemory, taskMemoryEstimate t)
 taskMemoryCapped :: IsTask a => MemorySize -> a -> MemorySize
 taskMemoryCapped maxMemory t =
   let

@@ -44,6 +44,7 @@ import Hyperion.Scheduler.StatKey          (ToFileStatKey, ToStatKey (..),
                                             ToTaskKeyFileInfo, mkStatKeyViaJSON,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
+import Hyperion.Scheduler.Lease            (Lease (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
                                             defaultRuntimeEstimate)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
@@ -164,6 +165,21 @@ class ( All Eq (DepKeys k)
        , FetchesPaths (OutKey k ': DepKeys k) f
        )
     => NumCPUs -> TaskConfig k -> k -> f (Process ())
+
+  -- | Like 'computeAndSaveValue', but with the 'Lease' of the task, through
+  -- which it may add tasks to the run (see "Hyperion.Scheduler.Dynamic"). The
+  -- default ignores the lease.
+  computeAndSaveValueWithLease
+    :: ( Applicative f
+       , FetchesPaths (OutKey k ': DepKeys k) f
+       )
+    => Lease -> TaskConfig k -> k -> f (Process ())
+  computeAndSaveValueWithLease lease = computeAndSaveValue lease.numCpus
+
+  -- | Keep the task's node-local output files until the end of the run, see
+  -- 'taskKeepOutputs'. For outputs read by tasks added later in the run.
+  keepOutputs :: k -> Bool
+  keepOutputs = const False
   default computeAndSaveValue :: (Applicative f, ComputeValue k, ValueSerializable k, FetchesPaths (OutKey k ': DepKeys k) f, OutKey k ~ k) => NumCPUs -> TaskConfig k -> k -> f (Process ())
   computeAndSaveValue numCpus cfg key = do
     path <- getPath key
@@ -275,6 +291,28 @@ computeAndWrite Dict numCpus task =
       case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
         Dict -> computeAndSaveValue numCpus task.config task.key
 
+-- | 'computeAndWrite' with the task's 'Lease'.
+computeAndWriteWithLease
+  :: forall r k .
+     Dict ( PathResolverForAll r (DepKeys k)
+          , PathResolver r (OutKey k)
+          , TaskKey k
+          )
+  -> Lease
+  -> Task r k
+  -> Process ()
+computeAndWriteWithLease Dict lease task =
+  join $
+  runFetchTAll fetchAction $
+  fetchWithResolver (Proxy @(OutKey k ': DepKeys k)) task.resolver
+  where
+    fetchAction
+      :: forall f . (Applicative f, FetchesAll (OutAndDepsWithPaths k) f)
+      => f (Process ())
+    fetchAction =
+      case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
+        Dict -> computeAndSaveValueWithLease lease task.config task.key
+
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
 
@@ -297,6 +335,7 @@ instance
   , Typeable (PathResolverForAll r (DepKeys k))
   ) => IsTask (Task r k) where
   taskMemoryEstimate t   = memoryEstimate t.key
+  taskKeepOutputs t      = keepOutputs t.key
   taskRuntimeEstimate t  = runtimeEstimate t.key
   -- TODO reorder arguments?
   taskMaxThreads stage t = maxThreads stage t.key
@@ -309,6 +348,10 @@ instance
   taskClosure numCpus t  = Just $ static computeAndWrite
     `cAp` closureDict
     `cAp` cPure numCpus
+    `cAp` cPure t
+  taskClosureWithLease lease t = Just $ static computeAndWriteWithLease
+    `cAp` closureDict
+    `cAp` cPure lease
     `cAp` cPure t
 
 instance {-# OVERLAPPABLE #-} TaskKey k => ToStatKey k where

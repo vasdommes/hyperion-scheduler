@@ -19,15 +19,23 @@ import Control.Concurrent.STM                       (TVar, atomically, check,
                                                      writeTVar)
 import Control.Concurrent.Utils                     (Lock, mkExclusiveLock,
                                                      withLock)
-import Control.Distributed.Process                  (getSelfPid)
+import Control.Exception                            (SomeException)
+import Control.Distributed.Process                  (ReceivePort, SendPort,
+                                                     getSelfPid, newChan,
+                                                     receiveChan, sendChan)
 import Control.Distributed.Process.Async            (Async)
 import Control.Distributed.Process.Async            qualified as Async
 import Control.Monad                                (foldM, forM_, forever,
                                                      unless, when)
-import Control.Monad.Catch                          (Handler (..), catches)
+import Control.Monad.Catch                          (Handler (..), catches,
+                                                     finally, try)
 import Control.Monad.IO.Class                       (liftIO)
 import Control.Monad.Reader                         (lift)
 import Control.Monad.Writer                         (Writer, runWriter, tell)
+import Data.Binary                                  qualified as Binary
+import Data.IORef                                   (IORef, atomicModifyIORef',
+                                                     newIORef, readIORef,
+                                                     writeIORef)
 import Data.List.Extra                              (nubOrd, partition)
 import Data.List.NonEmpty                           (NonEmpty (..))
 import Data.List.NonEmpty                           qualified as NonEmpty
@@ -37,9 +45,11 @@ import Data.Maybe                                   (catMaybes, fromMaybe,
                                                      isNothing, listToMaybe)
 import Data.Set                                     (Set)
 import Data.Set                                     qualified as Set
-import Data.Time.Clock                              (addUTCTime, diffUTCTime,
+import Data.Time.Clock                              (UTCTime, addUTCTime,
+                                                     diffUTCTime,
                                                      getCurrentTime)
-import Hyperion                                     (Job, Process, RemoteError)
+import Hyperion                                     (Closure, Job, Process,
+                                                     RemoteError, unClosure)
 import Hyperion.Log                                 qualified as Log
 import Hyperion.Scheduler.ConcurrentQueue           (ConcurrentQueue,
                                                      flushQueue, newQueue,
@@ -47,6 +57,9 @@ import Hyperion.Scheduler.ConcurrentQueue           (ConcurrentQueue,
                                                      readQueue, writeListQueue,
                                                      writeQueue)
 import Hyperion.Scheduler.Config                    (Config (..))
+import Hyperion.Scheduler.Lease                     (Lease (..), LeaseId (..),
+                                                     LeaseReply (..),
+                                                     LeaseRequest (..))
 import Hyperion.Scheduler.FilePath                  (ClusterFilePath (..),
                                                      VirtualFilePath (..),
                                                      isNodeLocal,
@@ -64,6 +77,12 @@ import Hyperion.Scheduler.RemoteUtil                (AsyncFailedException (..),
                                                      asyncLinkedLocalJob,
                                                      getJobNodes,
                                                      throwOnAsyncFailed)
+import Hyperion.Scheduler.RunTasks.Env              (ResourcePool (..),
+                                                     SchedulerEnv (..),
+                                                     isLeaseActive,
+                                                     newLeaseRegistry,
+                                                     registerLease,
+                                                     unregisterLease)
 import Hyperion.Scheduler.RunTasks.NodeStatus       (NodeStatus)
 import Hyperion.Scheduler.RunTasks.NodeStatus       qualified as NodeStatus
 import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
@@ -77,6 +96,7 @@ import Hyperion.Scheduler.RunTasks.TaskDistribution (CPUAllocation,
                                                      allocateCpusToTasks,
                                                      distributeTasksToNodesWithScores)
 import Hyperion.Scheduler.RunTasks.TaskPriority     (TaskPriority,
+                                                     TaskPriorityHelper,
                                                      mkTaskPriorityHelper,
                                                      taskPriority)
 import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
@@ -135,9 +155,8 @@ allNodesStalling statuses = case nubOrd statuses of
 -- tasks. So, no. We do not need to do things atomically.
 runNodeLoop
   :: forall a . IsTask a
-  => Config
+  => SchedulerEnv
   -> Node
-  -> FileService
   -> WorkerPool
   -> Shared IO NodeStatus
   -> TVar (IsNodeStalling a)
@@ -146,14 +165,14 @@ runNodeLoop
   -> Lock
   -> Shared IO FileSizeMap
   -> Shared IO FilePathResolveMap
-  -> ConcurrentQueue a
+  -> ConcurrentQueue (SchedulerEvent a)
   -> ConcurrentQueue (TaskRecord a)
+  -> SendPort LeaseRequest
   -> CPUAllocation a
   -> Job ()
 runNodeLoop
-  config
+  env
   node
-  fileService
   workerPool
   nodeStatusVar
   isNodeStallingVar
@@ -162,8 +181,9 @@ runNodeLoop
   taskQueueLock
   fileSizeMapVar
   pathResolveMapVar
-  finishedTaskQueue
+  eventQueue
   taskRecordQueue
+  leaseRequestPort
   initialAllocation = do
 
   forM_ (Map.keys initialAllocation) $ \task -> do
@@ -183,6 +203,9 @@ runNodeLoop
   forever getAndRunTasks
 
   where
+    config = env.config
+    fileService = env.fileService
+
     reserveLocalTaskFiles :: a -> Process (Response, Map VirtualFilePath FileSize)
     reserveLocalTaskFiles t = do
       let localFiles = Set.filter (isNodeLocal config) $ Set.union (taskInputPaths t) (taskOutputPaths t)
@@ -364,11 +387,23 @@ runNodeLoop
 
       -- TODO for debug
       selfPid <- lift getSelfPid
+      priority <- liftIO $ taskQueue.elemPriority task
       Log.info "remoteRunTask (masterPid,workerId,tag,numCPUs,priority,outputPaths)"
-        (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, taskTag task, numCpus, taskQueue.elemPriority task, taskOutputPaths task)
+        (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, taskTag task, numCpus, priority, taskOutputPaths task)
 
+      -- The lease is the task's handle to this scheduler instance while it
+      -- runs: its id is valid until the task returns.
+      leaseId <- liftIO $ atomicModifyIORef' env.leaseCounter $ \n -> (n + 1, MkLeaseId n)
+      let
+        lease = MkLease
+          { leaseId     = leaseId
+          , numCpus     = numCpus
+          , requestPort = leaseRequestPort
+          }
+      liftIO $ registerLease env.leases leaseId
       start <- liftIO getCurrentTime
-      res <- remoteRunTask firstWorker numCpus task
+      res <- remoteRunTask firstWorker lease task
+        `finally` liftIO (unregisterLease env.leases leaseId)
       end <- liftIO getCurrentTime
       let
         -- TODO: currently afterReturnRemoteRunTaskResult measures file sizes only for taskOutputs
@@ -379,7 +414,7 @@ runNodeLoop
 
         outputPathsMap = Map.fromSet (toClusterFilePath config node.address) $ taskOutputPaths task
         onDuplicate key _ _ = error $ "Output file path is used by more than one task: " ++ show key
-      -- Add to Sheduler's FilePathResolveMap the files created by this task. This should happen before adding the task to finishedTaskQueue.
+      -- Add to Sheduler's FilePathResolveMap the files created by this task. This should happen before adding the task to eventQueue.
       liftIO $ Shared.withWrite_ pathResolveMapVar $ Map.unionWithKey onDuplicate outputPathsMap
       liftIO $ Shared.withWrite_ nodeStatusVar $ NodeStatus.removeTask t
 
@@ -405,8 +440,8 @@ runNodeLoop
         , taskFileSizes = Map.fromListWith (<>) $ map toTaskFileSizeItem $ Map.toList res.remoteTaskFileSizes
         }
       -- NB: this should be the last operation, since the nodeLoop process is killed
-      -- after monitorProgressAndDeps reads the last task from finishedTaskQueue!
-      liftIO $ writeQueue finishedTaskQueue task
+      -- after monitorProgressAndDeps reads the last event from eventQueue!
+      liftIO $ writeQueue eventQueue (TaskFinished task)
 
     getAndRunTasks :: Job ()
     getAndRunTasks = do
@@ -443,28 +478,56 @@ cleanupLoop config fileService taskQueueNotifier cleanupQueue = lift go where
     unless shouldExit go
 
 
--- | Continually read tasks from 'finishedTaskQueue' and update the
--- ProgressMap and TaskGraph, returning when all tasks are
--- completed. Report progress whenever an update comes in, provided it
--- has been at least 'reportInterval' since the last progress
--- report. For each task, when all the dependencies of a task have
--- finished, enqueue the task in the 'taskQueue'.
+-- | What the node loops and the lease handler report to
+-- 'monitorProgressAndDeps', which owns every piece of graph state.
+data SchedulerEvent a
+  = TaskFinished a
+    -- | Tasks that a running task asked to add to the run (see
+    -- "Hyperion.Scheduler.Dynamic"). The reply is sent once they are part of
+    -- the graph, or when they are refused.
+  | TasksAdded (Map a (Set a)) (SendPort LeaseReply)
+
+-- | The graph state of one scheduler instance while it runs.
+data MonitorState a = MkMonitorState
+  { edges       :: Map a (Set a)
+    -- ^ every task of the run so far, with its dependencies
+  , taskGraph   :: TaskGraph a
+    -- ^ 'TaskGraph.fromEdges' of 'edges'; rebuilt when tasks are added
+  , depCounts   :: TaskGraph.DepCounts a
+    -- ^ unfinished dependencies of the tasks that have not been queued yet
+  , finished    :: Set a
+  , cleanup     :: CleanupState
+  , progressMap :: ProgressMap
+  , lastReport  :: UTCTime
+  }
+
+-- | Continually read events from 'eventQueue' and update the graph state,
+-- returning when all tasks are completed. Report progress whenever an
+-- update comes in, provided it has been at least 'reportInterval' since the
+-- last progress report. When all the dependencies of a task have finished,
+-- enqueue the task in the 'taskQueue'. Tasks added during the run
+-- ('TasksAdded') join the graph here, so that all graph state lives in one
+-- thread.
 monitorProgressAndDeps
-  :: IsTask a
+  :: forall a . IsTask a
   => Config
+  -> [Node]
   -> TPrioQueue TaskPriority a
   -> TChangeNotifier
   -> Lock
-  -> ConcurrentQueue a
-  -> TaskGraph a
-  -> CleanupDependenciesMap
+  -> IORef (TaskPriorityHelper a)
+  -> Shared IO (Map VirtualFilePath FileSize)
+  -> ConcurrentQueue (SchedulerEvent a)
   -> CleanupQueue
   -> Map Node (Shared IO NodeStatus, TVar (IsNodeStalling a))
-  -> ProgressMap
+  -> Map a (Set a)
   -> Job ()
-monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finishedTaskQueue taskGraph initCleanupDepCounts cleanupQueue nodeStatusMap initProgressMap = do
-  Log.info "Building" (catMaybes (Map.keys initProgressMap))
-  report initProgressMap
+monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock priorityRef fileSizeMapVar eventQueue cleanupQueue nodeStatusMap initialEdges = do
+  let
+    initialGraph = TaskGraph.fromEdges initialEdges
+    initialProgress = ProgressMap.fromTasksTodo (TaskGraph.keys initialGraph)
+  Log.info "Building" (catMaybes (Map.keys initialProgress))
+  report initialProgress
   start <- liftIO getCurrentTime
 
   monitorStallingHandle <- lift $ Async.asyncLinked $ Async.task $ do
@@ -473,14 +536,22 @@ monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finished
     return ()
   lift $ throwOnAsyncFailed monitorStallingHandle
 
-  let initDepCounts = TaskGraph.dependencyCounts taskGraph
-  -- TODO initialize initCleanupDepCounts here instead of passing it
-  go start initDepCounts initCleanupDepCounts initProgressMap
+  initialCleanup <- either Log.throwError pure $
+    claimFilesOfTasks config (Map.keysSet initialEdges) emptyCleanupState
+  finalState <- go MkMonitorState
+    { edges       = initialEdges
+    , taskGraph   = initialGraph
+    , depCounts   = TaskGraph.dependencyCounts initialGraph
+    , finished    = Set.empty
+    , cleanup     = initialCleanup
+    , progressMap = initialProgress
+    , lastReport  = start
+    }
 
   _ <- lift $ Async.cancelWait monitorStallingHandle
 
   finish <- liftIO getCurrentTime
-  Log.info "Finished" ( catMaybes (Map.keys initProgressMap)
+  Log.info "Finished" ( catMaybes (Map.keys finalState.progressMap)
                       , diffUTCTime finish start
                       )
   where
@@ -497,23 +568,58 @@ monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finished
         then report progressMap >> pure now
         else pure lastReportTime
 
-    go lastReportTime depCounts cleanupDepCounts progressMap
-      | ProgressMap.isFinished progressMap = do
-        writeQueue cleanupQueue Nothing
-        pure ()
+    go :: MonitorState a -> Job (MonitorState a)
+    go st
+      | ProgressMap.isFinished st.progressMap = do
+          -- Files kept for tasks added during the run are intermediates like
+          -- any other node-local file: the run leaves none behind.
+          writeListQueue cleanupQueue $ map Just (Set.toList st.cleanup.kept)
+          writeQueue cleanupQueue Nothing
+          pure st
       | otherwise = do
-          finishedTask <- liftIO $ readQueue finishedTaskQueue
-          let
-            progressMap' = ProgressMap.update finishedTask progressMap
-            (depCounts', newTasks) = TaskGraph.decrementReverseDependencies taskGraph depCounts finishedTask
-            filesToCleanup = taskFilesToCleanup config finishedTask
-            (cleanupDepCounts', pathsToCleanup) = runWriter $
-              decrementCleanupCounts filesToCleanup cleanupDepCounts
-          withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) newTasks
-          writeListQueue cleanupQueue $ map Just pathsToCleanup
+          event <- liftIO $ readQueue eventQueue
+          st' <- case event of
+            TaskFinished t                -> taskFinished st t
+            TasksAdded newEdges replyPort -> tasksAdded st newEdges replyPort
+          go st'
+
+    taskFinished :: MonitorState a -> a -> Job (MonitorState a)
+    taskFinished st finishedTask = do
+      let
+        progressMap' = ProgressMap.update finishedTask st.progressMap
+        (depCounts', newTasks) = TaskGraph.decrementReverseDependencies st.taskGraph st.depCounts finishedTask
+        (cleanup', pathsToCleanup) = releaseFiles (taskFilesToCleanup config finishedTask) st.cleanup
+      withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) newTasks
+      writeListQueue cleanupQueue $ map Just pathsToCleanup
+      notifyChangeM taskQueueNotifier
+      lastReport' <- reportIfAfterInterval st.lastReport progressMap'
+      pure st
+        { depCounts   = depCounts'
+        , finished    = Set.insert finishedTask st.finished
+        , cleanup     = cleanup'
+        , progressMap = progressMap'
+        , lastReport  = lastReport'
+        }
+
+    tasksAdded :: MonitorState a -> Map a (Set a) -> SendPort LeaseReply -> Job (MonitorState a)
+    tasksAdded st newEdges replyPort =
+      case insertTasks config st newEdges of
+        Left err -> do
+          Log.warn "Refusing to add tasks" err
+          lift $ sendChan replyPort (LeaseReplyError err)
+          pure st
+        Right (st', runnable, newKeys) -> do
+          -- New tasks get critical-path priorities from the grown graph;
+          -- tasks already queued keep the priority they were queued with.
+          liftIO $ writeIORef priorityRef (mkTaskPriorityHelper nodes st'.taskGraph)
+          -- Map.union is left-biased: sizes already measured stay.
+          liftIO $ Shared.withWrite_ fileSizeMapVar $ \sizes -> Map.union sizes (fileSizeEstimates newKeys)
+          Log.info "Added tasks (tags, new, runnable now)"
+            (catMaybes (Set.toList (Set.map taskTag newKeys)), Set.size newKeys, length runnable)
+          withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) runnable
           notifyChangeM taskQueueNotifier
-          lastReportTime' <- reportIfAfterInterval lastReportTime progressMap'
-          go lastReportTime' depCounts' cleanupDepCounts' progressMap'
+          lift $ sendChan replyPort (LeaseReplyDone mempty)
+          pure st'
 
     -- Wait until all nodes are stalling.
     waitForGlobalStalling :: Process ()
@@ -523,31 +629,86 @@ monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finished
         globalStalling <- allNodesStalling <$> mapM readTVar isStallingVars
         check globalStalling
 
+-- | Add tasks to a running graph. Refused, leaving the state unchanged, if a
+-- dependency is neither in the run nor among the new tasks, if a dependency
+-- is added to a task that has already been queued or has finished, or if a
+-- new task needs a node-local file that has already been deleted. Returns
+-- the new state, the tasks that can be queued right away, and the keys that
+-- were not in the run before.
+insertTasks
+  :: IsTask a
+  => Config
+  -> MonitorState a
+  -> Map a (Set a)
+  -> Either String (MonitorState a, [a], Set a)
+insertTasks config st newEdges0 = do
+  let
+    existing = Map.keysSet st.edges
+    -- A task of the run listed again with dependencies it already has is
+    -- ignored: a map built with 'mkTaskMap' on the scheduler's node lists a
+    -- finished task whenever its node-local output is on another node.
+    redundant t deps = maybe False (Set.isSubsetOf deps) (Map.lookup t st.edges)
+    newEdges = Map.filterWithKey (\t deps -> not (redundant t deps)) newEdges0
+    allKeys = Set.union existing (Map.keysSet newEdges)
+    newKeys = Map.keysSet newEdges `Set.difference` existing
+    extended = Map.keysSet newEdges `Set.intersection` existing
+    unknownDeps = Set.unions (Map.elems newEdges) `Set.difference` allKeys
+    -- A task is pending while it still has a positive dependency count.
+    -- Queued and running tasks have count 0 or no entry; finished tasks are
+    -- in 'finished'.
+    isPending t = not (Set.member t st.finished) && maybe False (> 0) (Map.lookup t st.depCounts)
+    notPending = Set.filter (not . isPending) extended
+  unless (Set.null unknownDeps) $
+    Left $ show (Set.size unknownDeps) <> " dependencies are not tasks of this run" <> tagsOf unknownDeps
+  unless (Set.null notPending) $
+    Left $ "cannot add dependencies to " <> show (Set.size notPending)
+      <> " tasks that have already started or finished" <> tagsOf notPending
+  cleanup' <- claimFilesOfTasks config newKeys st.cleanup
+  let
+    edges' = Map.unionWith Set.union st.edges newEdges
+    remaining t = Set.size $ Set.filter (`Set.notMember` st.finished) (edges' Map.! t)
+    counts = Map.fromSet remaining (Map.keysSet newEdges)
+    (runnableCounts, pendingCounts) = Map.partition (== 0) counts
+    -- Pending tasks carry their count; tasks that can run now leave the map,
+    -- as they do when a decrement brings them to zero.
+    depCounts' = Map.union pendingCounts $ foldr Map.delete st.depCounts (Map.keys runnableCounts)
+  pure
+    ( st
+        { edges       = edges'
+        , taskGraph   = TaskGraph.fromEdges edges'
+        , depCounts   = depCounts'
+        , cleanup     = cleanup'
+        , progressMap = ProgressMap.addTasks newKeys st.progressMap
+        }
+    , Map.keys runnableCounts
+    , newKeys
+    )
+  where
+    tagsOf ts = " (tags: " <> show (catMaybes (Set.toList (Set.map taskTag ts))) <> ")"
+
+-- | The declared sizes of the files of the given tasks, used until the
+-- actual sizes are known.
+fileSizeEstimates :: IsTask a => Set a -> Map VirtualFilePath FileSize
+fileSizeEstimates tasks = Map.unions $ map toFileSizeMap $ Set.toList tasks
+  where
+    toFileSizeMap t = Map.fromList
+      [ (info.path, info.fileSize) | info <- Set.toList (Set.union (taskInputs t) (taskOutputs t)) ]
+
 type TaskRecords a = [TaskRecord a]
 
--- | Services shared by every scheduler instance of one top-level run: the
--- configuration and the node-local file bookkeeping. A nested scheduler
--- (see 'runTasksIn') reuses its parent's 'SchedulerEnv' so that reference
--- counts of node-local files are kept in one place.
-data SchedulerEnv = MkSchedulerEnv
-  { config      :: Config
-  , fileService :: FileService
-  }
-
--- | The resources one scheduler instance may use: the capacities it may fill
--- (one 'Node' per address; a 'Node' may describe a slice of a physical node)
--- and the worker slots it runs tasks on. The top-level run uses every node
--- of the job and a 'WorkerPool' with one slot per CPU.
-data ResourcePool = MkResourcePool
-  { nodes      :: [Node]
-  , workerPool :: WorkerPool
-  }
-
--- | Start the services shared by all scheduler instances of a run.
+-- | Start the services shared by all scheduler instances of a run (see
+-- "Hyperion.Scheduler.RunTasks.Env").
 withSchedulerEnv :: Config -> [Node] -> (SchedulerEnv -> Job a) -> Job a
 withSchedulerEnv config nodes go =
-  withFileService config nodes $ \fileService ->
-    go MkSchedulerEnv { config = config, fileService = fileService }
+  withFileService config nodes $ \fileService -> do
+    leases <- liftIO newLeaseRegistry
+    leaseCounter <- liftIO $ newIORef 0
+    go MkSchedulerEnv
+      { config       = config
+      , fileService  = fileService
+      , leases       = leases
+      , leaseCounter = leaseCounter
+      }
 
 -- | Run the given tasks on all nodes of the job by initially
 -- distributing largest memory tasks to nodes until we can't fit any
@@ -585,18 +746,14 @@ runTasksIn env pool taskMap = do
     nodes = pool.nodes
     workerPool = pool.workerPool
     taskGraph = TaskGraph.fromEdges taskMap
-    cleanupDependencies = buildCleanupDependenciesMap config taskMap
   let
-    getTaskPriority = taskPriority $ mkTaskPriorityHelper nodes taskGraph
+    initialPriorityHelper = mkTaskPriorityHelper nodes taskGraph
+    getTaskPriority = taskPriority initialPriorityHelper
     -- TODO: check disk space when computing initialAllocs
     -- TODO: seems that it is non-deterministic and often returns empty allocations, how???
     (initialAllocs, moreIndependentTasks) =
       --distributeTasksToNodes nodes (TaskGraph.independentKeys taskGraph)
       distributeTasksToNodesWithScores 0.75 config nodes (TaskGraph.independentKeys taskGraph) getTaskPriority
-
-    toFileInfos t = Set.toList $ Set.union (taskInputs t) (taskOutputs t)
-    toFileSizeMap t = Map.fromList $ map (\fileInfo -> (fileInfo.path, fileInfo.fileSize)) $ toFileInfos t
-    fileSizeEstimates = Map.unions $ map toFileSizeMap $ Set.toList $ TaskGraph.keys taskGraph
 
   -- TODO for debug
   Log.info "initialAllocs (node, numTasks)" $ Map.map Map.size initialAllocs
@@ -609,15 +766,22 @@ runTasksIn env pool taskMap = do
   --   (i.e. available memory, CPUs and disk space are updated)
   -- TODO: the third case could be handled via separate notifiers for each node.
   taskQueueNotifier <- liftIO newChangeNotifierIO
-  taskQueue <- TPrioQueue.new getTaskPriority
+  -- Tasks added during the run get priorities from the grown graph (see
+  -- 'monitorProgressAndDeps'), so the queue reads the current helper when it
+  -- queues a task.
+  priorityRef <- liftIO $ newIORef initialPriorityHelper
+  taskQueue <- TPrioQueue.newIO $ \t -> (`taskPriority` t) <$> readIORef priorityRef
   -- A lock to ensure that `dequeueTask` is atomic.
   taskQueueLock <- liftIO mkExclusiveLock
   -- Will be updated with actual file sizes as they are created.
-  fileSizeMapVar <- liftIO $ newShared fileSizeEstimates
+  fileSizeMapVar <- liftIO $ newShared (fileSizeEstimates (TaskGraph.keys taskGraph))
   pathResolveMapVar <- liftIO $ newShared Map.empty
-  finishedTaskQueue <- newQueue
+  eventQueue <- newQueue
   taskRecordQueue <- newQueue
   cleanupQueue <- newQueue
+  (leaseRequestPort, leaseRequestRecvPort) <- lift newChan
+  leaseHandlerHandle <- asyncLinkedLocalJob $ handleLeaseRequests env leaseRequestRecvPort eventQueue
+  lift $ throwOnAsyncFailed leaseHandlerHandle
   -- NB: here we don't need taskQueueNotifier and taskQueueLock,
   -- since no one is accessing taskQueue yet.
   mapM_ (TPrioQueue.write taskQueue) moreIndependentTasks
@@ -641,9 +805,8 @@ runTasksIn env pool taskMap = do
         -- TODO: what other exceptions should we catch?
         -- TODO: implement graceful exit for runNodeLoop.
         runNodeLoop
-          config
+          env
           node
-          fileService
           workerPool
           nodeStatusVar
           isNodeStallingVar
@@ -652,8 +815,9 @@ runTasksIn env pool taskMap = do
           taskQueueLock
           fileSizeMapVar
           pathResolveMapVar
-          finishedTaskQueue
+          eventQueue
           taskRecordQueue
+          leaseRequestPort
           alloc
           `catches`
             [ Handler (Log.throw @_ @IOError)
@@ -671,21 +835,54 @@ runTasksIn env pool taskMap = do
 
   monitorProgressAndDeps
     config
+    nodes
     taskQueue
     taskQueueNotifier
     taskQueueLock
-    finishedTaskQueue
-    taskGraph
-    cleanupDependencies
+    priorityRef
+    fileSizeMapVar
+    eventQueue
     cleanupQueue
     nodeStatusMap
-    (ProgressMap.fromTasksTodo (TaskGraph.keys taskGraph))
+    taskMap
   -- NB: we use cancelWait instead of e.g. cancelKill to ensure that nodeLoop task will finish with AsyncCancelled.
   -- Finishing with AsyncFailed or AsyncLinkFailed will trigger throwOnAsyncFailed.
   mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
   _ <- lift $ Async.wait cleanupLoopHandle
+  _ <- lift $ Async.cancelWait leaseHandlerHandle
   flushQueue taskRecordQueue
 
+-- | Answer the requests that running tasks send through their 'Lease' (see
+-- "Hyperion.Scheduler.Dynamic"): tasks to add to this run. The payload is a
+-- closure that builds the task map on this side, with this run's task type,
+-- so the scheduler need not know how the requesting task represents tasks;
+-- the monitor then decides whether they can join the graph and replies.
+-- Refusals are reported to the requesting task, not thrown here.
+handleLeaseRequests
+  :: forall a . IsTask a
+  => SchedulerEnv
+  -> ReceivePort LeaseRequest
+  -> ConcurrentQueue (SchedulerEvent a)
+  -> Job ()
+handleLeaseRequests env recvPort eventQueue = forever $ do
+  request <- lift $ receiveChan recvPort
+  let
+    refuse msg = do
+      Log.warn "Refusing lease request" (request.leaseId, msg)
+      lift $ sendChan request.replyPort (LeaseReplyError msg)
+  active <- liftIO $ isLeaseActive env.leases request.leaseId
+  if not active
+    then refuse $ "unknown lease " <> show request.leaseId
+    else do
+      built <- try $ do
+        buildTasks <- lift $ unClosure (Binary.decode request.payload :: Closure (Process (Map a (Set a))))
+        taskMap <- lift buildTasks
+        pure $! Map.size taskMap `seq` taskMap
+      case built of
+        Left (e :: SomeException) -> refuse $ "could not build the tasks to add: " <> show e
+        Right taskMap -> do
+          Log.info "Tasks to add requested on lease (lease, count)" (request.leaseId, Map.size taskMap)
+          liftIO $ writeQueue eventQueue (TasksAdded taskMap request.replyPort)
 
 -- Files that can be removed (if there are no other dependencies)
 -- when the task finished
@@ -700,22 +897,55 @@ taskFilesToCleanup
   -> Set VirtualFilePath
 taskFilesToCleanup config task = Set.filter (isNodeLocal config) $ taskInputPaths task <> taskOutputPaths task
 
--- File path -> Number of tasks having this file as input or output
--- When this number goes to zero, we can delete this file
-type CleanupDependenciesMap = Map VirtualFilePath Int
+-- | Bookkeeping of node-local files: how many unfinished tasks use each file
+-- (deleted when the count reaches zero), the files kept until the end of the
+-- run ('taskKeepOutputs'), and the files already deleted, so that a task
+-- added later ("Hyperion.Scheduler.Dynamic") cannot ask for one of them.
+data CleanupState = MkCleanupState
+  { counts  :: Map VirtualFilePath Int
+  , kept    :: Set VirtualFilePath
+  , cleaned :: Set VirtualFilePath
+  }
+
+emptyCleanupState :: CleanupState
+emptyCleanupState = MkCleanupState { counts = Map.empty, kept = Set.empty, cleaned = Set.empty }
 
 -- Nothing means "no more cleanups expected, exit"
 type CleanupQueue = ConcurrentQueue (Maybe VirtualFilePath)
 
-buildCleanupDependenciesMap
+-- | Account for the node-local files of tasks joining the run. Refused if one
+-- of them has already been deleted: a task added late cannot read a file
+-- whose last known user has finished, unless its producer kept it.
+claimFilesOfTasks
   :: IsTask a
   => Config
-  -> Map a (Set a)
-  -> CleanupDependenciesMap
-buildCleanupDependenciesMap config taskMap = cleanupMap where
-  tasks = Map.keys taskMap
-  partialCleanupMap task = Map.fromSet (const 1) $ taskFilesToCleanup config task
-  cleanupMap = Map.unionsWith (+) $ map partialCleanupMap tasks
+  -> Set a
+  -> CleanupState
+  -> Either String CleanupState
+claimFilesOfTasks config tasks state0 = foldM claimTask state0 (Set.toList tasks)
+  where
+    claimTask st t = foldM (claim (keptOutputs t)) st (Set.toList (taskFilesToCleanup config t))
+    keptOutputs t
+      | taskKeepOutputs t = Set.filter (isNodeLocal config) (taskOutputPaths t)
+      | otherwise         = Set.empty
+    claim keep st path
+      | Set.member path st.kept    = Right st
+      | Set.member path keep       = Right st { kept = Set.insert path st.kept, counts = Map.delete path st.counts }
+      | Set.member path st.cleaned = Left $ "node-local file already deleted: " <> show path
+      | otherwise                  = Right st { counts = Map.insertWith (+) path 1 st.counts }
+
+-- | A task finished: release its node-local files. Returns the files whose
+-- last user this was, to be deleted.
+releaseFiles :: Set VirtualFilePath -> CleanupState -> (CleanupState, [VirtualFilePath])
+releaseFiles paths st =
+  ( st { counts = counts', cleaned = Set.union st.cleaned (Set.fromList toClean) }
+  , toClean
+  )
+  where
+    (counts', toClean) = runWriter $
+      decrementCleanupCounts (paths `Set.difference` st.kept) st.counts
+
+type CleanupDependenciesMap = Map VirtualFilePath Int
 
 decrementCleanupCount
   :: VirtualFilePath

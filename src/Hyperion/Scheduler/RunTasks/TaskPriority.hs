@@ -7,6 +7,7 @@
 
 module Hyperion.Scheduler.RunTasks.TaskPriority
   ( TaskPriority
+  , TaskPriorityHelper
   , taskPriority
   , mkTaskPriorityHelper
   )

@@ -63,11 +63,13 @@ executables:
     - base
     - binary
     - bootstrap-build
+    - bytestring
     - bytestring-conversion
     - containers
     - directory
     - distributed-process
     - extra
+    - file-io
     - hyperion
     - hyperion-scheduler
     - hyperion-util
