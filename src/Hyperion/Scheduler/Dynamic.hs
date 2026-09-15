@@ -63,7 +63,7 @@ pureStaticTaskMap (MkStaticTaskMap taskMap) = pure taskMap
 -- instance; use 'addTasksWith' there).
 addTasks
   :: forall a
-   . (IsTask a, Binary a, Static (IsTask a), Static (Binary a))
+   . (IsTask a, Static (IsTask a), Static (Binary a))
   => Lease
   -> Map a (Set a)
   -> Process ()

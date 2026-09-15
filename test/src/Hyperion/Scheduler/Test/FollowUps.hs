@@ -27,14 +27,12 @@
 module Hyperion.Scheduler.Test.FollowUps where
 
 import Control.Exception              (AssertionFailed (..))
-import Control.Monad                  (filterM, forM, forM_, unless)
+import Control.Monad                  (filterM, forM, unless)
 import Control.Monad.IO.Class         (liftIO)
-import Control.Monad.Reader           (local)
 import Data.Aeson                     (ToJSON)
 import Data.Binary                    (Binary)
 import Data.ByteString.Char8          qualified as BS8
 import Data.Map.Strict                qualified as Map
-import Data.Maybe                     (fromMaybe)
 import Data.Set                       qualified as Set
 import GHC.Generics                   (Generic)
 import Hyperion

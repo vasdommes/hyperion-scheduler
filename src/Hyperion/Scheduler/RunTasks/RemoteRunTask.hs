@@ -26,7 +26,7 @@ import Hyperion.Log                   qualified as Log
 import Hyperion.Scheduler.FilePath    (VirtualFilePath (VirtualFilePath))
 import Hyperion.Scheduler.Lease       (Lease (..))
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), taskOutputPaths)
-import Hyperion.Scheduler.Types       (FileSize (..), MemorySize (..), NumCPUs)
+import Hyperion.Scheduler.Types (FileSize (..), MemorySize (..))
 import Hyperion.Scheduler.WorkerPool  (TWorker, remoteRunOnNewWorker)
 import System.Directory.OsPath        (getFileSize)
 import System.RUsage                  qualified as RUsage

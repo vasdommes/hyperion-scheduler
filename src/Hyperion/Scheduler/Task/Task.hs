@@ -43,7 +43,6 @@ import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
 import Hyperion.OsPath                     (OsPath)
-import Hyperion.OsString                   qualified as OsString
 import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
 import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
