@@ -1,4 +1,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DerivingStrategies   #-}
+{-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
@@ -39,13 +42,22 @@ import Data.Binary                     (Binary)
 import Data.Binary                     qualified as Binary
 import Data.Map.Strict                 (Map)
 import Data.Set                        (Set)
-import Hyperion                        (Closure, Static (..), cAp, cPure)
+import Data.Typeable                   (Typeable)
+import Hyperion                        (Closure, Dict (..), Static (..), cAp,
+                                        cPure)
 import Hyperion.Log                    qualified as Log
 import Hyperion.Scheduler.SchedulerHandle (AddTasksReply (..),
                                            AddTasksRequest (..),
                                            SchedulerHandle (..))
-import Hyperion.Scheduler.RunTasks.Env (StaticTaskMap (..))
 import Hyperion.Scheduler.Task.IsTask  (IsTask)
+
+-- | A task map with the 'Static' dictionary its 'Binary' instance needs to
+-- travel inside a closure.
+newtype StaticTaskMap a = MkStaticTaskMap (Map a (Set a))
+  deriving newtype (Binary)
+
+instance (Typeable a, Static (IsTask a), Static (Binary a)) => Static (Binary (StaticTaskMap a)) where
+  closureDict = static (\Dict -> Dict) `cAp` closureDict @(IsTask a, Binary a)
 
 -- | Top-level so that it can be referenced with @static@.
 pureStaticTaskMap :: StaticTaskMap a -> Process (Map a (Set a))

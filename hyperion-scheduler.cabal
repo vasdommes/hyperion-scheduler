@@ -29,7 +29,6 @@ library
       Hyperion.Scheduler.RemoteUtil
       Hyperion.Scheduler.ReusableWorker
       Hyperion.Scheduler.RunTasks
-      Hyperion.Scheduler.RunTasks.Env
       Hyperion.Scheduler.RunTasks.NodeStatus
       Hyperion.Scheduler.RunTasks.ProgressMap
       Hyperion.Scheduler.RunTasks.RemoteRunTask

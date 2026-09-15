@@ -146,25 +146,30 @@ getSite = lookupEnv siteEnvVar >>= \case
   Nothing -> pure TestConfig.defaultSite
   Just s  -> either (die . ((siteEnvVar <> ": ") <>)) pure (TestConfig.parseSite s)
 
-runOnCluster :: Site -> IO ()
-runOnCluster site =
+-- | Run a cluster test through 'hyperionMain' with the master options: the
+-- given computation gets the options and the absolute base directory.
+runClusterTest :: Site -> (MasterOptions -> OsPath -> Cluster ()) -> IO ()
+runClusterTest site computation =
   hyperionMain masterOptsParser mkHyperionConfig (TestConfig.hyperionStaticConfig site) clusterComputation
+  where
+    mkHyperionConfig opts =
+      TestConfig.getHyperionConfig site (fromMaybe "." opts.problem.baseDir) opts.sbatchOptions
+    clusterComputation opts = do
+      baseDir <- liftIO $ maybe (TestConfig.getScratchDir site) makeAbsolute opts.problem.baseDir
+      computation opts baseDir
+
+runOnCluster :: Site -> IO ()
+runOnCluster site = runClusterTest site $ \opts baseDir ->
+  remoteEvalJob $ static linearTransformJob
+    `cAp` (static TestConfig.getSchedulerConfig `cAp` cPure site)
+    `cAp` cPure (workDir baseDir opts)
+    `cAp` cPure (toProblem opts.problem)
   where
     -- Keep runs with different allocations side by side, so their task stats
     -- can be compared.
     workDir baseDir opts = baseDir </>
       "nodes_" <> showOs opts.sbatchOptions.nodes <>
       "_ntasks_" <> showOs opts.sbatchOptions.nTasksPerNode
-
-    mkHyperionConfig opts =
-      TestConfig.getHyperionConfig site (fromMaybe "." opts.problem.baseDir) opts.sbatchOptions
-
-    clusterComputation opts = do
-      baseDir <- liftIO $ maybe (TestConfig.getScratchDir site) makeAbsolute opts.problem.baseDir
-      remoteEvalJob $ static linearTransformJob
-        `cAp` (static TestConfig.getSchedulerConfig `cAp` cPure site)
-        `cAp` cPure (workDir baseDir opts)
-        `cAp` cPure (toProblem opts.problem)
 
 -- | The follow-ups test (tasks that add tasks) on the cluster: every
 -- scenario of 'FollowUps.defaultProblems' in turn, one SLURM job each, all
@@ -174,20 +179,13 @@ runOnCluster site =
 -- worker against a master that has already finished. The problem options of
 -- 'masterOptsParser' are accepted and ignored, except @--base-dir@.
 runFollowUpsOnCluster :: Site -> IO ()
-runFollowUpsOnCluster site =
-  hyperionMain masterOptsParser mkHyperionConfig (TestConfig.hyperionStaticConfig site) clusterComputation
-  where
-    mkHyperionConfig opts =
-      TestConfig.getHyperionConfig site (fromMaybe "." opts.problem.baseDir) opts.sbatchOptions
-
-    clusterComputation opts = do
-      baseDir <- liftIO $ maybe (TestConfig.getScratchDir site) makeAbsolute opts.problem.baseDir
-      forM_ FollowUps.defaultProblems $ \problem ->
-        local (setJobTime (20 * minute) . setJobType (MPIJob 1 problem.nodeCpus)) $
-          remoteEvalJob $ static FollowUps.followUpsJob
-            `cAp` (static TestConfig.getSchedulerConfig `cAp` cPure site)
-            `cAp` cPure (baseDir </> "followups" </> "mpi_1_" <> showOs problem.nodeCpus)
-            `cAp` cPure problem
+runFollowUpsOnCluster site = runClusterTest site $ \_ baseDir ->
+  forM_ FollowUps.defaultProblems $ \problem ->
+    local (setJobTime (20 * minute) . setJobType (MPIJob 1 problem.nodeCpus)) $
+      remoteEvalJob $ static FollowUps.followUpsJob
+        `cAp` (static TestConfig.getSchedulerConfig `cAp` cPure site)
+        `cAp` cPure (baseDir </> "followups" </> "mpi_1_" <> showOs problem.nodeCpus)
+        `cAp` cPure problem
 
 -- * Entry point
 

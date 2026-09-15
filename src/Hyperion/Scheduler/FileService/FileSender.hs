@@ -176,6 +176,10 @@ type TimeStamp = Word64
 data Request = Download TimeStamp OsPath (SendPort Response)
   deriving (Generic, Binary, Show)
 
+-- | Earlier requests first: the request queue is a max-priority queue.
+requestPriority :: Request -> Down TimeStamp
+requestPriority (Download timeStamp _ _) = Down timeStamp
+
 data Response = FileDoesNotExist | Chunk B.ByteString | EndOfFile | FileSenderError String
   deriving (Generic, Binary, Show)
 
@@ -213,8 +217,8 @@ fileSenderMainLoop config startupPort = do
   processRequestCountVar <- liftIO $ newTVarIO @Int 0
 
   -- TPrioQueue is a max-priority queue.
-  -- We prioritze requests with earlier timestamps
-  requestQueue <- TPrioQueue.new $ \(Download timeStamp _ _ ) -> Down timeStamp
+  -- We prioritze requests with earlier timestamps (see 'requestPriority').
+  requestQueue <- TPrioQueue.new
   -- processQueueLoop will be killed automatically on exit, thanks to asyncLinked
   _ <- asyncLinked $ task $
     processQueueLoop config requestQueue processRequestCountVar statsVar
@@ -255,7 +259,7 @@ fileSenderMainLoop config startupPort = do
     processRequest :: StatelessHandler () Request
     processRequest request s = do
       Log.info "Received request" request
-      TPrioQueue.write requestQueue request
+      TPrioQueue.write requestQueue (requestPriority request) request
       continue_ s
 
     onShutdown _ reason = do

@@ -1166,8 +1166,8 @@ downloadLoop config (FileSenders senderMap) queue = do
   let nodes = Map.keys senderMap
   nodeLoops <- forM nodes $ \node -> do
     let fileSender = senderMap ! node
-    -- Earlier timeStamps have higher priority
-    nodeQueue <-TPrioQueue.new $ \(timeStamp, _, _, _, _) -> Down timeStamp
+    -- Earlier timeStamps have higher priority (the writer supplies it).
+    nodeQueue <- TPrioQueue.new
     hdl <- asyncLinked $ task $ downloadNodeLoop fileSender config activeDownloadRequestsVar nodeQueue
     return (node, (nodeQueue, hdl))
   let nodeLoopMap = Map.fromList nodeLoops
@@ -1184,7 +1184,7 @@ downloadLoop config (FileSenders senderMap) queue = do
         let
           description = "Fetch " <> show clusterFilePath
           (nodeQueue, _) = nodeLoopMap ! node
-        TPrioQueue.write nodeQueue (timeStamp, description, filePath, workerPool, resVar)
+        TPrioQueue.write nodeQueue (Down timeStamp) (timeStamp, description, filePath, workerPool, resVar)
 
 -- | NodeLocalFileManager main loop, runs on worker node, listens to requests and processes them asynchronously
 mainLoop :: NodeLocalFileManagerConfig -> FileSenders -> SendPort StartupResponse -> Process ()

@@ -30,8 +30,7 @@ import Control.Monad.Reader                         (lift)
 import Control.Monad.Writer                         (Writer, runWriter, tell)
 import Data.Binary                                  qualified as Binary
 import Data.IORef                                   (IORef, atomicModifyIORef',
-                                                     newIORef, readIORef,
-                                                     writeIORef)
+                                                     newIORef, readIORef)
 import Data.List.Extra                              (nubOrd, partition)
 import Data.List.NonEmpty                           (NonEmpty (..))
 import Data.List.NonEmpty                           qualified as NonEmpty
@@ -74,11 +73,6 @@ import Hyperion.Scheduler.RemoteUtil                (AsyncFailedException (..),
                                                      asyncLinkedLocalJob,
                                                      getJobNodes,
                                                      throwOnAsyncFailed)
-import Hyperion.Scheduler.RunTasks.Env              (SchedulerEnv (..),
-                                                     isHandleActive,
-                                                     newHandleRegistry,
-                                                     registerHandle,
-                                                     unregisterHandle)
 import Hyperion.Scheduler.RunTasks.NodeStatus       (NodeStatus)
 import Hyperion.Scheduler.RunTasks.NodeStatus       qualified as NodeStatus
 import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
@@ -152,7 +146,9 @@ allNodesStalling statuses = case nubOrd statuses of
 -- tasks. So, no. We do not need to do things atomically.
 runNodeLoop
   :: forall a . IsTask a
-  => SchedulerEnv
+  => Config
+  -> FileService
+  -> HandleRegistry
   -> Node
   -> WorkerPool
   -> Shared IO NodeStatus
@@ -168,7 +164,9 @@ runNodeLoop
   -> CPUAllocation a
   -> Job ()
 runNodeLoop
-  env
+  config
+  fileService
+  handles
   node
   workerPool
   nodeStatusVar
@@ -200,9 +198,6 @@ runNodeLoop
   forever getAndRunTasks
 
   where
-    config = env.config
-    fileService = env.fileService
-
     reserveLocalTaskFiles :: a -> Process (Response, Map VirtualFilePath FileSize)
     reserveLocalTaskFiles t = do
       let localFiles = Set.filter (isNodeLocal config) $ Set.union (taskInputPaths t) (taskOutputPaths t)
@@ -384,22 +379,20 @@ runNodeLoop
 
       -- TODO for debug
       selfPid <- lift getSelfPid
-      priority <- liftIO $ taskQueue.elemPriority task
-      Log.info "remoteRunTask (masterPid,workerId,tag,numCPUs,priority,outputPaths)"
-        (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, taskTag task, numCpus, priority, taskOutputPaths task)
+      Log.info "remoteRunTask (masterPid,workerId,tag,numCPUs,outputPaths)"
+        (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, taskTag task, numCpus, taskOutputPaths task)
 
       -- The task's handle to this scheduler instance while it runs: its id
       -- is valid until the task returns.
-      handleId <- liftIO $ atomicModifyIORef' env.handleCounter $ \n -> (n + 1, MkHandleId n)
+      handleId <- liftIO $ newHandle handles
       let
         handle = MkSchedulerHandle
           { handleId    = handleId
           , requestPort = addTasksRequestPort
           }
-      liftIO $ registerHandle env.handles handleId
       start <- liftIO getCurrentTime
       res <- remoteRunTask firstWorker numCpus handle task
-        `finally` liftIO (unregisterHandle env.handles handleId)
+        `finally` liftIO (unregisterHandle handles handleId)
       end <- liftIO getCurrentTime
       let
         -- TODO: currently afterReturnRemoteRunTaskResult measures file sizes only for taskOutputs
@@ -494,6 +487,9 @@ data MonitorState a = MkMonitorState
   , finished    :: Set a
   , cleanup     :: CleanupState
   , progressMap :: ProgressMap
+    -- ^ critical-path priorities for the current graph; the queue is given
+    -- each task's priority when the task is queued
+  , priorities  :: TaskPriorityHelper a
   , lastReport  :: UTCTime
   }
 
@@ -511,14 +507,13 @@ monitorProgressAndDeps
   -> TPrioQueue TaskPriority a
   -> TChangeNotifier
   -> Lock
-  -> IORef (TaskPriorityHelper a)
   -> Shared IO (Map VirtualFilePath FileSize)
   -> ConcurrentQueue (SchedulerEvent a)
   -> CleanupQueue
   -> Map Node (Shared IO NodeStatus, TVar (IsNodeStalling a))
   -> Map a (Set a)
   -> Job ()
-monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock priorityRef fileSizeMapVar eventQueue cleanupQueue nodeStatusMap initialEdges = do
+monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock fileSizeMapVar eventQueue cleanupQueue nodeStatusMap initialEdges = do
   let
     initialGraph = TaskGraph.fromEdges initialEdges
     initialProgress = ProgressMap.fromTasksTodo (TaskGraph.keys initialGraph)
@@ -541,6 +536,7 @@ monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock pr
     , finished    = Set.empty
     , cleanup     = initialCleanup
     , progressMap = initialProgress
+    , priorities  = mkTaskPriorityHelper nodes initialGraph
     , lastReport  = start
     }
 
@@ -585,7 +581,7 @@ monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock pr
         progressMap' = ProgressMap.update finishedTask st.progressMap
         (depCounts', newTasks) = TaskGraph.decrementReverseDependencies st.taskGraph st.depCounts finishedTask
         (cleanup', pathsToCleanup) = releaseFiles (taskFilesToCleanup config finishedTask) st.cleanup
-      withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) newTasks
+      withLock taskQueueLock $ mapM_ (enqueue st.priorities) newTasks
       writeListQueue cleanupQueue $ map Just pathsToCleanup
       notifyChangeM taskQueueNotifier
       lastReport' <- reportIfAfterInterval st.lastReport progressMap'
@@ -607,15 +603,18 @@ monitorProgressAndDeps config nodes taskQueue taskQueueNotifier taskQueueLock pr
         Right (st', runnable, newKeys) -> do
           -- New tasks get critical-path priorities from the grown graph;
           -- tasks already queued keep the priority they were queued with.
-          liftIO $ writeIORef priorityRef (mkTaskPriorityHelper nodes st'.taskGraph)
+          let priorities' = mkTaskPriorityHelper nodes st'.taskGraph
           -- Map.union is left-biased: sizes already measured stay.
           liftIO $ Shared.withWrite_ fileSizeMapVar $ \sizes -> Map.union sizes (fileSizeEstimates newKeys)
           Log.info "Added tasks (tags, new, runnable now)"
             (catMaybes (Set.toList (Set.map taskTag newKeys)), Set.size newKeys, length runnable)
-          withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) runnable
+          withLock taskQueueLock $ mapM_ (enqueue priorities') runnable
           notifyChangeM taskQueueNotifier
           lift $ sendChan replyPort AddTasksDone
-          pure st'
+          pure st' { priorities = priorities' }
+
+    enqueue :: TaskPriorityHelper a -> a -> Job ()
+    enqueue priorities t = TPrioQueue.write taskQueue (taskPriority priorities t) t
 
     -- Wait until all nodes are stalling.
     waitForGlobalStalling :: Process ()
@@ -724,19 +723,9 @@ runTasksWith
   -> Job (TaskRecords a)
 runTasksWith config nodes fileService workerPool taskMap = do
   handles <- liftIO newHandleRegistry
-  handleCounter <- liftIO $ newIORef 0
   let
-    -- What the node loops and the request handler need of this run.
-    env = MkSchedulerEnv
-      { config        = config
-      , fileService   = fileService
-      , handles       = handles
-      , handleCounter = handleCounter
-      }
     taskGraph = TaskGraph.fromEdges taskMap
-  let
-    initialPriorityHelper = mkTaskPriorityHelper nodes taskGraph
-    getTaskPriority = taskPriority initialPriorityHelper
+    getTaskPriority = taskPriority (mkTaskPriorityHelper nodes taskGraph)
     -- TODO: check disk space when computing initialAllocs
     -- TODO: seems that it is non-deterministic and often returns empty allocations, how???
     (initialAllocs, moreIndependentTasks) =
@@ -754,11 +743,9 @@ runTasksWith config nodes fileService workerPool taskMap = do
   --   (i.e. available memory, CPUs and disk space are updated)
   -- TODO: the third case could be handled via separate notifiers for each node.
   taskQueueNotifier <- liftIO newChangeNotifierIO
-  -- Tasks added during the run get priorities from the grown graph (see
-  -- 'monitorProgressAndDeps'), so the queue reads the current helper when it
-  -- queues a task.
-  priorityRef <- liftIO $ newIORef initialPriorityHelper
-  taskQueue <- TPrioQueue.newIO $ \t -> (`taskPriority` t) <$> readIORef priorityRef
+  -- Priorities are supplied by whoever queues a task: here for the first
+  -- tasks, by 'monitorProgressAndDeps' (from the graph as it grows) after.
+  taskQueue <- TPrioQueue.new
   -- A lock to ensure that `dequeueTask` is atomic.
   taskQueueLock <- liftIO mkExclusiveLock
   -- Will be updated with actual file sizes as they are created.
@@ -768,11 +755,11 @@ runTasksWith config nodes fileService workerPool taskMap = do
   taskRecordQueue <- newQueue
   cleanupQueue <- newQueue
   (addTasksRequestPort, addTasksRequestRecvPort) <- lift newChan
-  requestHandler <- asyncLinkedLocalJob $ handleAddTasksRequests env addTasksRequestRecvPort eventQueue
+  requestHandler <- asyncLinkedLocalJob $ handleAddTasksRequests handles addTasksRequestRecvPort eventQueue
   lift $ throwOnAsyncFailed requestHandler
   -- NB: here we don't need taskQueueNotifier and taskQueueLock,
   -- since no one is accessing taskQueue yet.
-  mapM_ (TPrioQueue.write taskQueue) moreIndependentTasks
+  mapM_ (\t -> TPrioQueue.write taskQueue (getTaskPriority t) t) moreIndependentTasks
   nodeLoopMap :: Map Node ((Shared IO NodeStatus, TVar (IsNodeStalling a)), Async ()) <- flip Map.traverseWithKey initialAllocs $
     \node alloc -> do
       nodeStatusVar <- liftIO $ newShared NodeStatus.empty
@@ -793,7 +780,9 @@ runTasksWith config nodes fileService workerPool taskMap = do
         -- TODO: what other exceptions should we catch?
         -- TODO: implement graceful exit for runNodeLoop.
         runNodeLoop
-          env
+          config
+          fileService
+          handles
           node
           workerPool
           nodeStatusVar
@@ -827,7 +816,6 @@ runTasksWith config nodes fileService workerPool taskMap = do
     taskQueue
     taskQueueNotifier
     taskQueueLock
-    priorityRef
     fileSizeMapVar
     eventQueue
     cleanupQueue
@@ -849,17 +837,17 @@ runTasksWith config nodes fileService workerPool taskMap = do
 -- Refusals are reported to the requesting task, not thrown here.
 handleAddTasksRequests
   :: forall a . IsTask a
-  => SchedulerEnv
+  => HandleRegistry
   -> ReceivePort AddTasksRequest
   -> ConcurrentQueue (SchedulerEvent a)
   -> Job ()
-handleAddTasksRequests env recvPort eventQueue = forever $ do
+handleAddTasksRequests handles recvPort eventQueue = forever $ do
   request <- lift $ receiveChan recvPort
   let
     refuse msg = do
       Log.warn "Refusing request to add tasks (handle, reason)" (request.handleId, msg)
       lift $ sendChan request.replyPort (AddTasksRefused msg)
-  active <- liftIO $ isHandleActive env.handles request.handleId
+  active <- liftIO $ isHandleActive handles request.handleId
   if not active
     then refuse $ "unknown or expired handle " <> show request.handleId
     else do
@@ -872,6 +860,26 @@ handleAddTasksRequests env recvPort eventQueue = forever $ do
         Right taskMap -> do
           Log.info "Tasks to add requested (handle, count)" (request.handleId, Map.size taskMap)
           liftIO $ writeQueue eventQueue (TasksAdded taskMap request.replyPort)
+
+-- | The handles the scheduler has handed out and not taken back, with the
+-- next id to issue. A request to add tasks on any other id is refused: it
+-- can only come from a task that has already returned.
+newtype HandleRegistry = MkHandleRegistry (IORef (Int, Set HandleId))
+
+newHandleRegistry :: IO HandleRegistry
+newHandleRegistry = MkHandleRegistry <$> newIORef (0, Set.empty)
+
+-- | Issue a fresh handle id and register it as active.
+newHandle :: HandleRegistry -> IO HandleId
+newHandle (MkHandleRegistry ref) = atomicModifyIORef' ref $ \(next, active) ->
+  let handleId = MkHandleId next in ((next + 1, Set.insert handleId active), handleId)
+
+unregisterHandle :: HandleRegistry -> HandleId -> IO ()
+unregisterHandle (MkHandleRegistry ref) handleId =
+  atomicModifyIORef' ref $ \(next, active) -> ((next, Set.delete handleId active), ())
+
+isHandleActive :: HandleRegistry -> HandleId -> IO Bool
+isHandleActive (MkHandleRegistry ref) handleId = Set.member handleId . snd <$> readIORef ref
 
 -- Files that can be removed (if there are no other dependencies)
 -- when the task finished
