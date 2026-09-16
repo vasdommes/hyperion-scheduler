@@ -37,6 +37,7 @@ import Hyperion.OsString                       (fromString, showOs)
 import Hyperion.Util                           (minute)
 import Hyperion.Scheduler.Test.Config          (Site)
 import Hyperion.Scheduler.Test.Config          qualified as TestConfig
+import Hyperion.Scheduler.Test.FollowUpKeys    qualified as FollowUpKeys
 import Hyperion.Scheduler.Test.FollowUps       qualified as FollowUps
 import Hyperion.Scheduler.Test.LinearTransform (CyclicShiftProblem (..),
                                                 linearTransformJob)
@@ -187,6 +188,18 @@ runFollowUpsOnCluster site = runClusterTest site $ \_ baseDir ->
         `cAp` cPure (baseDir </> "followups" </> "mpi_1_" <> showOs problem.nodeCpus)
         `cAp` cPure problem
 
+-- | The same search with 'TaskKey' keys and follow-ups declared by the
+-- decision key ('Hyperion.Scheduler.Test.FollowUpKeys'), one SLURM job per
+-- scenario.
+runFollowUpKeysOnCluster :: Site -> IO ()
+runFollowUpKeysOnCluster site = runClusterTest site $ \_ baseDir ->
+  forM_ FollowUpKeys.defaultProblems $ \problem ->
+    local (setJobTime (20 * minute) . setJobType (MPIJob 1 problem.nodeCpus)) $
+      remoteEvalJob $ static FollowUpKeys.followUpKeysJob
+        `cAp` (static TestConfig.getSchedulerConfig `cAp` cPure site)
+        `cAp` cPure (baseDir </> "followupkeys" </> "mpi_1_" <> showOs problem.nodeCpus)
+        `cAp` cPure problem
+
 -- * Entry point
 
 usage :: String
@@ -197,6 +210,7 @@ usage = unlines
   , "  local   Run the LinearTransform test in this process, without SLURM"
   , "  master  Run the LinearTransform test on a SLURM cluster"
   , "  followups  Run the tasks-that-add-tasks test (Test.FollowUps) on a SLURM cluster"
+  , "  followupkeys  Run the follow-ups-declared-by-a-key test (Test.FollowUpKeys) on a SLURM cluster"
   , "  worker  Run a worker process (launched automatically by the master)"
   , ""
   , "Pass --help after a command for its options."
@@ -210,6 +224,7 @@ main = getArgs >>= \case
   "local" : rest    -> withProgName "hyperion-scheduler-test local" $
                        withArgs rest $ execParser localOptsInfo >>= runLocal
   "followups" : rest -> withArgs rest $ getSite >>= runFollowUpsOnCluster
+  "followupkeys" : rest -> withArgs rest $ getSite >>= runFollowUpKeysOnCluster
   args | needsUsage -> putStr usage >> exitSuccess
        | otherwise  -> getSite >>= runOnCluster
     where needsUsage = null args || head args `elem` ["-h", "--help", "help"]

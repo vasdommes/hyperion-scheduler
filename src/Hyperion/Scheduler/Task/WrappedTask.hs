@@ -14,6 +14,8 @@ import Data.Aeson                     (ToJSON (..))
 import Data.Binary                    (Binary (..))
 import Data.BinaryHash                (hashBase64SafeByteString)
 import Data.ByteString                (ByteString)
+import Data.ByteString.Lazy           qualified as Lazy
+import Data.Map.Strict                (Map)
 import Data.Maybe                     (fromMaybe)
 import Data.Set                       (Set)
 import Data.Set                       qualified as Set
@@ -41,7 +43,14 @@ data WrappedTask = forall a . (IsTask a, ToStatKey a) => MkWrappedTask
   -- Memory and runtime estimates can come from task or be overriden by stats
   , memoryEstimate  :: MemorySize
   , runtimeEstimate :: NumCPUs -> NominalDiffTime
+  -- | How to build the task's follow-ups, see 'taskFollowUps'. Not part of
+  -- the task's identity: comparisons and serialisation look at 'task' only.
+  , followUps       :: Maybe FollowUpBuilder
   }
+
+-- | Builds the tasks a running task adds to its run, from the encoded
+-- follow-up it sends ("Hyperion.Scheduler.Task.FollowUps").
+type FollowUpBuilder = Lazy.ByteString -> IO (Map WrappedTask (Set WrappedTask))
 
 
 instance Eq WrappedTask where
@@ -80,6 +89,7 @@ instance IsTask WrappedTask where
   taskIsPlaceholder (MkWrappedTask { task = t }) = taskIsPlaceholder t
   taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
   taskClosureWithHandle numCpus handle (MkWrappedTask { task = t }) = taskClosureWithHandle numCpus handle t
+  taskFollowUps t = t.followUps
 
 instance ToStatKey WrappedTask where
   toStatKey (MkWrappedTask { task = t }) = toStatKey t
@@ -87,13 +97,20 @@ instance ToStatKey WrappedTask where
 
 -- | A smart constructor for a WrappedTask.
 wrapTask :: (IsTask a, ToStatKey a, Binary a) => a -> WrappedTask
-wrapTask t = MkWrappedTask
+wrapTask = wrapTaskWithFollowUps Nothing
+
+-- | 'wrapTask' for a task that may add follow-ups to its run: the builder is
+-- made by whoever knows the task's resolver and configs (the task chain, see
+-- "Hyperion.Scheduler.Task.Task").
+wrapTaskWithFollowUps :: (IsTask a, ToStatKey a, Binary a) => Maybe FollowUpBuilder -> a -> WrappedTask
+wrapTaskWithFollowUps builder t = MkWrappedTask
   { task = t
   , hash = hashBase64SafeByteString t
   , inputs = taskInputs t
   , outputs = taskOutputs t
   , memoryEstimate = taskMemoryEstimate t
   , runtimeEstimate = taskRuntimeEstimate t
+  , followUps = builder
   }
 
 -- | Update memory, runtime and file size estimates using statistics from TaskAndFileStats.

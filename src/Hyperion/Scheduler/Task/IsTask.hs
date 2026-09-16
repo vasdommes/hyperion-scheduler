@@ -7,6 +7,8 @@
 module Hyperion.Scheduler.Task.IsTask where
 
 import Data.Aeson                  (ToJSON)
+import Data.ByteString.Lazy        (ByteString)
+import Data.Map.Strict             (Map)
 import Data.Set                    (Set)
 import Data.Set                    qualified as Set
 import Data.Text                   (Text)
@@ -87,6 +89,16 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   -- The default ignores the handle.
   taskClosureWithHandle :: NumCPUs -> SchedulerHandle -> a -> Maybe (Closure (Process ()))
   taskClosureWithHandle numCpus _ = taskClosure numCpus
+
+  -- | How to build the tasks this task may add to its run while it runs
+  -- (its follow-ups, see 'Hyperion.Scheduler.Task.Task.FollowUps' and
+  -- "Hyperion.Scheduler.Dynamic"), from the encoded follow-up the task sends.
+  -- The builder is made where the task was made, with the task's own
+  -- resolver and configs, so the scheduler builds follow-ups the way it
+  -- built the task that asks for them. 'Nothing' for a task that declares no
+  -- follow-ups (the default).
+  taskFollowUps :: a -> Maybe (ByteString -> IO (Map a (Set a)))
+  taskFollowUps _ = Nothing
 
 -- TODO: remove (Stats.ToStatKey a) and use (IsTask a) everywhere in Stats instead?
 --  taskStatKey :: a -> StatKey

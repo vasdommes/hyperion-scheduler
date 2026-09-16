@@ -90,6 +90,7 @@ tests:
     - aeson
     - base
     - binary
+    - bootstrap-build
     - containers
     - hyperion
     - hyperion-scheduler

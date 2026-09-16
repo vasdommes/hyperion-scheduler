@@ -3,6 +3,7 @@ module Hyperion.Scheduler.Task
   )
 where
 
+import Hyperion.Scheduler.Task.FollowUps   as Exports
 import Hyperion.Scheduler.Task.IsTask      as Exports
 import Hyperion.Scheduler.Task.Task        as Exports
 import Hyperion.Scheduler.Task.TaskLink    as Exports

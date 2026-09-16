@@ -11,6 +11,7 @@ document says how, what the scheduler guarantees, and what it refuses.
 | `taskClosureWithHandle` | `Hyperion.Scheduler.Task.IsTask` | Like `taskClosure`, but the task also receives its `SchedulerHandle`. Default: ignore the handle. |
 | `CustomTaskWithHandle`, `keepOutputs` | `Hyperion.Scheduler.Task.Task` | The `TaskKind` whose computation receives `Maybe SchedulerHandle` (`Nothing` while the graph is derived), and the keep flag below. |
 | `addTasks`, `addTasksWith` | `Hyperion.Scheduler.Dynamic` | Called inside the task: sends a task map through the handle and returns once the tasks are part of the graph. |
+| `FollowUps`, `TaskHandle`, `addFollowUp` | `Hyperion.Scheduler.Task.Task`, `Hyperion.Scheduler.SchedulerHandle`, `Hyperion.Scheduler.Dynamic` | A key declares the keys its task may add; the body names one and the scheduler builds it with the requester's own resolver and configs (below). |
 | `taskKeepOutputs` | `Hyperion.Scheduler.Task.IsTask` | Keep the task's node-local outputs until the run ends, for readers added later. |
 
 ## Adding tasks
@@ -59,6 +60,71 @@ on the scheduler's side, for task types that cannot cross the wire
 check something on the scheduler's node, such as skipping tasks whose outputs
 already exist. The scheduler itself does not prune added tasks.
 
+## Follow-ups declared by the key
+
+`addTasks` and `addTasksWith` make the requesting task responsible for
+building the tasks it adds. For a task built from a `TaskKey` that is the
+wrong place: building a task needs a resolver and the configs of every key
+in its chain, and a task body receives only its own config and key. Putting
+the resolver into the config to smuggle it through (which bfss did for a
+while) ties the build code to one resolver type and serialises the resolver
+into every task record.
+
+Follow-ups fix this by moving the building to the scheduler. A key declares
+the keys of the tasks its running task may add:
+
+```haskell
+instance TaskKey RemovalDecisionKey where
+  type FollowUps RemovalDecisionKey = '[RemovalDecisionKey, PolySdpAssemblyKey]
+  taskKind = CustomTaskWithHandle decisionTask
+```
+
+and the body, which receives a `TaskHandle RemovalDecisionKey`, names one of
+them:
+
+```haskell
+addFollowUp handle (VLeft nextDecisionKey)
+addFollowUp handle (VRight (VLeft assemblyKey))
+```
+
+The `Variant` is over the declared list, so a body cannot ask for a key its
+type did not declare. The scheduler looks up the requesting task by its
+handle, and builds the follow-up's task map with `mkTaskMap`, using the
+resolver and configs the requesting task was itself built with: when the
+task chain makes a task whose key declares follow-ups, it also makes a
+builder for them (`taskFollowUps` on `IsTask`, `followUps` on
+`WrappedTask`) and stores it beside the task. Tasks whose outputs already
+exist on the scheduler's node are pruned as in any `mkTaskMap`, and the map
+then joins the run under the same rules as an added map. The body never
+sees a resolver and the build code never names one; the resolver type is
+fixed only where the run is set up.
+
+A key that may add a task of its own kind (a decision that adds the next
+decision) makes the chain instance recursive. GHC resolves it with a
+recursive dictionary; the unit test `FollowUpsTest` checks this case, and
+the cluster test `followupkeys` runs it.
+
+The old entry points stay: `addTasks` for hand-written `IsTask` types with
+a `Binary` instance, `addTasksWith` for anything that must be built by a
+closure of the requester's own. New `TaskKey`-based code should use
+follow-ups.
+
+### A note on placeholders (not done)
+
+The same idea could apply to placeholders: a placeholder key could declare
+its producer (`type Producer CoefficientBatchKey = CoefficientBatchesKey`)
+and the chain could substitute the producer's task while building the map,
+which would make `replaceTasks` and `placeholdersOfType` unnecessary for
+that use. It is not done, because blocks-3d uses placeholders differently
+(its `Block3dMonolithKey` produces many block tables, and
+`replaceBlock3dPlaceholders` groups placeholders into producers with a
+grouping rule of its own), and a scheduler-level rule would have to fit
+both uses. bfss needs no scheduler support for its case: an
+`{-# OVERLAPPING #-}` `HasTaskChain` instance for the placeholder key that
+maps it, with `contramapKey`, onto the producer's task link gives the same
+graph with no placeholder ever created (the pattern bfss already uses for
+`PriorProjectedBlockKey`). Revisit if a second user wants the declaration.
+
 ## Testing
 
 ```sh
@@ -75,3 +141,15 @@ number of tasks the search must have created, and, in the node-local case,
 that no round file survives the run. The log ends with `Follow-ups test
 passed` for each. The string options are Haskell-quoted because the test
 program's parser reads them with `auto`.
+
+```sh
+HYPERION_SCHEDULER_TEST_SITE=expanse \
+  stack exec -- hyperion-scheduler-test followupkeys master -p '"shared"' -A '"yun124"'
+```
+
+runs the same search written with `TaskKey` keys, `mkTaskMap` and a resolver
+(`Hyperion.Scheduler.Test.FollowUpKeys`): the decision key declares its
+follow-ups and its body calls `addFollowUp`; no task holds a resolver. Same
+two scenarios and checks; the log ends with `Follow-up keys test passed`.
+The pure part, including the recursive instance, is in the unit test suite
+(`stack test hyperion-scheduler:test:hyperion-scheduler-unit-test`).

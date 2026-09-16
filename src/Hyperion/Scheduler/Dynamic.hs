@@ -32,7 +32,8 @@
 -- 'Hyperion.Scheduler.Task.IsTask.taskKeepOutputs'; the scheduler refuses an
 -- addition that asks for a file it has already deleted.
 module Hyperion.Scheduler.Dynamic
-  ( addTasks
+  ( addFollowUp
+  , addTasks
   , addTasksWith
   ) where
 
@@ -46,10 +47,15 @@ import Data.Typeable                   (Typeable)
 import Hyperion                        (Closure, Dict (..), Static (..), cAp,
                                         cPure)
 import Hyperion.Log                    qualified as Log
-import Hyperion.Scheduler.SchedulerHandle (AddTasksReply (..),
+import Bootstrap.Build                 (Variant)
+import Hyperion.Scheduler.SchedulerHandle (AddTasksPayload (..),
+                                           AddTasksReply (..),
                                            AddTasksRequest (..),
-                                           SchedulerHandle (..))
+                                           SchedulerHandle (..),
+                                           TaskHandle (..))
+import Hyperion.Scheduler.Task.FollowUps (BinaryVariant, encodeFollowUp)
 import Hyperion.Scheduler.Task.IsTask  (IsTask)
+import Hyperion.Scheduler.Task.Task    (FollowUps)
 
 -- | A task map with the 'Static' dictionary its 'Binary' instance needs to
 -- travel inside a closure.
@@ -90,12 +96,28 @@ addTasks handle taskMap =
 -- needs a check on the scheduler's side (for example, skipping tasks whose
 -- outputs already exist).
 addTasksWith :: SchedulerHandle -> Closure (Process (Map a (Set a))) -> Process ()
-addTasksWith handle buildTasks = do
+addTasksWith handle buildTasks = request handle (AddTasksClosure (Binary.encode buildTasks))
+
+-- | Add one of the follow-ups the task's key declares
+-- ('Hyperion.Scheduler.Task.Task.FollowUps') to the run, and return once the
+-- scheduler has accepted the tasks. The task names the key; the scheduler
+-- builds the key's task map with 'Hyperion.Scheduler.Task.TaskMap.mkTaskMap'
+-- on its own side, using the resolver and configs the requesting task was
+-- built with, and prunes the tasks whose outputs already exist there. The
+-- requesting task therefore needs no resolver of its own. Throws if the
+-- scheduler refuses, as 'addTasks' does.
+addFollowUp
+  :: forall k . BinaryVariant (FollowUps k)
+  => TaskHandle k -> Variant (FollowUps k) -> Process ()
+addFollowUp (MkTaskHandle handle) followUp = request handle (AddFollowUp (encodeFollowUp followUp))
+
+request :: SchedulerHandle -> AddTasksPayload -> Process ()
+request handle payload = do
   (replySendPort, replyRecvPort) <- newChan
   Log.info "Requesting to add tasks (handle)" handle.handleId
   sendChan handle.requestPort MkAddTasksRequest
     { handleId  = handle.handleId
-    , payload   = Binary.encode buildTasks
+    , payload   = payload
     , replyPort = replySendPort
     }
   reply <- receiveChan replyRecvPort

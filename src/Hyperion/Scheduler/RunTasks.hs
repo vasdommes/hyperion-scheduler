@@ -15,7 +15,7 @@ import Control.Concurrent.STM                       (TVar, atomically, check,
                                                      writeTVar)
 import Control.Concurrent.Utils                     (Lock, mkExclusiveLock,
                                                      withLock)
-import Control.Exception                            (SomeException)
+import Control.Exception                            (SomeException, throwIO)
 import Control.Distributed.Process                  (ReceivePort, SendPort,
                                                      getSelfPid, newChan,
                                                      receiveChan, sendChan)
@@ -52,7 +52,8 @@ import Hyperion.Scheduler.ConcurrentQueue           (ConcurrentQueue,
                                                      readQueue, writeListQueue,
                                                      writeQueue)
 import Hyperion.Scheduler.Config                    (Config (..))
-import Hyperion.Scheduler.SchedulerHandle           (AddTasksReply (..),
+import Hyperion.Scheduler.SchedulerHandle           (AddTasksPayload (..),
+                                                     AddTasksReply (..),
                                                      AddTasksRequest (..),
                                                      HandleId (..),
                                                      SchedulerHandle (..))
@@ -148,7 +149,7 @@ runNodeLoop
   :: forall a . IsTask a
   => Config
   -> FileService
-  -> HandleRegistry
+  -> HandleRegistry a
   -> Node
   -> WorkerPool
   -> Shared IO NodeStatus
@@ -384,7 +385,7 @@ runNodeLoop
 
       -- The task's handle to this scheduler instance while it runs: its id
       -- is valid until the task returns.
-      handleId <- liftIO $ newHandle handles
+      handleId <- liftIO $ newHandle handles task
       let
         handle = MkSchedulerHandle
           { handleId    = handleId
@@ -830,14 +831,16 @@ runTasksWith config nodes fileService workerPool taskMap = do
 
 -- | Answer the requests that running tasks send through their
 -- 'SchedulerHandle' (see
--- "Hyperion.Scheduler.Dynamic"): tasks to add to this run. The payload is a
--- closure that builds the task map on this side, with this run's task type,
--- so the scheduler need not know how the requesting task represents tasks;
--- the monitor then decides whether they can join the graph and replies.
--- Refusals are reported to the requesting task, not thrown here.
+-- "Hyperion.Scheduler.Dynamic"): tasks to add to this run. The payload is
+-- either a closure that builds the task map on this side, with this run's
+-- task type, so the scheduler need not know how the requesting task
+-- represents tasks; or one of the follow-ups the requesting task declares,
+-- built by the task's own builder ('taskFollowUps'). The monitor then
+-- decides whether they can join the graph and replies. Refusals are reported
+-- to the requesting task, not thrown here.
 handleAddTasksRequests
   :: forall a . IsTask a
-  => HandleRegistry
+  => HandleRegistry a
   -> ReceivePort AddTasksRequest
   -> ConcurrentQueue (SchedulerEvent a)
   -> Job ()
@@ -847,13 +850,20 @@ handleAddTasksRequests handles recvPort eventQueue = forever $ do
     refuse msg = do
       Log.warn "Refusing request to add tasks (handle, reason)" (request.handleId, msg)
       lift $ sendChan request.replyPort (AddTasksRefused msg)
-  active <- liftIO $ isHandleActive handles request.handleId
-  if not active
-    then refuse $ "unknown or expired handle " <> show request.handleId
-    else do
+  mRequester <- liftIO $ lookupHandle handles request.handleId
+  case mRequester of
+    Nothing -> refuse $ "unknown or expired handle " <> show request.handleId
+    Just requester -> do
+      let
+        build = case request.payload of
+          AddTasksClosure bytes -> do
+            buildTasks <- lift $ unClosure (Binary.decode bytes :: Closure (Process (Map a (Set a))))
+            lift buildTasks
+          AddFollowUp bytes -> case taskFollowUps requester of
+            Nothing -> liftIO $ throwIO $ userError "the requesting task declares no follow-ups"
+            Just buildFollowUp -> liftIO $ buildFollowUp bytes
       built <- try $ do
-        buildTasks <- lift $ unClosure (Binary.decode request.payload :: Closure (Process (Map a (Set a))))
-        taskMap <- lift buildTasks
+        taskMap <- build
         pure $! Map.size taskMap `seq` taskMap
       case built of
         Left (e :: SomeException) -> refuse $ "could not build the tasks to add: " <> show e
@@ -861,25 +871,28 @@ handleAddTasksRequests handles recvPort eventQueue = forever $ do
           Log.info "Tasks to add requested (handle, count)" (request.handleId, Map.size taskMap)
           liftIO $ writeQueue eventQueue (TasksAdded taskMap request.replyPort)
 
--- | The handles the scheduler has handed out and not taken back, with the
--- next id to issue. A request to add tasks on any other id is refused: it
--- can only come from a task that has already returned.
-newtype HandleRegistry = MkHandleRegistry (IORef (Int, Set HandleId))
+-- | The handles the scheduler has handed out and not taken back, each with
+-- the task that holds it, and the next id to issue. A request to add tasks
+-- on any other id is refused: it can only come from a task that has already
+-- returned. The task is kept so that a follow-up request can be built by the
+-- requesting task's own builder ('taskFollowUps').
+newtype HandleRegistry a = MkHandleRegistry (IORef (Int, Map HandleId a))
 
-newHandleRegistry :: IO HandleRegistry
-newHandleRegistry = MkHandleRegistry <$> newIORef (0, Set.empty)
+newHandleRegistry :: IO (HandleRegistry a)
+newHandleRegistry = MkHandleRegistry <$> newIORef (0, Map.empty)
 
--- | Issue a fresh handle id and register it as active.
-newHandle :: HandleRegistry -> IO HandleId
-newHandle (MkHandleRegistry ref) = atomicModifyIORef' ref $ \(next, active) ->
-  let handleId = MkHandleId next in ((next + 1, Set.insert handleId active), handleId)
+-- | Issue a fresh handle id for the given task and register it as active.
+newHandle :: HandleRegistry a -> a -> IO HandleId
+newHandle (MkHandleRegistry ref) task = atomicModifyIORef' ref $ \(next, active) ->
+  let handleId = MkHandleId next in ((next + 1, Map.insert handleId task active), handleId)
 
-unregisterHandle :: HandleRegistry -> HandleId -> IO ()
+unregisterHandle :: HandleRegistry a -> HandleId -> IO ()
 unregisterHandle (MkHandleRegistry ref) handleId =
-  atomicModifyIORef' ref $ \(next, active) -> ((next, Set.delete handleId active), ())
+  atomicModifyIORef' ref $ \(next, active) -> ((next, Map.delete handleId active), ())
 
-isHandleActive :: HandleRegistry -> HandleId -> IO Bool
-isHandleActive (MkHandleRegistry ref) handleId = Set.member handleId . snd <$> readIORef ref
+-- | The task holding an active handle, if the handle is active.
+lookupHandle :: HandleRegistry a -> HandleId -> IO (Maybe a)
+lookupHandle (MkHandleRegistry ref) handleId = Map.lookup handleId . snd <$> readIORef ref
 
 -- Files that can be removed (if there are no other dependencies)
 -- when the task finished

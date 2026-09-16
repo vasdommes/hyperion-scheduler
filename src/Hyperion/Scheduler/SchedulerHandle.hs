@@ -22,7 +22,9 @@
 module Hyperion.Scheduler.SchedulerHandle
   ( HandleId (..)
   , SchedulerHandle (..)
+  , TaskHandle (..)
   , AddTasksRequest (..)
+  , AddTasksPayload (..)
   , AddTasksReply (..)
   ) where
 
@@ -31,6 +33,7 @@ import Control.Distributed.Process (SendPort)
 import Data.Aeson                  (ToJSON)
 import Data.Binary                 (Binary)
 import Data.ByteString.Lazy        (ByteString)
+import Data.Kind                   (Type)
 import GHC.Generics                (Generic)
 import Hyperion                    (Dict (..), Static (..))
 
@@ -49,13 +52,29 @@ data SchedulerHandle = MkSchedulerHandle
 instance Static (Binary SchedulerHandle) where
   closureDict = static Dict
 
--- | A request from a running task to its scheduler: the tasks to add, in
--- the encoding described in "Hyperion.Scheduler.Dynamic".
+-- | A 'SchedulerHandle' as a 'Hyperion.Scheduler.Task.Task.TaskKey' task
+-- body receives it: tagged with the task's key type, so that the follow-ups
+-- the body asks for ('Hyperion.Scheduler.Dynamic.addFollowUp') are checked
+-- against the key's declaration ('Hyperion.Scheduler.Task.Task.FollowUps').
+-- Made on the worker from the plain handle; never sent.
+newtype TaskHandle (k :: Type) = MkTaskHandle { schedulerHandle :: SchedulerHandle }
+  deriving newtype (Show)
+
+-- | A request from a running task to its scheduler: tasks to add, either as
+-- a closure that builds them (the encoding described in
+-- "Hyperion.Scheduler.Dynamic") or as one of the follow-ups the task's key
+-- declares (an encoded 'Bootstrap.Build.Variant' of the declared key types,
+-- see "Hyperion.Scheduler.Task.FollowUps").
 data AddTasksRequest = MkAddTasksRequest
   { handleId  :: HandleId
-  , payload   :: ByteString
+  , payload   :: AddTasksPayload
   , replyPort :: SendPort AddTasksReply
   } deriving (Show, Generic, Binary)
+
+data AddTasksPayload
+  = AddTasksClosure ByteString
+  | AddFollowUp ByteString
+  deriving (Show, Generic, Binary)
 
 data AddTasksReply
   = AddTasksDone

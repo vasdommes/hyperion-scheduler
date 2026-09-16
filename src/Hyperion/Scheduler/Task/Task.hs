@@ -38,7 +38,7 @@ import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           qualified as Text
 import Data.Time                           (NominalDiffTime)
-import Data.Typeable                       (cast, typeOf)
+import Data.Typeable                       (cast, typeOf, typeRep)
 import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
@@ -49,15 +49,18 @@ import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
                                             ToTaskKeyFileInfo, mkStatKeyViaJSON,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
-import Hyperion.Scheduler.SchedulerHandle  (SchedulerHandle)
+import Hyperion.Scheduler.SchedulerHandle  (SchedulerHandle,
+                                            TaskHandle (..))
+import Hyperion.Scheduler.Task.FollowUps   (BinaryVariant, decodeFollowUp,
+                                            hasFollowUps)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
                                             defaultRuntimeEstimate)
-import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
+import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges,
                                             TaskChain (TaskNode), TaskLink (..))
 import Data.Store                          (Store)
 import Hyperion.Scheduler.Task.Util        (decodeStoreFile,
                                             encodeStoreFileAtomic)
-import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
+import Hyperion.Scheduler.Task.WrappedTask (wrapTaskWithFollowUps)
 import Hyperion.Scheduler.Types            (MemorySize, NumCPUs)
 import Hyperion.Util.MonadPathExists       (MonadPathExists (..))
 import Type.Reflection                     (Typeable)
@@ -172,13 +175,15 @@ data TaskKind k where
         => NumCPUs -> TaskConfig k -> k -> f (Process ()))
     -> TaskKind k
   -- | Like 'CustomTask', but the computation also receives the task's
-  -- 'SchedulerHandle', through which it may add tasks to the run
-  -- ("Hyperion.Scheduler.Dynamic"). The handle is 'Nothing' while the task
-  -- graph is being derived from the 'getPath' calls, and when the task is
-  -- run without one; a body that needs it should fail loudly then.
+  -- handle to the scheduler, through which it may add tasks to the run
+  -- ("Hyperion.Scheduler.Dynamic"): the follow-ups the key declares
+  -- ('FollowUps', with 'Hyperion.Scheduler.Dynamic.addFollowUp'), or a map
+  -- of its own. The handle is 'Nothing' while the task graph is being
+  -- derived from the 'getPath' calls, and when the task is run without one;
+  -- a body that needs it should fail loudly then.
   CustomTaskWithHandle
     :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
-        => NumCPUs -> Maybe SchedulerHandle -> TaskConfig k -> k -> f (Process ()))
+        => NumCPUs -> Maybe (TaskHandle k) -> TaskConfig k -> k -> f (Process ()))
     -> TaskKind k
   -- | A task performing no computation: a pure grouping node whose only role
   -- is to depend on other tasks (@OutKey k ~ Void@: no output files). The
@@ -209,6 +214,16 @@ class ( All Eq (DepKeys k)
 
   type OutKey k :: Type
   type OutKey k = k
+
+  -- | The keys of the tasks a running task of this kind may add to its run
+  -- ("Hyperion.Scheduler.Dynamic"). A task adds one by sending the key
+  -- ('Hyperion.Scheduler.Dynamic.addFollowUp'); the scheduler builds its
+  -- task map, with 'Hyperion.Scheduler.Task.TaskMap.mkTaskMap', using the
+  -- resolver and configs the requesting task was itself built with. So a
+  -- task that adds tasks never needs to know where its files live or how
+  -- to build a task: the declaration here is all. Empty by default.
+  type FollowUps k :: [Type]
+  type FollowUps k = '[]
 
   -- | TaskKey defines WHAT to compute, TaskConfig - HOW to compute it:
   -- e.g. which executable to call, which dependencies to fetch, how to parallelize etc.
@@ -357,7 +372,7 @@ computeAndSaveValueWithHandle
      )
   => NumCPUs -> SchedulerHandle -> TaskConfig k -> k -> f (Process ())
 computeAndSaveValueWithHandle numCpus handle cfg key = case taskKind @k of
-  CustomTaskWithHandle go -> go numCpus (Just handle) cfg key
+  CustomTaskWithHandle go -> go numCpus (Just (MkTaskHandle handle)) cfg key
   _ -> computeAndSaveValue numCpus cfg key
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
@@ -503,6 +518,12 @@ taskLink resolver cfg' = MkTaskLink
   where
     cfg = toConfig cfg'
 
+-- The follow-ups a key declares ('FollowUps') are built the way the task
+-- itself was built: with the same resolver and configs, by the chain of
+-- the follow-up keys, in IO on the scheduler's side. The instance therefore
+-- needs the chain for the declared follow-ups; a key that may add a task of
+-- its own kind makes the instance recursive, which GHC resolves with a
+-- recursive dictionary.
 instance {-# OVERLAPPABLE #-}
   ( Static (TaskKey k)
   , HasTaskChain m r c (Variant (DepKeys k))
@@ -514,8 +535,19 @@ instance {-# OVERLAPPABLE #-}
   , Static (Binary r)
   , Static (Binary k)
   , IsTask (Task r k)
+  , BinaryVariant (FollowUps k)
+  , HasTaskChain IO r c (Variant (FollowUps k))
   ) => HasTaskChain m r c k where
-  taskChain resolver cfg = TaskNode (wrapTask <$> taskLink resolver cfg) (taskChain resolver cfg)
+  taskChain resolver cfg =
+    TaskNode (wrapTaskWithFollowUps followUps <$> taskLink resolver cfg) (taskChain resolver cfg)
+    where
+      followUps
+        | hasFollowUps (Proxy @(FollowUps k)) = Just $ \bytes ->
+            case decodeFollowUp bytes of
+              Left err -> fail $ "Follow-up of " <> show (typeRep (Proxy @k)) <> ": " <> err
+              Right followUp ->
+                toTaskEdges (taskChain @IO @r @c @(Variant (FollowUps k)) resolver cfg) followUp
+        | otherwise = Nothing
 
 
 newtype ListTaskKey k = MkListTaskKey [k]
