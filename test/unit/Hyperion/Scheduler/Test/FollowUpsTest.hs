@@ -59,7 +59,7 @@ instance ToFileStatKey Final where toFileStatKey = mkFileStatKeyViaJSON
 
 instance TaskKey Decide where
   type FollowUps Decide = '[Decide, Final]
-  taskKind = CustomTaskWithHandle $ \_ _ _ key -> getPath key $> pure ()
+  taskKind = CustomTaskWithHandle $ \_ _ key -> getPath key $> const (pure ())
 
 instance TaskKey Final where
   taskKind = CustomTask $ \_ _ key -> getPath key $> pure ()

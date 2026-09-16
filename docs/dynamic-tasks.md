@@ -9,7 +9,7 @@ document says how, what the scheduler guarantees, and what it refuses.
 |---|---|---|
 | `SchedulerHandle` | `Hyperion.Scheduler.SchedulerHandle` | What a running task holds: an id and a port to the scheduler instance that runs it, valid until the task returns. |
 | `taskClosureWithHandle` | `Hyperion.Scheduler.Task.IsTask` | Like `taskClosure`, but the task also receives its `SchedulerHandle`. Default: ignore the handle. |
-| `CustomTaskWithHandle`, `keepOutputs` | `Hyperion.Scheduler.Task.Task` | The `TaskKind` whose computation receives `Maybe SchedulerHandle` (`Nothing` while the graph is derived), and the keep flag below. |
+| `CustomTaskWithHandle`, `keepOutputs` | `Hyperion.Scheduler.Task.Task` | The `TaskKind` whose computation's `Process` part receives the task's `TaskHandle` (the applicative layer, all that runs while the graph is derived, does not), and the keep flag below. |
 | `addTasks`, `addTasksWith` | `Hyperion.Scheduler.Dynamic` | Called inside the task: sends a task map through the handle and returns once the tasks are part of the graph. |
 | `FollowUps`, `TaskHandle`, `addFollowUp` | `Hyperion.Scheduler.Task.Task`, `Hyperion.Scheduler.SchedulerHandle`, `Hyperion.Scheduler.Dynamic` | A key declares the keys its task may add; the body names one and the scheduler builds it with the requester's own resolver and configs (below). |
 | `taskKeepOutputs` | `Hyperion.Scheduler.Task.IsTask` | Keep the task's node-local outputs until the run ends, for readers added later. |

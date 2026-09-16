@@ -174,16 +174,17 @@ data TaskKind k where
     :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
         => NumCPUs -> TaskConfig k -> k -> f (Process ()))
     -> TaskKind k
-  -- | Like 'CustomTask', but the computation also receives the task's
-  -- handle to the scheduler, through which it may add tasks to the run
+  -- | Like 'CustomTask', but the computation receives the task's handle to
+  -- the scheduler, through which it may add tasks to the run
   -- ("Hyperion.Scheduler.Dynamic"): the follow-ups the key declares
   -- ('FollowUps', with 'Hyperion.Scheduler.Dynamic.addFollowUp'), or a map
-  -- of its own. The handle is 'Nothing' while the task graph is being
-  -- derived from the 'getPath' calls, and when the task is run without one;
-  -- a body that needs it should fail loudly then.
+  -- of its own. Only the 'Process' part gets the handle: the applicative
+  -- layer, which declares the inputs and outputs and is all that runs while
+  -- the task graph is derived, has no use for it, and the scheduler supplies
+  -- it when it runs the task ('taskClosureWithHandle').
   CustomTaskWithHandle
     :: (forall f . (Applicative f, FetchesPaths (OutKey k ': DepKeys k) f)
-        => NumCPUs -> Maybe (TaskHandle k) -> TaskConfig k -> k -> f (Process ()))
+        => NumCPUs -> TaskConfig k -> k -> f (TaskHandle k -> Process ()))
     -> TaskKind k
   -- | A task performing no computation: a pure grouping node whose only role
   -- is to depend on other tasks (@OutKey k ~ Void@: no output files). The
@@ -359,11 +360,17 @@ computeAndSaveValue numCpus cfg key = case taskKind @k of
     pure $ do
       error $ "computeAndSaveValue: unreplaced placeholder task " <> show (typeOf key)
   CustomTask go -> go numCpus cfg key
-  CustomTaskWithHandle go -> go numCpus Nothing cfg key
+  -- Without a handle the task cannot be run; the scheduler runs it through
+  -- 'computeAndSaveValueWithHandle'. The applicative layer still declares
+  -- its inputs and outputs here, which is what graph derivation needs.
+  CustomTaskWithHandle go ->
+    fail ("A task that adds tasks was run without a scheduler handle: " <> show (typeOf key))
+      <$ go numCpus cfg key
   NoOpTask go -> go key $> pure ()
 
 -- | 'computeAndSaveValue' with the task's 'SchedulerHandle': a
--- 'CustomTaskWithHandle' receives it, every other kind ignores it.
+-- 'CustomTaskWithHandle' receives it in its 'Process' part, every other kind
+-- ignores it.
 computeAndSaveValueWithHandle
   :: forall k f .
      ( TaskKey k
@@ -372,7 +379,7 @@ computeAndSaveValueWithHandle
      )
   => NumCPUs -> SchedulerHandle -> TaskConfig k -> k -> f (Process ())
 computeAndSaveValueWithHandle numCpus handle cfg key = case taskKind @k of
-  CustomTaskWithHandle go -> go numCpus (Just (MkTaskHandle handle)) cfg key
+  CustomTaskWithHandle go -> ($ MkTaskHandle handle) <$> go numCpus cfg key
   _ -> computeAndSaveValue numCpus cfg key
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)

@@ -144,15 +144,14 @@ instance TaskKey PriorBlockKey where
 -- task. The only task with follow-ups.
 decideTask
   :: (Applicative f, FetchesPath DecideKey f, FetchesPath BlockKey f)
-  => NumCPUs -> Maybe (TaskHandle DecideKey) -> Search -> DecideKey -> f (Process ())
-decideTask _ mHandle search key = do
+  => NumCPUs -> Search -> DecideKey -> f (TaskHandle DecideKey -> Process ())
+decideTask _ search key = do
   path <- getPath key
   getValues <- unWrappedProcess $ traverse fetch (blockKeys search key.round)
-  pure $ do
+  pure $ \handle -> do
     values <- getValues
     let stop = maximum values < search.threshold
     Log.info "Decision (round, values, stop)" (key.round, values, stop)
-    handle <- maybe (Log.throwError "The decision needs its scheduler handle") pure mHandle
     if stop
       then addFollowUp handle (VRight (VLeft MkFinalKey { round = key.round }))
       else addFollowUp handle (VLeft MkDecideKey { round = key.round + 1 })
