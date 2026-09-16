@@ -151,5 +151,7 @@ runs the same search written with `TaskKey` keys, `mkTaskMap` and a resolver
 (`Hyperion.Scheduler.Test.FollowUpKeys`): the decision key declares its
 follow-ups and its body calls `addFollowUp`; no task holds a resolver. Same
 two scenarios and checks; the log ends with `Follow-up keys test passed`.
+Passed on Expanse on 2026-09-15 (program `GKHtC`, both scenarios, 41 task
+records each, no node-local file left).
 The pure part, including the recursive instance, is in the unit test suite
 (`stack test hyperion-scheduler:test:hyperion-scheduler-unit-test`).
