@@ -20,6 +20,7 @@ import Data.Maybe                     (fromMaybe)
 import Data.Set                       (Set)
 import Data.Set                       qualified as Set
 import Data.Time                      (NominalDiffTime)
+import Hyperion.OsPath                (OsPath)
 import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats       (TaskAndFileStats, ToStatKey (..),
                                        approxRuntime, lookupMaxFileSize,
@@ -49,8 +50,13 @@ data WrappedTask = forall a . (IsTask a, ToStatKey a) => MkWrappedTask
   }
 
 -- | Builds the tasks a running task adds to its run, from the encoded
--- follow-up it sends ("Hyperion.Scheduler.Task.FollowUps").
-type FollowUpBuilder = Lazy.ByteString -> IO (Map WrappedTask (Set WrappedTask))
+-- follow-up it sends ("Hyperion.Scheduler.Task.FollowUps"). The first
+-- argument is how to tell whether an output already exists, supplied by the
+-- scheduler when the follow-up is requested: it must answer for node-local
+-- paths from the run's state, not from the scheduler node's disk, since a
+-- node-local file of another node is absent there (see
+-- 'Hyperion.Scheduler.RunTasks.handleAddTasksRequests').
+type FollowUpBuilder = (OsPath -> IO Bool) -> Lazy.ByteString -> IO (Map WrappedTask (Set WrappedTask))
 
 
 instance Eq WrappedTask where

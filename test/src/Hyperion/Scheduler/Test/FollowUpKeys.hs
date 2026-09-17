@@ -213,6 +213,10 @@ instance Static (PathResolver Dirs FinalKey) where closureDict = static Dict
 data FollowUpKeysProblem = MkFollowUpKeysProblem
   { numBlocks :: Int
   , threshold :: Int
+  , numNodes  :: Int    -- ^ nodes of the SLURM job; with more than one, the
+                        --   node-local files of a round live on several nodes
+                        --   and the scheduler's follow-up maps must not read
+                        --   its own node's disk to know what exists
   , nodeCpus  :: Int
   , nodeLocal :: Bool   -- ^ block values and decisions under the node-local storage path
   } deriving (Eq, Ord, Show, Generic, Binary)
@@ -225,7 +229,8 @@ followUpKeysJob :: Job Scheduler.Config -> OsPath -> FollowUpKeysProblem -> Job 
 followUpKeysJob getSchedulerConfig baseDir problem = do
   schedulerConfig <- getSchedulerConfig
   let
-    name = "followupkeys_" <> showOs problem.numBlocks <> "_blocks" <> (if problem.nodeLocal then "_local" else "_shared")
+    name = "followupkeys_" <> showOs problem.numBlocks <> "_blocks_" <> showOs problem.numNodes <> "_nodes"
+        <> (if problem.nodeLocal then "_local" else "_shared")
     resultDir = baseDir </> name
     dirs = MkDirs
       { dataDir   = if problem.nodeLocal then schedulerConfig.localStoragePath </> name else resultDir </> "rounds"
@@ -264,6 +269,9 @@ followUpKeysJob getSchedulerConfig baseDir problem = do
 
 defaultProblems :: [FollowUpKeysProblem]
 defaultProblems =
-  [ MkFollowUpKeysProblem { numBlocks = 4, threshold = 10, nodeCpus = 8, nodeLocal = False }
-  , MkFollowUpKeysProblem { numBlocks = 4, threshold = 10, nodeCpus = 8, nodeLocal = True }
+  [ MkFollowUpKeysProblem { numBlocks = 4, threshold = 10, numNodes = 1, nodeCpus = 8, nodeLocal = False }
+  , MkFollowUpKeysProblem { numBlocks = 4, threshold = 10, numNodes = 1, nodeCpus = 8, nodeLocal = True }
+  -- Two nodes with node-local files: the follow-up maps are built on the
+  -- scheduler's node while the blocks' files sit on both nodes.
+  , MkFollowUpKeysProblem { numBlocks = 4, threshold = 10, numNodes = 2, nodeCpus = 8, nodeLocal = True }
   ]

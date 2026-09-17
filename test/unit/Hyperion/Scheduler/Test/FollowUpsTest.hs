@@ -21,6 +21,7 @@ import Control.Monad                       (unless)
 import Data.Aeson                          (ToJSON)
 import Data.Binary                         (Binary)
 import Data.Functor                        (($>))
+import Data.IORef                          (modifyIORef, newIORef, readIORef)
 import Data.Map.Strict                     qualified as Map
 import Data.Maybe                          (isJust, isNothing)
 import Data.Set                            qualified as Set
@@ -108,12 +109,24 @@ runTest = do
   case taskFollowUps decideTask of
     Nothing -> pure ()
     Just build -> do
-      nextRound <- build (encodeFollowUp (VLeft (MkDecide 1) :: Variant (FollowUps Decide)))
+      -- The scheduler tells the builder which outputs exist; here, none.
+      let nothingExists _ = pure False
+      nextRound <- build nothingExists (encodeFollowUp (VLeft (MkDecide 1) :: Variant (FollowUps Decide)))
       expect "the next decision is built with the same resolver" $
         outputPaths nextRound == [resolvePath testDir (MkDecide 1)]
-      final <- build (encodeFollowUp (VRight (VLeft (MkFinal 1)) :: Variant (FollowUps Decide)))
+      final <- build nothingExists (encodeFollowUp (VRight (VLeft (MkFinal 1)) :: Variant (FollowUps Decide)))
       expect "the final task is built with the same resolver" $
         outputPaths final == [resolvePath testDir (MkFinal 1)]
+      -- Existence comes from the scheduler's oracle, not from the disk: a
+      -- path under /nonexistent that the oracle reports as produced prunes
+      -- its task, and the oracle is asked about the resolved output path.
+      asked <- newIORef []
+      let produced path = modifyIORef asked (path :) $> (path == resolvePath testDir (MkDecide 1))
+      pruned <- build produced (encodeFollowUp (VLeft (MkDecide 1) :: Variant (FollowUps Decide)))
+      expect "a follow-up whose output the scheduler reports as produced is pruned" $ Map.null pruned
+      askedPaths <- readIORef asked
+      expect "the oracle is asked about the follow-up's resolved output path" $
+        askedPaths == [resolvePath testDir (MkDecide 1)]
       -- The follow-up's own follow-ups: the next decision may add again.
       let nextTask = head (Map.keys nextRound)
       expect "a follow-up decision has a builder of its own" $ isJust (taskFollowUps nextTask)

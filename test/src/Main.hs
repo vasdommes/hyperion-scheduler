@@ -194,10 +194,10 @@ runFollowUpsOnCluster site = runClusterTest site $ \_ baseDir ->
 runFollowUpKeysOnCluster :: Site -> IO ()
 runFollowUpKeysOnCluster site = runClusterTest site $ \_ baseDir ->
   forM_ FollowUpKeys.defaultProblems $ \problem ->
-    local (setJobTime (20 * minute) . setJobType (MPIJob 1 problem.nodeCpus)) $
+    local (setJobTime (20 * minute) . setJobType (MPIJob problem.numNodes problem.nodeCpus)) $
       remoteEvalJob $ static FollowUpKeys.followUpKeysJob
         `cAp` (static TestConfig.getSchedulerConfig `cAp` cPure site)
-        `cAp` cPure (baseDir </> "followupkeys" </> "mpi_1_" <> showOs problem.nodeCpus)
+        `cAp` cPure (baseDir </> "followupkeys" </> "mpi_" <> showOs problem.numNodes <> "_" <> showOs problem.nodeCpus)
         `cAp` cPure problem
 
 -- * Entry point

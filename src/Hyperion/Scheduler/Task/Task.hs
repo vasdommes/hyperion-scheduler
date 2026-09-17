@@ -5,6 +5,7 @@
 {-# LANGUAGE DerivingVia             #-}
 {-# LANGUAGE DuplicateRecordFields   #-}
 {-# LANGUAGE GADTs                   #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase              #-}
 {-# LANGUAGE NoFieldSelectors        #-}
 {-# LANGUAGE OverloadedRecordDot     #-}
@@ -26,6 +27,7 @@ import Bootstrap.Build                     (All, FList, FetchConfig (..),
 import Control.DeepSeq                     (deepseq)
 import Control.Distributed.Process         (Process)
 import Control.Monad                       (join)
+import Control.Monad.Reader                (ReaderT (..), runReaderT)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
 import Data.Aeson                          (ToJSON (..))
 import Data.Binary                         (Binary (..))
@@ -525,12 +527,31 @@ taskLink resolver cfg' = MkTaskLink
   where
     cfg = toConfig cfg'
 
+-- | The monad in which follow-up task maps are built. Its 'doesPathExist'
+-- is supplied by the scheduler when the follow-up is requested, rather than
+-- reading the scheduler node's disk: an output on another node is node-local
+-- and absent from that disk, so building follow-ups in plain @IO@ would
+-- re-explore the whole node-local ancestry of every finished producer (and,
+-- if a producer's node-local file were checked as "missing", could refuse a
+-- valid task). See 'Hyperion.Scheduler.RunTasks.handleAddTasksRequests' for
+-- the oracle the scheduler passes.
+newtype FollowUpPathExists a = MkFollowUpPathExists (ReaderT (OsPath -> IO Bool) IO a)
+  deriving newtype (Functor, Applicative, Monad)
+
+instance MonadPathExists FollowUpPathExists where
+  doesPathExist p = MkFollowUpPathExists (ReaderT ($ p))
+
+runFollowUpPathExists :: (OsPath -> IO Bool) -> FollowUpPathExists a -> IO a
+runFollowUpPathExists existsCheck (MkFollowUpPathExists m) = runReaderT m existsCheck
+
 -- The follow-ups a key declares ('FollowUps') are built the way the task
 -- itself was built: with the same resolver and configs, by the chain of
--- the follow-up keys, in IO on the scheduler's side. The instance therefore
--- needs the chain for the declared follow-ups; a key that may add a task of
--- its own kind makes the instance recursive, which GHC resolves with a
--- recursive dictionary.
+-- the follow-up keys, on the scheduler's side in 'FollowUpPathExists', so
+-- that whether an output exists is the scheduler's answer and not the
+-- scheduler node's disk. The instance therefore needs the chain for the
+-- declared follow-ups in that monad; a key that may add a task of its own
+-- kind makes the instance recursive, which GHC resolves with a recursive
+-- dictionary.
 instance {-# OVERLAPPABLE #-}
   ( Static (TaskKey k)
   , HasTaskChain m r c (Variant (DepKeys k))
@@ -543,17 +564,18 @@ instance {-# OVERLAPPABLE #-}
   , Static (Binary k)
   , IsTask (Task r k)
   , BinaryVariant (FollowUps k)
-  , HasTaskChain IO r c (Variant (FollowUps k))
+  , HasTaskChain FollowUpPathExists r c (Variant (FollowUps k))
   ) => HasTaskChain m r c k where
   taskChain resolver cfg =
     TaskNode (wrapTaskWithFollowUps followUps <$> taskLink resolver cfg) (taskChain resolver cfg)
     where
       followUps
-        | hasFollowUps (Proxy @(FollowUps k)) = Just $ \bytes ->
+        | hasFollowUps (Proxy @(FollowUps k)) = Just $ \existsCheck bytes ->
             case decodeFollowUp bytes of
               Left err -> fail $ "Follow-up of " <> show (typeRep (Proxy @k)) <> ": " <> err
               Right followUp ->
-                toTaskEdges (taskChain @IO @r @c @(Variant (FollowUps k)) resolver cfg) followUp
+                runFollowUpPathExists existsCheck $
+                  toTaskEdges (taskChain @FollowUpPathExists @r @c @(Variant (FollowUps k)) resolver cfg) followUp
         | otherwise = Nothing
 
 

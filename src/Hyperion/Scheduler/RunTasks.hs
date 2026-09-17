@@ -114,6 +114,7 @@ import Hyperion.Scheduler.WorkerPool                (TWorker (workerId),
                                                      withWorkerPool,
                                                      withWorkersFromPool,
                                                      workerCpuIdToString)
+import System.Directory.OsPath                      qualified as Directory
 
 -- Each task info has input and output files stored as VirtualFilePath's, i.e. global paths like /expanse/lustre/path/to/task.output
 -- In fact, tasks will write their output either to that location (GlobalFilePath), or to a Local storage (NodeLocalFilePath), depending on Scheduler storage policy.
@@ -756,7 +757,8 @@ runTasksWith config nodes fileService workerPool taskMap = do
   taskRecordQueue <- newQueue
   cleanupQueue <- newQueue
   (addTasksRequestPort, addTasksRequestRecvPort) <- lift newChan
-  requestHandler <- asyncLinkedLocalJob $ handleAddTasksRequests handles addTasksRequestRecvPort eventQueue
+  requestHandler <- asyncLinkedLocalJob $
+    handleAddTasksRequests config pathResolveMapVar handles addTasksRequestRecvPort eventQueue
   lift $ throwOnAsyncFailed requestHandler
   -- NB: here we don't need taskQueueNotifier and taskQueueLock,
   -- since no one is accessing taskQueue yet.
@@ -840,16 +842,30 @@ runTasksWith config nodes fileService workerPool taskMap = do
 -- to the requesting task, not thrown here.
 handleAddTasksRequests
   :: forall a . IsTask a
-  => HandleRegistry a
+  => Config
+  -> Shared IO FilePathResolveMap
+  -> HandleRegistry a
   -> ReceivePort AddTasksRequest
   -> ConcurrentQueue (SchedulerEvent a)
   -> Job ()
-handleAddTasksRequests handles recvPort eventQueue = forever $ do
+handleAddTasksRequests config pathResolveMapVar handles recvPort eventQueue = forever $ do
   request <- lift $ receiveChan recvPort
   let
     refuse msg = do
       Log.warn "Refusing request to add tasks (handle, reason)" (request.handleId, msg)
       lift $ sendChan request.replyPort (AddTasksRefused msg)
+    -- Whether an output of a follow-up task already exists, for pruning while
+    -- the follow-up map is built. A node-local output lives on the node that
+    -- made it, not on the scheduler's node, so its presence is read from the
+    -- files this run has created (the resolve map) rather than from disk;
+    -- global outputs are checked on disk as usual. This keeps the follow-up
+    -- map to the genuinely new tasks: a finished producer of a node-local
+    -- file is pruned here instead of dragging its whole node-local ancestry
+    -- back into the map.
+    existsCheck path
+      | isNodeLocal config vp = Map.member vp <$> Shared.readShared pathResolveMapVar
+      | otherwise             = Directory.doesPathExist path
+      where vp = VirtualFilePath path
   mRequester <- liftIO $ lookupHandle handles request.handleId
   case mRequester of
     Nothing -> refuse $ "unknown or expired handle " <> show request.handleId
@@ -861,7 +877,7 @@ handleAddTasksRequests handles recvPort eventQueue = forever $ do
             lift buildTasks
           AddFollowUp bytes -> case taskFollowUps requester of
             Nothing -> liftIO $ throwIO $ userError "the requesting task declares no follow-ups"
-            Just buildFollowUp -> liftIO $ buildFollowUp bytes
+            Just buildFollowUp -> liftIO $ buildFollowUp existsCheck bytes
       built <- try $ do
         taskMap <- build
         pure $! Map.size taskMap `seq` taskMap

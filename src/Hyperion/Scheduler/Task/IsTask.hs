@@ -17,6 +17,7 @@ import Data.Time.Clock             (NominalDiffTime)
 import Data.Typeable               (Typeable, typeOf)
 import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
+import Hyperion.OsPath            (OsPath)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
 import Hyperion.Scheduler.SchedulerHandle (SchedulerHandle)
 import Hyperion.Scheduler.StatKey  (TaskKeyFileInfo (..))
@@ -95,9 +96,11 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   -- "Hyperion.Scheduler.Dynamic"), from the encoded follow-up the task sends.
   -- The builder is made where the task was made, with the task's own
   -- resolver and configs, so the scheduler builds follow-ups the way it
-  -- built the task that asks for them. 'Nothing' for a task that declares no
-  -- follow-ups (the default).
-  taskFollowUps :: a -> Maybe (ByteString -> IO (Map a (Set a)))
+  -- built the task that asks for them. Its first argument tells whether an
+  -- output already exists; the scheduler supplies one that answers for
+  -- node-local paths from the run's state rather than the scheduler node's
+  -- disk. 'Nothing' for a task that declares no follow-ups (the default).
+  taskFollowUps :: a -> Maybe ((OsPath -> IO Bool) -> ByteString -> IO (Map a (Set a)))
   taskFollowUps _ = Nothing
 
 -- TODO: remove (Stats.ToStatKey a) and use (IsTask a) everywhere in Stats instead?

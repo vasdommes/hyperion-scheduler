@@ -93,11 +93,27 @@ handle, and builds the follow-up's task map with `mkTaskMap`, using the
 resolver and configs the requesting task was itself built with: when the
 task chain makes a task whose key declares follow-ups, it also makes a
 builder for them (`taskFollowUps` on `IsTask`, `followUps` on
-`WrappedTask`) and stores it beside the task. Tasks whose outputs already
-exist on the scheduler's node are pruned as in any `mkTaskMap`, and the map
-then joins the run under the same rules as an added map. The body never
-sees a resolver and the build code never names one; the resolver type is
-fixed only where the run is set up.
+`WrappedTask`) and stores it beside the task. The map then joins the run
+under the same rules as an added map. The body never sees a resolver and
+the build code never names one; the resolver type is fixed only where the
+run is set up.
+
+Pruning while a follow-up is built does not read the scheduler node's disk.
+The builder runs in `FollowUpPathExists`, whose `doesPathExist` is a
+function the scheduler passes with the request: a node-local path counts as
+existing when a finished task of this run produced it (the scheduler's
+resolve map), a global path when it is on the file system. Building in plain
+`IO` would answer "missing" for every node-local output on another node,
+re-list its finished producer and the producer's whole node-local ancestry
+in every follow-up map, and could report as present a stale file that the
+scheduler node happens to hold. (`insertTasks` drops re-listed tasks whose
+dependencies it already knows, so the old behaviour was slow rather than
+wrong in a fresh allocation.) Two limits remain: a node-local file that
+cleanup has deleted still counts as produced, so a follow-up that needs it
+is refused with "node-local file already deleted" unless its producer sets
+`keepOutputs`, as bfss's projected blocks do; and the initial `mkTaskMap`
+and the closures of `addTasksWith` still check the disk, which is exact in a
+fresh allocation and the caller's business respectively.
 
 A key that may add a task of its own kind (a decision that adds the next
 decision) makes the chain instance recursive. GHC resolves it with a
@@ -144,14 +160,25 @@ program's parser reads them with `auto`.
 
 ```sh
 HYPERION_SCHEDULER_TEST_SITE=expanse \
-  stack exec -- hyperion-scheduler-test followupkeys master -p '"shared"' -A '"yun124"'
+  stack exec -- hyperion-scheduler-test followupkeys master \
+    --base-dir /expanse/lustre/scratch/dsd/temp_project/hyperion-scheduler/test \
+    -p '"debug"' -A '"yun124"'
 ```
+
+Give `--base-dir` an absolute path: without it hyperion's executable, job and
+log directories are relative to the current directory, and the worker jobs,
+which SLURM starts inside the `jobs` directory, then fail at once with
+"No such file or directory" for the copied executable (exit code 127) while
+the master waits for them.
 
 runs the same search written with `TaskKey` keys, `mkTaskMap` and a resolver
 (`Hyperion.Scheduler.Test.FollowUpKeys`): the decision key declares its
 follow-ups and its body calls `addFollowUp`; no task holds a resolver. Same
 two scenarios and checks; the log ends with `Follow-up keys test passed`.
 Passed on Expanse on 2026-09-15 (program `GKHtC`, both scenarios, 41 task
+records each, no node-local file left), and on 2026-09-17 with a third
+scenario on two nodes with node-local files (program `hbISw`, follow-up
+maps built with the scheduler's path check, five tasks per request, 41
 records each, no node-local file left).
 The pure part, including the recursive instance, is in the unit test suite
 (`stack test hyperion-scheduler:test:hyperion-scheduler-unit-test`).
