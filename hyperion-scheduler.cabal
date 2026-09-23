@@ -80,7 +80,6 @@ library
     , monoidal-containers
     , mtl
     , pqueue
-    , rusage
     , stm
     , strict-concurrency
     , text

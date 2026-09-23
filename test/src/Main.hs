@@ -129,7 +129,7 @@ runLocal opts = withConcurrentOutput $ do
   Log.info "Running locally" (baseDir, cpus)
   runJobLocal defaultHyperionStaticConfig programInfo $
     -- 'runJobLocal' hardcodes one CPU; 'getJobNodes' reads this to size the node.
-    local (\env -> env { jobNodeCpus = NumCPUs cpus }) $
+    local (\env -> env { jobNodeCpus = cpus }) $
       linearTransformJob (pure schedulerConfig) baseDir (toProblem opts.problem)
 
 -- * Cluster runs

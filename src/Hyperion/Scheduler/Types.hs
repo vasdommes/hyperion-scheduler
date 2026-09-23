@@ -17,13 +17,14 @@ import Data.Binary        (Binary)
 import Data.List.NonEmpty qualified as NonEmpty
 import GHC.Generics       (Generic)
 import Hyperion           (WorkerAddr (..))
+import Hyperion           qualified as Hyp
 import Hyperion.OsPath    (OsPath)
 import Text.Printf        qualified as Printf
 
 -- Nodes
 
 -- TODO this conflicts with Hyperion.NumCPUs = NumCPUs Int
-type NumCPUs = Int
+type NumCPUs = Hyp.NumCPUs
 
 data Node = MkNode
   { memory           :: MemorySize -- ^ Total memory on the node

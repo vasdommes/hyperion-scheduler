@@ -32,7 +32,6 @@ import Hyperion                            (Dict (..), Job, JobEnv (..),
                                             Serializable, Static,
                                             WorkerAddr (..), cAp, closureDict,
                                             remoteEvalOnWorker)
-import Hyperion                            qualified as Hyp
 import Hyperion.CallClosure                (call')
 import Hyperion.Scheduler.Config           (Config (..))
 import Hyperion.Scheduler.Types            (Node (..))
@@ -45,7 +44,7 @@ instance Static (Binary (SendPort ProcessId)) where
 getJobNodes :: Config -> Job [Node]
 getJobNodes config = do
   addrs <- asks (Map.keys . jobWorkerLauncherMap)
-  Hyp.NumCPUs cpusPerNode <- asks jobNodeCpus
+  cpusPerNode <- asks jobNodeCpus
   pure $ do
     addr <- addrs
     pure $ MkNode

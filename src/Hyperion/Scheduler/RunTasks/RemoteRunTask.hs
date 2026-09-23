@@ -1,7 +1,6 @@
 {-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors      #-}
-{-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE StaticPointers        #-}
 
@@ -20,15 +19,15 @@ import Data.Map.Strict                qualified as Map
 import Data.Set                       (Set)
 import Data.Set                       qualified as Set
 import GHC.Generics                   (Generic)
-import Hyperion                       (Job, Static, cAp, cPure, setTaskCpus)
-import Hyperion                       qualified as Hyp
+import Hyperion                       (Dict (..), Job, Static (..), cAp, cPure,
+                                       setTaskCpus)
 import Hyperion.Log                   qualified as Log
 import Hyperion.Scheduler.FilePath    (VirtualFilePath (VirtualFilePath))
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), taskOutputPaths)
 import Hyperion.Scheduler.Types       (FileSize (..), MemorySize (..), NumCPUs)
 import Hyperion.Scheduler.WorkerPool  (TWorker, remoteRunOnNewWorker)
+import Hyperion.Util                  (peakResidentSetSizeSelfOrChildren)
 import System.Directory.OsPath        (getFileSize)
-import System.RUsage                  qualified as RUsage
 
 data RemoteRunTaskResult = MkRemoteRunTaskResult
   { remoteTaskMemory    :: Maybe MemorySize
@@ -37,18 +36,17 @@ data RemoteRunTaskResult = MkRemoteRunTaskResult
   deriving (Generic, Binary, Show)
 
 instance Static (Binary Hyperion.Scheduler.RunTasks.RemoteRunTask.RemoteRunTaskResult) where
-  closureDict = static Hyp.Dict
+  closureDict = static Dict
 
 emptyRemoteRunTaskResult :: RemoteRunTaskResult
 emptyRemoteRunTaskResult = MkRemoteRunTaskResult { remoteTaskMemory = Nothing, remoteTaskFileSizes = Map.empty }
 
-afterReturnMemoryM :: MonadIO m => m () -> m (Maybe MemorySize)
+afterReturnMemoryM :: MonadIO m => m () -> m MemorySize
 afterReturnMemoryM go = do
   go
-  let kilobytesToBytes k = 1024 * fromIntegral k
-  rSelf     <- liftIO $ RUsage.get RUsage.Self
-  rChildren <- liftIO $ RUsage.get RUsage.Children
-  pure $ Just $ MemorySize $ kilobytesToBytes $ max rSelf.maxResidentSetSize rChildren.maxResidentSetSize
+  fromKilobytes <$> liftIO peakResidentSetSizeSelfOrChildren
+  where
+    fromKilobytes k = MemorySize $ 1024 * fromIntegral k
 
 afterReturnRemoteRunTaskResultM
   :: MonadIO m
@@ -62,8 +60,8 @@ afterReturnRemoteRunTaskResultM files go = do
     pathAndSize p = do
       size <- getFileSize' p
       return (p, fromIntegral size)
-  fileSizes <- Map.fromList <$> (mapM pathAndSize $ Set.toList files)
-  return $ MkRemoteRunTaskResult { remoteTaskMemory = mem, remoteTaskFileSizes = fileSizes }
+  fileSizes <- Map.fromList <$> mapM pathAndSize (Set.toList files)
+  return $ MkRemoteRunTaskResult { remoteTaskMemory = Just mem, remoteTaskFileSizes = fileSizes }
 
 remoteRunTask :: IsTask a => Maybe TWorker -> NumCPUs -> a -> Job RemoteRunTaskResult
 remoteRunTask mWorker numCpus task = case taskClosure numCpus task of
@@ -72,7 +70,7 @@ remoteRunTask mWorker numCpus task = case taskClosure numCpus task of
     Nothing -> Log.throwError "remoteRunTask expected (Just TWorker), but got Nothing"
     Just w -> do
       -- TODO: is setTaskCpus really needed?
-      local (setTaskCpus (Hyp.NumCPUs numCpus)) $
+      local (setTaskCpus numCpus) $
         remoteRunOnNewWorker w $
         static afterReturnRemoteRunTaskResultM
         -- TODO: measure input file sizes too?
