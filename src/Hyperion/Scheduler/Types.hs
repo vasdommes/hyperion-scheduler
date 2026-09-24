@@ -15,6 +15,7 @@ import Control.DeepSeq    (NFData)
 import Data.Aeson         (FromJSON, ToJSON)
 import Data.Binary        (Binary)
 import Data.List.NonEmpty qualified as NonEmpty
+import Data.Time.Clock    (NominalDiffTime)
 import GHC.Generics       (Generic)
 import Hyperion           (WorkerAddr (..))
 import Hyperion           qualified as Hyp
@@ -62,6 +63,25 @@ instance Show MemorySize where
   show (MemorySize bytes) = prettyShowBytes KilobyteBinary bytes
 
 data KilobyteSize = KilobyteDecimal | KilobyteBinary
+
+-- Estimating runtime from memory.
+--
+-- These live here rather than in 'Hyperion.Scheduler.Task.IsTask' because
+-- 'Hyperion.Scheduler.StatKey' needs them for the default 'runtimeEstimate'
+-- and cannot import IsTask (which imports StatKey).
+
+-- If you don't have a better way to estimate runtime of your task, try this one.
+-- It produces reasonably-looking times.
+-- The constant 1.7e-6 originally came from our blocks_3d tests on Expanse.
+memoryToCpuTimeApprox :: MemorySize -> NominalDiffTime
+memoryToCpuTimeApprox mem = 1.7e-6 * fromIntegral mem
+
+-- | Estimate runtime from memory when no task-specific estimate is available.
+-- Zero CPUs is valid for scheduler-only tasks which do not perform computation.
+defaultRuntimeEstimate :: MemorySize -> NumCPUs -> NominalDiffTime
+defaultRuntimeEstimate _   0       = 0
+defaultRuntimeEstimate _   numCpus | numCpus < 0 = error "defaultRuntimeEstimate: negative CPU count"
+defaultRuntimeEstimate mem numCpus = memoryToCpuTimeApprox mem / fromIntegral numCpus
 
 -- Helper function for FileSize and MemorySize
 prettyShowBytes :: KilobyteSize -> Bytes -> String

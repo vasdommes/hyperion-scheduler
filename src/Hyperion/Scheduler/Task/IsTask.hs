@@ -16,8 +16,8 @@ import Data.Typeable               (Typeable, typeOf)
 import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
-import Hyperion.Scheduler.StatKey  (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Types    (MemorySize, NumCPUs)
+import Hyperion.Scheduler.StatKey  (StatKey, TaskKeyFileInfo (..))
+import Hyperion.Scheduler.Types    (MemorySize, NumCPUs, defaultRuntimeEstimate)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
 -- computation (and, at the 'Hyperion.Scheduler.Task.Task.TaskKey' level, on
@@ -28,7 +28,7 @@ data RunStage = InitialRun | InProgressRun
 type Tag = Text
 
 -- Everything Scheduler needs
--- HasTaskHash + IsTask + CanRemoteRunTask + ToStatKey
+-- HasTaskHash + IsTask + CanRemoteRunTask + 'taskStatKey'
 class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 --  taskHash :: a -> ByteString
 --  default taskHash :: Binary a => a -> ByteString
@@ -75,24 +75,29 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskPlaceholderKey :: Typeable k => a -> Maybe k
   taskPlaceholderKey _ = Nothing
 
--- TODO: remove (Stats.ToStatKey a) and use (IsTask a) everywhere in Stats instead?
---  taskStatKey :: a -> StatKey
---  -- | A default implementation for the case where we wish to retain
---  -- all the information about a task in the StatKey.
---  taskStatKey = mkStatKeyViaJSON
+  -- | The serialized stat key under which this task's resource usage is
+  -- recorded and looked up. For a 'Hyperion.Scheduler.Task.Task.Task' this is
+  -- built from the task's own stat key, which is also what
+  -- 'taskMemoryEstimate' and 'taskRuntimeEstimate' are computed from.
+  --
+  -- 'Nothing' means the task has no identity in statistics: it is neither
+  -- recorded nor looked up, and its estimates are zero. That is the right
+  -- answer for tasks performing no computation (no-ops, placeholders), whose
+  -- only measurable quantity would be scheduler bookkeeping latency.
+  --
+  -- Defaults to 'Nothing', matching the default 'StatKeyOf' of 'Void' at the
+  -- 'Hyperion.Scheduler.Task.Task.TaskKey' level: no statistics unless a task
+  -- says otherwise. Defaulting instead to the whole task encoded as its own
+  -- stat key would put every task in a group of one, which no curve can be
+  -- fitted to. 'Hyperion.Scheduler.Task.TaskMap.uninstrumentedTaskTags'
+  -- reports tasks that compute but leave this at 'Nothing'.
+  taskStatKey :: a -> Maybe StatKey
+  taskStatKey _ = Nothing
 
--- If you don't have a better way to estimate runtime of your task, try this one.
--- It produces reasonably-looking times.
--- The constant 1.7e-6 originally came from our blocks_3d tests on Expanse.
-memoryToCpuTimeApprox :: MemorySize -> NominalDiffTime
-memoryToCpuTimeApprox mem = 1.7e-6 * fromIntegral mem
-
--- | Estimate runtime from memory when no task-specific estimate is available.
--- Zero CPUs is valid for scheduler-only tasks which do not perform computation.
-defaultRuntimeEstimate :: MemorySize -> NumCPUs -> NominalDiffTime
-defaultRuntimeEstimate _   0       = 0
-defaultRuntimeEstimate _   numCpus | numCpus < 0 = error "defaultRuntimeEstimate: negative CPU count"
-defaultRuntimeEstimate mem numCpus = memoryToCpuTimeApprox mem / fromIntegral numCpus
+-- NB: 'memoryToCpuTimeApprox' and 'defaultRuntimeEstimate' now live in
+-- 'Hyperion.Scheduler.Types', so that 'Hyperion.Scheduler.StatKey' can use
+-- them for the default 'Hyperion.Scheduler.StatKey.runtimeEstimate' without
+-- importing this module.
 
 -- Returns min(maxMemory, taskMemory t)
 taskMemoryCapped :: IsTask a => MemorySize -> a -> MemorySize

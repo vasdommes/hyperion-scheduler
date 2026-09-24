@@ -38,7 +38,6 @@ import Data.Kind                           (Constraint, Type)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           qualified as Text
-import Data.Time                           (NominalDiffTime)
 import Data.Typeable                       (cast, typeOf)
 import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
@@ -47,17 +46,16 @@ import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
 import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
-import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
-                                            ToTaskKeyFileInfo, mkStatKeyViaJSON,
+import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
+                                            ToTaskKeyFileInfo, encodeStatKey,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
-                                            defaultRuntimeEstimate)
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
-import Hyperion.Scheduler.Types            (MemorySize, NumCPUs)
+import Hyperion.Scheduler.Types            (NumCPUs)
 import Hyperion.Util.MonadPathExists       (MonadPathExists (..))
 import Type.Reflection                     (Typeable)
 
@@ -195,6 +193,7 @@ class ( All Eq (DepKeys k)
       , Typeable k
       , Binary (TaskConfig k)
       , ToJSON (TaskConfig k)
+      , IsStatKey (StatKeyOf k)
       ) => TaskKey k where
 
   type OutKey k :: Type
@@ -214,12 +213,34 @@ class ( All Eq (DepKeys k)
   default taskKind :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k) => TaskKind k
   taskKind = ComputeValueTask
 
-  -- | Estimated memory in bytes.
-  memoryEstimate     :: TaskConfig k -> k -> MemorySize
-  memoryEstimate _ _ = 0
-  -- | Estimated runtime in seconds, as a function of NumCPUs
-  runtimeEstimate    :: TaskConfig k -> k -> NumCPUs -> NominalDiffTime
-  runtimeEstimate cfg t = defaultRuntimeEstimate (memoryEstimate cfg t)
+  -- | The identity under which this task's resource usage is recorded, and the
+  -- only input to its estimates. See 'IsStatKey'.
+  --
+  -- Defaults to 'Void', i.e. no statistics: the task is neither recorded nor
+  -- looked up, and both its estimates are zero. That is correct for tasks that
+  -- compute nothing, and tolerable for small ones -- a zero runtime estimate
+  -- sorts as "fastest" in the CPU-refinement loop, so such tasks are given
+  -- 'minThreads' and CPUs go to tasks believed to be slow. It is wrong for a
+  -- large task, which would then be under-allocated and reserve no memory;
+  -- 'Hyperion.Scheduler.Task.TaskMap.uninstrumentedTaskTags' reports tasks
+  -- that compute but declare no stat key, so this does not pass unnoticed.
+  --
+  -- Prefer a /reduced/ projection of the key over the key itself: statistics
+  -- are grouped by this type, so fields that do not affect resource usage
+  -- should be dropped or coarsened, or every task ends up in a group of one
+  -- and no curve can be fitted to it.
+  type StatKeyOf k :: Type
+  type StatKeyOf k = Void
+
+  -- | Project this key (and the estimate-relevant part of its config) onto its
+  -- stat key.
+  --
+  -- The config is available here so that parts of it which genuinely change
+  -- resource usage (a version or variant tag) can be projected into the key;
+  -- see 'IsStatKey' for why a filesystem path must not be.
+  toStatKey :: TaskConfig k -> k -> Maybe (StatKeyOf k)
+  toStatKey _ _ = Nothing
+
   -- | Maximum possible threads for the task.
   -- TODO: get rid of RunStage?
   maxThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
@@ -391,8 +412,12 @@ instance
   , Typeable (TaskConfig k)
   , Typeable (PathResolverForAll r (DepKeys k))
   ) => IsTask (Task r k) where
-  taskMemoryEstimate t   = memoryEstimate t.config t.key
-  taskRuntimeEstimate t  = runtimeEstimate t.config t.key
+  -- Estimates always come from the stat key, so that the value used for
+  -- scheduling is the same function that is validated against recorded
+  -- statistics for that key.
+  taskMemoryEstimate t   = maybe 0         memoryEstimate  (toStatKey t.config t.key)
+  taskRuntimeEstimate t  = maybe (const 0) runtimeEstimate (toStatKey t.config t.key)
+  taskStatKey t          = encodeStatKey <$> toStatKey t.config t.key
   -- TODO reorder arguments?
   -- NoOpTask's perform no computation, so they occupy no worker threads
   -- (cf. TaskLink.ListTask).
@@ -422,12 +447,6 @@ instance
   taskPlaceholderKey t = case taskKind @k of
     PlaceholderTask -> cast t.key
     _               -> Nothing
-
-instance {-# OVERLAPPABLE #-} TaskKey k => ToStatKey k where
-  toStatKey = mkStatKeyViaJSON
-
-instance {-# OVERLAPPABLE #-} ToStatKey k => ToStatKey (Task r k) where
-  toStatKey t = toStatKey t.key
 
 taskLink
   :: forall r c k m. (MonadPathExists m, HasConfig c (TaskConfig k), TaskKey k, PathResolver r (OutKey k))
@@ -465,6 +484,9 @@ type instance DepKeys (ListTaskKey k) = '[k]
 instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
   type OutKey (ListTaskKey k) = Void
 
+  -- A pure grouping node: it performs no computation, so it is never scheduled
+  -- by estimate and has nothing to record. That is the default 'StatKeyOf'
+  -- ('Void') and the default 'toStatKey' ('Nothing'), so neither is declared.
   taskKind = NoOpTask $ \(MkListTaskKey keys) -> traverse_ getPath keys
 
 instance (Typeable k , Static(Binary k)) => Static (Binary (ListTaskKey k)) where

@@ -15,7 +15,6 @@ module Hyperion.Scheduler.Stats
   , TaskRecord (..)
   , TaskStats (..)
   , FileStats (..)
-  , ToStatKey (..)
   , Trials (..)
   , recordToTaskStats
   , approxRuntime
@@ -27,33 +26,34 @@ module Hyperion.Scheduler.Stats
   , encodeJsonFileAtomic
   ) where
 
-import Control.DeepSeq            (NFData, deepseq)
-import Control.Monad.Catch        (Handler (..), catches)
-import Control.Monad.IO.Class     (MonadIO, liftIO)
-import Data.Aeson                 (AesonException, FromJSON, ToJSON)
-import Data.Aeson                 qualified as Aeson
-import Data.ByteString            qualified as B
-import Data.List.Extra            (maximumOn, minimumOn)
-import Data.List.NonEmpty         (NonEmpty (..), nonEmpty)
-import Data.List.NonEmpty         qualified as NonEmpty
-import Data.Map.Monoidal          (MonoidalMap (..))
-import Data.Map.Strict            (Map)
-import Data.Map.Strict            qualified as Map
-import Data.Maybe                 (mapMaybe)
-import Data.Time                  (UTCTime)
-import Data.Time.Clock            (NominalDiffTime)
-import GHC.Generics               (Generic, Generically (..))
-import Hyperion.Log               qualified as Log
-import Hyperion.OsPath            (OsPath, takeDirectory)
-import Hyperion.OsString          (fromString, toString)
-import Hyperion.Scheduler.StatKey (FileStatKey, StatKey, ToStatKey (..))
-import Hyperion.Scheduler.Types   (FileSize (..), MemorySize (..), Node,
-                                   NumCPUs)
-import Hyperion.Util              (randomString)
-import Prelude                    hiding (readFile, (^))
+import Control.DeepSeq                (NFData, deepseq)
+import Control.Monad.Catch            (Handler (..), catches)
+import Control.Monad.IO.Class         (MonadIO, liftIO)
+import Data.Aeson                     (AesonException, FromJSON, ToJSON)
+import Data.Aeson                     qualified as Aeson
+import Data.ByteString                qualified as B
+import Data.List.Extra                (maximumOn, minimumOn)
+import Data.List.NonEmpty             (NonEmpty (..), nonEmpty)
+import Data.List.NonEmpty             qualified as NonEmpty
+import Data.Map.Monoidal              (MonoidalMap (..))
+import Data.Map.Strict                (Map)
+import Data.Map.Strict                qualified as Map
+import Data.Maybe                     (mapMaybe)
+import Data.Time                      (UTCTime)
+import Data.Time.Clock                (NominalDiffTime)
+import GHC.Generics                   (Generic, Generically (..))
+import Hyperion.Log                   qualified as Log
+import Hyperion.OsPath                (OsPath, takeDirectory)
+import Hyperion.OsString              (fromString, toString)
+import Hyperion.Scheduler.StatKey     (FileStatKey, StatKey)
+import Hyperion.Scheduler.Task.IsTask (IsTask (..))
+import Hyperion.Scheduler.Types       (FileSize (..), MemorySize (..), Node,
+                                       NumCPUs)
+import Hyperion.Util                  (randomString)
+import Prelude                        hiding (readFile, (^))
 import Prelude qualified
-import System.Directory.OsPath    (createDirectoryIfMissing, renameFile)
-import System.File.OsPath         (readFile)
+import System.Directory.OsPath        (createDirectoryIfMissing, renameFile)
+import System.File.OsPath             (readFile)
 
 (^) :: Num a => a -> Int -> a
 (^) = (Prelude.^)
@@ -209,11 +209,14 @@ newtype TaskStats = MkTaskStats (Map StatKey TaskResourceMap)
 
 
 -- TODO rename to recordToTaskAndFileStats
-recordToTaskStats :: ToStatKey a => TaskRecord a -> TaskAndFileStats
+recordToTaskStats :: IsTask a => TaskRecord a -> TaskAndFileStats
 recordToTaskStats record = MkTaskAndFileStats taskStats fileStats where
-  taskStats = MkTaskStats $
-    Map.singleton (toStatKey record.task)
-    (taskResourceMapSingleton record)
+  -- A task with no stat key contributes no resource statistics: it performed
+  -- no computation, so the only thing its runtime would measure is scheduler
+  -- bookkeeping. Its file sizes (if any) are still recorded below.
+  taskStats = MkTaskStats $ case taskStatKey record.task of
+    Nothing      -> Map.empty
+    Just statKey -> Map.singleton statKey (taskResourceMapSingleton record)
   fileStats = MkFileStats $ Map.map toTrials' $ record.taskFileSizes
   fromIntegral' = NonEmpty.map fromIntegral
   toTrials' = toTrials . fromIntegral'
@@ -233,9 +236,12 @@ lookupMaxFileSize :: FileStatKey -> TaskAndFileStats -> Maybe FileSize
 lookupMaxFileSize key (MkTaskAndFileStats _ (MkFileStats fileSizes)) =
   FileSize <$> ceiling <$> (.max) <$> Map.lookup key fileSizes
 
-lookupTaskStats :: ToStatKey a => a -> TaskAndFileStats -> Maybe TaskResourceMap
-lookupTaskStats task (MkTaskAndFileStats (MkTaskStats statsMap) _) =
-  Map.lookup (toStatKey task) statsMap
+-- | Statistics are grouped by stat key, so lookup is an exact match: a key
+-- that differs (for instance because an estimate-relevant config field
+-- changed) simply misses, and the caller falls back to the analytic estimate.
+lookupTaskStats :: StatKey -> TaskAndFileStats -> Maybe TaskResourceMap
+lookupTaskStats statKey (MkTaskAndFileStats (MkTaskStats statsMap) _) =
+  Map.lookup statKey statsMap
 
 -- TODO: rename to writeTaskAndFileStats?
 writeTaskStats :: MonadIO m => OsPath -> TaskAndFileStats -> m ()

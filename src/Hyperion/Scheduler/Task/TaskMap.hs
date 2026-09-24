@@ -16,12 +16,13 @@ import Data.Graph                          (SCC (..), stronglyConnComp)
 import Data.List.NonEmpty                  qualified as NonEmpty
 import Data.Map.Strict                     (Map)
 import Data.Map.Strict                     qualified as Map
+import Data.Maybe                          (isJust, isNothing)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), taskInputPaths,
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), Tag, taskInputPaths,
                                             taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
@@ -53,6 +54,23 @@ instance Exception InvalidTaskMap
 -- - Each input path produced by some task in the map can be found in output
 --   paths of dependencies (input paths produced by no task in the map are
 --   assumed to already exist on disk -- see 'assertCorrectDependencyPaths')
+-- | Tags of tasks that perform computation but declare no stat key, so their
+-- resource usage is neither estimated (both estimates are zero) nor recorded.
+-- Deduplicated, so there is one entry per task type rather than per task.
+--
+-- This is a diagnostic, not an error: it is reported by 'runTasks' rather than
+-- rejected by 'validateTaskMap', because a zero estimate is harmless for a
+-- small task and only costs an under-allocation for a large one. Tasks that
+-- compute nothing (no-ops, placeholders) are excluded -- for them, having no
+-- stat key is correct.
+uninstrumentedTaskTags :: IsTask a => TaskMap a -> Set (Maybe Tag)
+uninstrumentedTaskTags taskMap = Set.fromList
+  [ taskTag t
+  | t <- Map.keys taskMap
+  , isNothing (taskStatKey t)
+  , isJust (taskClosure 1 t)
+  ]
+
 validateTaskMap :: (IsTask a, MonadThrow m) => TaskMap a -> m ()
 validateTaskMap taskMap = do
   assertAllTasksAreInKeys

@@ -24,7 +24,7 @@ import Bootstrap.Build           (Fetches (..))
 import Control.Exception         (AssertionFailed (..))
 import Control.Monad             (unless)
 import Control.Monad.IO.Class    (liftIO)
-import Data.Aeson                (ToJSON)
+import Data.Aeson                (FromJSON, ToJSON)
 import Data.Binary               (Binary)
 import Data.Matrix               (Matrix)
 import Data.Matrix               qualified as Matrix
@@ -37,10 +37,9 @@ import Hyperion
 import Hyperion.Log              qualified as Log
 import Hyperion.OsPath           (OsPath, (<.>), (</>))
 import Hyperion.OsString         (showOs)
-import Hyperion.Scheduler        (PathResolver (..), ToFileStatKey (..),
-                                  ToStatKey (..), encodeJsonFileAtomic,
-                                  mkStatKeyViaJSON, recordToTaskStats,
-                                  writeTaskStats)
+import Hyperion.Scheduler        (IsStatKey (..), PathResolver (..),
+                                  ToFileStatKey (..), encodeJsonFileAtomic,
+                                  recordToTaskStats, writeTaskStats)
 import Hyperion.Scheduler        qualified as Scheduler
 import Hyperion.Scheduler.Config qualified as Scheduler
 import Hyperion.Scheduler.Task   (ComputeValue (..), DepKeys, FetchesKey,
@@ -85,6 +84,13 @@ type instance ValueType (MultiplyKey a) = Int
 
 type instance DepKeys (MultiplyKey a) = '[VectorKey a]
 
+-- | Every multiply is the same scalar product, so they all share one group.
+data MultiplyStatKey = MkMultiplyStatKey
+  deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
+
+instance IsStatKey MultiplyStatKey where
+  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+
 computeMultiplyM :: (Applicative f, FetchesKey (VectorKey a) f, LinearTransformContext a) => MultiplyKey a -> f (Process Int)
 computeMultiplyM key = do
   v <- fVector
@@ -111,7 +117,8 @@ instance
   , ToFileStatKey (MultiplyKey a)
   , ToFileStatKey (VectorKey a)
   ) => TaskKey (MultiplyKey a) where
-  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  type StatKeyOf (MultiplyKey a) = MultiplyStatKey
+  toStatKey _ _ = Just MkMultiplyStatKey
   tag _ = Just "Multiply"
 
 instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
@@ -132,6 +139,15 @@ instance (Typeable a, Static (Binary a)) => Static (Binary (VectorElementKey a))
 type instance ValueType (VectorElementKey a) = Int
 
 type instance DepKeys (VectorElementKey a) = '[MultiplyKey a]
+
+-- | An element is a sum over the layer's input vector, so elements of equal
+-- input length share statistics regardless of which layer or index they are.
+newtype VectorElementStatKey = MkVectorElementStatKey { inputLength :: Int }
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
+
+instance IsStatKey VectorElementStatKey where
+  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
 
 vectorElementInputKeys :: LinearTransformContext a => VectorElementKey a -> [MultiplyKey a]
 vectorElementInputKeys key = map mkKey ks where
@@ -158,7 +174,9 @@ instance
   , ToFileStatKey (MultiplyKey a)
   , ToFileStatKey (VectorElementKey a)
   ) => TaskKey (VectorElementKey a) where
-  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  type StatKeyOf (VectorElementKey a) = VectorElementStatKey
+  toStatKey _ key = Just MkVectorElementStatKey
+    { inputLength = layerInputVectorLength key.layerIndex key.ctx }
   tag _ = Just "VectorElement"
   taskKind = CustomTask $ \_numCpus _config key -> do
     let keys = vectorElementInputKeys key
@@ -206,17 +224,21 @@ instance
  , ToFileStatKey (VectorElementKey a)
  , ToFileStatKey (VectorKey a)
  ) => TaskKey (VectorKey a) where
-  memoryEstimate _ _ = 1024 * 1024
+  type StatKeyOf (VectorKey a) = VectorStatKey
+  toStatKey _ key = Just MkVectorStatKey
+    { size = layerInputVectorLength key.layerIndex key.ctx }
   tag _ = Just "Vector"
 
 instance LinearTransformContext a => ToFileStatKey (VectorKey a) where
   toFileSize key = fromIntegral key.length
 
+-- | Vectors of equal size share statistics, whichever layer they belong to.
 newtype VectorStatKey = MkVectorStatKey { size :: Int }
-  deriving newtype (ToJSON)
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
 
-instance LinearTransformContext a => ToStatKey (VectorKey a) where
-  toStatKey key = mkStatKeyViaJSON $ MkVectorStatKey { size = layerInputVectorLength key.layerIndex key.ctx }
+instance IsStatKey VectorStatKey where
+  memoryEstimate _ = 1024 * 1024
 
 -- * A concrete problem: cyclic shift
 

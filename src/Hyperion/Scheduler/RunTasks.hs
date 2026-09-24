@@ -84,6 +84,7 @@ import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
                                                      TaskMap, taskInputPaths,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
+                                                     uninstrumentedTaskTags,
                                                      validateTaskMap)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
@@ -539,6 +540,14 @@ runTasks config taskMap = do
   _ <- case validateTaskMap taskMap of
     Left err -> Log.throw err
     Right _  -> pure ()
+  -- Not fatal: a zero estimate is harmless for a small task, but a large one
+  -- would be under-allocated and reserve no memory. Reported once per task
+  -- type so that a forgotten 'toStatKey' is visible before the run, rather
+  -- than as missing statistics afterwards.
+  case Set.toList (uninstrumentedTaskTags taskMap) of
+    []   -> pure ()
+    tags -> Log.warn
+      "Tasks compute but declare no stat key: not estimated, not recorded" tags
   nodes <- getJobNodes config
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let

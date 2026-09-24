@@ -24,7 +24,6 @@ import Data.Tree                           (Tree)
 import Data.Tree                           qualified as Tree
 import Data.Typeable                       (Typeable)
 import Data.Void                           (Void)
-import Hyperion.Scheduler.StatKey          (ToStatKey (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..))
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, wrapTask)
 
@@ -68,9 +67,9 @@ instance (Eq k, Ord k, ToJSON k, Typeable k) => IsTask (ListTask k) where
   taskOutputs _      = Set.empty
   taskTag _          = Nothing
   taskClosure _ _    = Nothing
-
-instance ToStatKey (ListTask k) where
-  toStatKey _ = toStatKey ()
+  -- A pure grouping node: it performs no computation, so there is nothing to
+  -- record or estimate.
+  taskStatKey _      = Nothing
 
 listTaskLink :: (Ord k, Applicative m) => TaskLink m [k] k (ListTask k)
 listTaskLink = MkTaskLink

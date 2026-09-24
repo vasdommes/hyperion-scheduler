@@ -18,10 +18,10 @@ import Data.Maybe                     (fromMaybe)
 import Data.Set                       (Set)
 import Data.Set                       qualified as Set
 import Data.Time                      (NominalDiffTime)
-import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Stats       (TaskAndFileStats, ToStatKey (..),
-                                       approxRuntime, lookupMaxFileSize,
-                                       lookupTaskStats, maxMemory)
+import Hyperion.Scheduler.StatKey     (StatKey, TaskKeyFileInfo (..))
+import Hyperion.Scheduler.Stats       (TaskAndFileStats, approxRuntime,
+                                       lookupMaxFileSize, lookupTaskStats,
+                                       maxMemory)
 import Hyperion.Scheduler.Task.IsTask (IsTask (..))
 import Hyperion.Scheduler.Types       (MemorySize (..), NumCPUs)
 
@@ -32,12 +32,16 @@ import Hyperion.Scheduler.Types       (MemorySize (..), NumCPUs)
 --
 -- WARNING: If two different tasks ever have the same hash, this could
 -- lead to undefined behavior.
-data WrappedTask = forall a . (IsTask a, ToStatKey a) => MkWrappedTask
+data WrappedTask = forall a . IsTask a => MkWrappedTask
   { task            :: a
   -- Cache some values computed from task
   , hash            :: ByteString
   , inputs          :: Set TaskKeyFileInfo
   , outputs         :: Set TaskKeyFileInfo
+  -- Computed once here, where the task's config is still in hand, so that
+  -- nothing on the runtime path has to rebuild it. 'Nothing' for tasks with
+  -- no identity in statistics -- see 'taskStatKey'.
+  , statKey         :: Maybe StatKey
   -- Memory and runtime estimates can come from task or be overriden by stats
   , memoryEstimate  :: MemorySize
   , runtimeEstimate :: NumCPUs -> NominalDiffTime
@@ -78,23 +82,27 @@ instance IsTask WrappedTask where
   taskClosure numCpus (MkWrappedTask { task = t }) = taskClosure numCpus t
   taskIsPlaceholder (MkWrappedTask { task = t }) = taskIsPlaceholder t
   taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
-
-instance ToStatKey WrappedTask where
-  toStatKey (MkWrappedTask { task = t }) = toStatKey t
-
+  taskStatKey t = t.statKey
 
 -- | A smart constructor for a WrappedTask.
-wrapTask :: (IsTask a, ToStatKey a, Binary a) => a -> WrappedTask
+wrapTask :: (IsTask a, Binary a) => a -> WrappedTask
 wrapTask t = MkWrappedTask
   { task = t
   , hash = hashBase64SafeByteString t
   , inputs = taskInputs t
   , outputs = taskOutputs t
+  , statKey = taskStatKey t
   , memoryEstimate = taskMemoryEstimate t
   , runtimeEstimate = taskRuntimeEstimate t
   }
 
 -- | Update memory, runtime and file size estimates using statistics from TaskAndFileStats.
+--
+-- Lookup is an exact match on the stat key, so a task whose key has changed
+-- (a new estimate-relevant config value, say) misses and keeps its analytic
+-- estimate; a task with no stat key is never looked up at all.
+-- TODO: the miss is currently silent; surfacing it would need either a monadic
+-- context here or a 'Debug.trace' as in 'taskMemoryCapped'.
 decorateTaskWithStats :: TaskAndFileStats -> WrappedTask -> WrappedTask
 decorateTaskWithStats stats task = task
   { memoryEstimate = memory
@@ -103,7 +111,7 @@ decorateTaskWithStats stats task = task
   , outputs = outputs
   }
   where
-    maybeTaskResourceMap = lookupTaskStats task stats
+    maybeTaskResourceMap = flip lookupTaskStats stats =<< task.statKey
     runtime = fromMaybe (taskRuntimeEstimate task) (maybeTaskResourceMap >>= approxRuntime Nothing)
     memory  = fromMaybe (taskMemoryEstimate task)  (maybeTaskResourceMap >>= maxMemory)
 
@@ -116,7 +124,7 @@ decorateTaskWithStats stats task = task
 -- given 'TaskResourceMap's.
 -- TODO: if a ~ WrappedTask, should we wrap it again or do nothing?
 wrapTaskWithStats
-  :: (IsTask a, ToStatKey a, Binary a)
+  :: (IsTask a, Binary a)
   => TaskAndFileStats
   -> a
   -> WrappedTask
