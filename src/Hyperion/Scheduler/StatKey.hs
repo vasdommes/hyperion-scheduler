@@ -1,14 +1,16 @@
-{-# LANGUAGE AllowAmbiguousTypes   #-}
-{-# LANGUAGE DefaultSignatures     #-}
-{-# LANGUAGE DeriveAnyClass        #-}
-{-# LANGUAGE DerivingStrategies    #-}
-{-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE LambdaCase            #-}
-{-# LANGUAGE NoFieldSelectors      #-}
-{-# LANGUAGE OverloadedRecordDot   #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE ScopedTypeVariables   #-}
-{-# LANGUAGE TypeApplications      #-}
+{-# LANGUAGE AllowAmbiguousTypes     #-}
+{-# LANGUAGE DefaultSignatures       #-}
+{-# LANGUAGE DeriveAnyClass          #-}
+{-# LANGUAGE DerivingStrategies      #-}
+{-# LANGUAGE DuplicateRecordFields   #-}
+{-# LANGUAGE LambdaCase              #-}
+{-# LANGUAGE NoFieldSelectors        #-}
+{-# LANGUAGE OverloadedRecordDot     #-}
+{-# LANGUAGE OverloadedStrings       #-}
+{-# LANGUAGE ScopedTypeVariables     #-}
+{-# LANGUAGE TypeApplications        #-}
+{-# LANGUAGE TypeFamilies            #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
 
 module Hyperion.Scheduler.StatKey where
 
@@ -22,7 +24,7 @@ import Data.Proxy                      (Proxy (..))
 import Data.Text                       (Text)
 import Data.Text                       qualified as Text
 import Data.Time.Clock                 (NominalDiffTime)
-import Data.Typeable                   (Typeable, typeOf, typeRep)
+import Data.Typeable                   (Typeable, typeRep)
 import Data.Void                       (Void, absurd)
 import GHC.Generics                    (Generic)
 import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
@@ -73,14 +75,25 @@ class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
 --
 -- Unlike 'IsStatKey' this takes no config: a file's size is a property of the
 -- result (what was computed), and the config only describes how to compute it.
-class (Typeable a, ToJSON a, FromJSON a) => IsFileStatKey a where
+-- NB: 'FromJSON' is required by 'decodeFileStatKey' rather than by the class,
+-- unlike 'IsStatKey'. A stat key is always a purpose-built reduced record, so
+-- demanding round-trippability of it is cheap; a file stat key defaults to the
+-- output key itself, and those are not generally parseable.
+class (Typeable a, ToJSON a) => IsFileStatKey a where
   -- | Estimated size of the file, in bytes.
+  --
+  -- Defaults to zero, i.e. unknown. That only under-counts node-local storage
+  -- in 'canHandleTask' until a real size has been measured and recorded.
   fileSizeEstimate :: a -> FileSize
+  fileSizeEstimate _ = 0
 
   -- | See 'statKeyTypeName'.
   fileStatKeyTypeName :: Text
   default fileStatKeyTypeName :: Text
   fileStatKeyTypeName = Text.pack $ show $ typeRep (Proxy @a)
+
+instance IsFileStatKey Void where
+  fileSizeEstimate = absurd
 
 -- | Tasks that are never scheduled by estimate -- placeholders, which are
 -- replaced before the map is run, and no-ops, which perform no computation --
@@ -119,7 +132,7 @@ encodeFileStatKey key = MkFileStatKey $ Aeson.object
   ]
 
 -- | 'decodeStatKey' for file stat keys.
-decodeFileStatKey :: forall a . IsFileStatKey a => FileStatKey -> Maybe a
+decodeFileStatKey :: forall a . (IsFileStatKey a, FromJSON a) => FileStatKey -> Maybe a
 decodeFileStatKey (MkFileStatKey value) = Aeson.parseMaybe parse value
   where
     parse = Aeson.withObject "FileStatKey" $ \o -> do
@@ -127,42 +140,41 @@ decodeFileStatKey (MkFileStatKey value) = Aeson.parseMaybe parse value
       guard (tag == fileStatKeyTypeName @a)
       o .: "key"
 
--- | NB: tags by 'typeOf' rather than 'statKeyTypeName', so a key encoded this
--- way will not decode with 'decodeStatKey' if the type overrides its name.
-keyToJSONWithType :: (Typeable a, ToJSON a) => a -> Aeson.Value
-keyToJSONWithType key = Aeson.object ["type" .= show (typeOf key), "key" .= Aeson.toJSON key]
-
-
 -- | Container for a file stat key.
 newtype FileStatKey = MkFileStatKey Aeson.Value
   deriving newtype (Eq, Ord, Show, ToJSON, FromJSON, NFData)
   deriving anyclass (ToJSONKey, FromJSONKey)
 
--- | How an output key is identified in file statistics, and how big its file
--- is expected to be.
+-- | Projects an output key onto the key under which its file's size is
+-- recorded and estimated.
 --
--- Prefer deriving both from an 'IsFileStatKey' projection of the key:
+-- Both the recorded identity ('toFileStatKey') and the estimate
+-- ('toFileSize') are derived from this single projection, so they cannot
+-- drift apart -- the estimate can never read a field that the recorded
+-- identity dropped, which would make the two incomparable.
 --
--- > toFileStatKey = encodeFileStatKey . myFileStatKey
--- > toFileSize    = fileSizeEstimate . myFileStatKey
---
--- so that the recorded identity and the estimate cannot drift apart.
-class ToFileStatKey a where
-  toFileStatKey :: a -> FileStatKey
-  -- | A default implementation retaining the whole key.
-  default toFileStatKey :: (Typeable a, ToJSON a) => a -> FileStatKey
-  toFileStatKey = mkFileStatKeyViaJSON
+-- Defaults to the output key itself. Prefer a /reduced/ projection where the
+-- file size depends on only part of the key: file statistics are grouped by
+-- this type, so an unreduced key yields one observation per file, which can
+-- report the size of a file already produced but cannot predict a new one.
+class IsFileStatKey (FileStatKeyOf a) => ToFileStatKey a where
+  type FileStatKeyOf a
+  type FileStatKeyOf a = a
 
-  toFileSize    :: a -> FileSize
-  toFileSize _ = 0
+  fileStatKeyOf :: a -> FileStatKeyOf a
+  default fileStatKeyOf :: (FileStatKeyOf a ~ a) => a -> FileStatKeyOf a
+  fileStatKeyOf = id
 
+-- | How an output key is identified in file statistics.
+toFileStatKey :: ToFileStatKey a => a -> FileStatKey
+toFileStatKey = encodeFileStatKey . fileStatKeyOf
+
+-- | How big the output file is expected to be.
+toFileSize :: ToFileStatKey a => a -> FileSize
+toFileSize = fileSizeEstimate . fileStatKeyOf
 
 -- OutKey k = Void means no files.
-instance ToFileStatKey Void where
-  toFileStatKey = \case {}
-
-mkFileStatKeyViaJSON :: (ToJSON a, Typeable a) => a -> FileStatKey
-mkFileStatKeyViaJSON = MkFileStatKey . keyToJSONWithType
+instance ToFileStatKey Void
 
 data TaskKeyFileInfo = MkTaskKeyFileInfo
   { fileStatKey :: FileStatKey

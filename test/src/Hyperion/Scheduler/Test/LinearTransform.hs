@@ -37,9 +37,10 @@ import Hyperion
 import Hyperion.Log              qualified as Log
 import Hyperion.OsPath           (OsPath, (<.>), (</>))
 import Hyperion.OsString         (showOs)
-import Hyperion.Scheduler        (IsStatKey (..), PathResolver (..),
-                                  ToFileStatKey (..), encodeJsonFileAtomic,
-                                  recordToTaskStats, writeTaskStats)
+import Hyperion.Scheduler        (IsFileStatKey (..), IsStatKey (..),
+                                  PathResolver (..), ToFileStatKey (..),
+                                  encodeJsonFileAtomic, recordToTaskStats,
+                                  writeTaskStats)
 import Hyperion.Scheduler        qualified as Scheduler
 import Hyperion.Scheduler.Config qualified as Scheduler
 import Hyperion.Scheduler.Task   (ComputeValue (..), DepKeys, FetchesKey,
@@ -121,9 +122,11 @@ instance
   toStatKey _ _ = Just MkMultiplyStatKey
   tag _ = Just "Multiply"
 
-instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
-  toFileSize = const 1
-  -- TODO toFileStatKey
+instance LinearTransformContext a => ToFileStatKey (MultiplyKey a)
+
+-- | Every product is one Int, so all of them share a size.
+instance LinearTransformContext a => IsFileStatKey (MultiplyKey a) where
+  fileSizeEstimate = const 1
 
 -- | One element of an output vector, @sum_k A_ik x_k@.
 data VectorElementKey a = MkVectorElementKey
@@ -186,9 +189,11 @@ instance
       liftIO $ Log.info "Computing vector element" (key, inputs, outputPath)
       runVectorElementScript inputs (key, outputPath)
 
-instance LinearTransformContext a => ToFileStatKey (VectorElementKey a) where
-  toFileSize = const 1
-  -- TODO toFileStatKey
+instance LinearTransformContext a => ToFileStatKey (VectorElementKey a)
+
+-- | One Int per element, as for 'MultiplyKey'.
+instance LinearTransformContext a => IsFileStatKey (VectorElementKey a) where
+  fileSizeEstimate = const 1
 
 -- | The vector @x_i@ entering layer @i@.
 data VectorKey a = MkVectorKey
@@ -229,8 +234,11 @@ instance
     { size = layerInputVectorLength key.layerIndex key.ctx }
   tag _ = Just "Vector"
 
-instance LinearTransformContext a => ToFileStatKey (VectorKey a) where
-  toFileSize key = fromIntegral key.length
+instance LinearTransformContext a => ToFileStatKey (VectorKey a)
+
+-- | A vector's file scales with its length.
+instance LinearTransformContext a => IsFileStatKey (VectorKey a) where
+  fileSizeEstimate key = fromIntegral key.length
 
 -- | Vectors of equal size share statistics, whichever layer they belong to.
 newtype VectorStatKey = MkVectorStatKey { size :: Int }
