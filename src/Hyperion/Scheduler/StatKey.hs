@@ -153,31 +153,38 @@ newtype FileStatKey = MkFileStatKey Aeson.Value
 -- drift apart -- the estimate can never read a field that the recorded
 -- identity dropped, which would make the two incomparable.
 --
--- Defaults to the output key itself. Prefer a /reduced/ projection where the
--- file size depends on only part of the key: file statistics are grouped by
--- this type, so an unreduced key yields one observation per file, which can
--- report the size of a file already produced but cannot predict a new one.
+-- Defaults to 'Void', i.e. no file statistics: the file's size is neither
+-- recorded nor looked up, and is estimated as zero. This mirrors the default
+-- 'Hyperion.Scheduler.Task.Task.StatKeyOf' on the task side -- nothing is
+-- collected until a task asks for it. A zero size only under-counts
+-- node-local storage in @canHandleTask@, which matters when that storage is
+-- the binding constraint.
+--
+-- When declaring one, prefer a /reduced/ projection where the file size
+-- depends on only part of the key: file statistics are grouped by this type,
+-- so an unreduced key yields one observation per file, which can report the
+-- size of a file already produced but cannot predict a new one.
 class IsFileStatKey (FileStatKeyOf a) => ToFileStatKey a where
   type FileStatKeyOf a
-  type FileStatKeyOf a = a
+  type FileStatKeyOf a = Void
 
-  fileStatKeyOf :: a -> FileStatKeyOf a
-  default fileStatKeyOf :: (FileStatKeyOf a ~ a) => a -> FileStatKeyOf a
-  fileStatKeyOf = id
+  fileStatKeyOf :: a -> Maybe (FileStatKeyOf a)
+  fileStatKeyOf _ = Nothing
 
--- | How an output key is identified in file statistics.
-toFileStatKey :: ToFileStatKey a => a -> FileStatKey
-toFileStatKey = encodeFileStatKey . fileStatKeyOf
+-- | How an output key is identified in file statistics, if at all.
+toFileStatKey :: ToFileStatKey a => a -> Maybe FileStatKey
+toFileStatKey = fmap encodeFileStatKey . fileStatKeyOf
 
--- | How big the output file is expected to be.
+-- | How big the output file is expected to be. Zero when the key declares no
+-- file stat key, i.e. when the size is simply unknown.
 toFileSize :: ToFileStatKey a => a -> FileSize
-toFileSize = fileSizeEstimate . fileStatKeyOf
+toFileSize = maybe 0 fileSizeEstimate . fileStatKeyOf
 
 -- OutKey k = Void means no files.
 instance ToFileStatKey Void
 
 data TaskKeyFileInfo = MkTaskKeyFileInfo
-  { fileStatKey :: FileStatKey
+  { fileStatKey :: Maybe FileStatKey
   , path        :: VirtualFilePath
   , fileSize    :: FileSize
   }

@@ -50,7 +50,7 @@ instance IsFileStatKey PathFileStatKey
 
 mkFileInfo :: OsPath -> TaskKeyFileInfo
 mkFileInfo path = MkTaskKeyFileInfo
-  { fileStatKey = encodeFileStatKey (MkPathFileStatKey (show path))
+  { fileStatKey = Just $ encodeFileStatKey (MkPathFileStatKey (show path))
   , path        = VirtualFilePath path
   , fileSize    = 0
   }
@@ -77,9 +77,8 @@ newtype PKey = MkPKey String
 
 type instance DepKeys PKey = '[]
 
+-- A placeholder has no outputs, so it declares no file stat key.
 instance ToFileStatKey PKey
-
-instance IsFileStatKey PKey
 
 instance TaskKey PKey where
   taskKind = PlaceholderTask

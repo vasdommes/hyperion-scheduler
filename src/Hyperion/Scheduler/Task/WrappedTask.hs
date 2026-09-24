@@ -115,8 +115,10 @@ decorateTaskWithStats stats task = task
     runtime = fromMaybe (taskRuntimeEstimate task) (maybeTaskResourceMap >>= approxRuntime Nothing)
     memory  = fromMaybe (taskMemoryEstimate task)  (maybeTaskResourceMap >>= maxMemory)
 
+    -- A file with no stat key is never looked up and keeps its estimate.
     updateFileSize fileInfo = fileInfo { fileSize = fileSize} where
-      fileSize = fromMaybe fileInfo.fileSize $ lookupMaxFileSize (fileInfo.fileStatKey) stats
+      fileSize = fromMaybe fileInfo.fileSize $
+        flip lookupMaxFileSize stats =<< fileInfo.fileStatKey
     inputs = Set.map updateFileSize $ taskInputs task
     outputs = Set.map updateFileSize $ taskOutputs task
 

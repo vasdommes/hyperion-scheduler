@@ -29,7 +29,8 @@ import Data.List.NonEmpty                           qualified as NonEmpty
 import Data.Map.Strict                              (Map, (!?))
 import Data.Map.Strict                              qualified as Map
 import Data.Maybe                                   (catMaybes, fromMaybe,
-                                                     isNothing, listToMaybe)
+                                                     isNothing, listToMaybe,
+                                                     mapMaybe)
 import Data.Set                                     (Set)
 import Data.Set                                     qualified as Set
 import Data.Time.Clock                              (addUTCTime, diffUTCTime,
@@ -369,10 +370,17 @@ runNodeLoop
       end <- liftIO getCurrentTime
       let
         -- TODO: currently afterReturnRemoteRunTaskResult measures file sizes only for taskOutputs
-        pathToFileStatKey = Map.fromList $ map (\info -> (info.path, info.fileStatKey)) $ Set.toList $
-          Set.union (taskInputs task) (taskOutputs task)
-        -- (VirtualFilePath, FileSize) -> (FileStatKeyHash, NonEmpty FileSize)
-        toTaskFileSizeItem (path, size) = (pathToFileStatKey Map.! path, NonEmpty.singleton size)
+        -- Files whose key declares no file stat key are absent here, and so
+        -- are dropped by toTaskFileSizeItem: nothing is recorded for them.
+        pathToFileStatKey = Map.fromList
+          [ (info.path, statKey)
+          | info <- Set.toList $ Set.union (taskInputs task) (taskOutputs task)
+          , Just statKey <- [info.fileStatKey]
+          ]
+        -- (VirtualFilePath, FileSize) -> Maybe (FileStatKey, NonEmpty FileSize)
+        toTaskFileSizeItem (path, size) = do
+          statKey <- Map.lookup path pathToFileStatKey
+          pure (statKey, NonEmpty.singleton size)
 
         outputPathsMap = Map.fromSet (toClusterFilePath config node.address) $ taskOutputPaths task
         onDuplicate key _ _ = error $ "Output file path is used by more than one task: " ++ show key
@@ -399,7 +407,7 @@ runNodeLoop
         , taskMemory  = res.remoteTaskMemory
         , taskNode    = node
         , taskNumCPUs = numCpus
-        , taskFileSizes = Map.fromListWith (<>) $ map toTaskFileSizeItem $ Map.toList res.remoteTaskFileSizes
+        , taskFileSizes = Map.fromListWith (<>) $ mapMaybe toTaskFileSizeItem $ Map.toList res.remoteTaskFileSizes
         }
       -- NB: this should be the last operation, since the nodeLoop process is killed
       -- after monitorProgressAndDeps reads the last task from finishedTaskQueue!

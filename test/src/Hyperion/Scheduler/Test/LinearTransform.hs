@@ -122,7 +122,9 @@ instance
   toStatKey _ _ = Just MkMultiplyStatKey
   tag _ = Just "Multiply"
 
-instance LinearTransformContext a => ToFileStatKey (MultiplyKey a)
+instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
+  type FileStatKeyOf (MultiplyKey a) = MultiplyKey a
+  fileStatKeyOf = Just
 
 -- | Every product is one Int, so all of them share a size.
 instance LinearTransformContext a => IsFileStatKey (MultiplyKey a) where
@@ -189,7 +191,9 @@ instance
       liftIO $ Log.info "Computing vector element" (key, inputs, outputPath)
       runVectorElementScript inputs (key, outputPath)
 
-instance LinearTransformContext a => ToFileStatKey (VectorElementKey a)
+instance LinearTransformContext a => ToFileStatKey (VectorElementKey a) where
+  type FileStatKeyOf (VectorElementKey a) = VectorElementKey a
+  fileStatKeyOf = Just
 
 -- | One Int per element, as for 'MultiplyKey'.
 instance LinearTransformContext a => IsFileStatKey (VectorElementKey a) where
@@ -234,7 +238,9 @@ instance
     { size = layerInputVectorLength key.layerIndex key.ctx }
   tag _ = Just "Vector"
 
-instance LinearTransformContext a => ToFileStatKey (VectorKey a)
+instance LinearTransformContext a => ToFileStatKey (VectorKey a) where
+  type FileStatKeyOf (VectorKey a) = VectorKey a
+  fileStatKeyOf = Just
 
 -- | A vector's file scales with its length.
 instance LinearTransformContext a => IsFileStatKey (VectorKey a) where
