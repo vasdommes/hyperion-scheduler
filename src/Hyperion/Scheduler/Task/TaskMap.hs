@@ -2,7 +2,9 @@
 {-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GADTs                 #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE StaticPointers        #-}
 {-# LANGUAGE UndecidableInstances  #-}
@@ -19,8 +21,10 @@ import Data.Map.Strict                     qualified as Map
 import Data.Maybe                          (isJust, isNothing)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
+import Data.Text                           (Text)
 import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
+import Hyperion.Scheduler.StatKey          (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), Tag, taskInputPaths,
                                             taskOutputPaths)
@@ -54,23 +58,6 @@ instance Exception InvalidTaskMap
 -- - Each input path produced by some task in the map can be found in output
 --   paths of dependencies (input paths produced by no task in the map are
 --   assumed to already exist on disk -- see 'assertCorrectDependencyPaths')
--- | Tags of tasks that perform computation but declare no stat key, so their
--- resource usage is neither estimated (both estimates are zero) nor recorded.
--- Deduplicated, so there is one entry per task type rather than per task.
---
--- This is a diagnostic, not an error: it is reported by 'runTasks' rather than
--- rejected by 'validateTaskMap', because a zero estimate is harmless for a
--- small task and only costs an under-allocation for a large one. Tasks that
--- compute nothing (no-ops, placeholders) are excluded -- for them, having no
--- stat key is correct.
-uninstrumentedTaskTags :: IsTask a => TaskMap a -> Set (Maybe Tag)
-uninstrumentedTaskTags taskMap = Set.fromList
-  [ taskTag t
-  | t <- Map.keys taskMap
-  , isNothing (taskStatKey t)
-  , isJust (taskClosure 1 t)
-  ]
-
 validateTaskMap :: (IsTask a, MonadThrow m) => TaskMap a -> m ()
 validateTaskMap taskMap = do
   assertAllTasksAreInKeys
@@ -168,3 +155,62 @@ replaceTasks replacementMap = addNewKeys . replaceDeps . removeOldKeys where
 placeholdersOfType :: (IsTask a, Typeable k) => TaskMap a -> [(a, k)]
 placeholdersOfType taskMap =
   [ (t, k) | t <- Map.keys taskMap, Just k <- [taskPlaceholderKey t] ]
+
+-- | A way in which a task is not instrumented, i.e. will be scheduled on a
+-- guess rather than on a declared or measured figure.
+--
+-- There are two independent axes -- task statistics and file statistics -- and
+-- the two gaps on each axis are mutually exclusive. A task is therefore
+-- reported at most once per axis: one that declares no stat key at all is not
+-- also reported for estimating zero memory, since that follows from the first
+-- and has a different remedy.
+data InstrumentationGap
+  = NoStatKey
+  | ZeroMemoryEstimate
+  | NoFileStatKey
+  | ZeroFileSizeEstimate
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+describeInstrumentationGap :: InstrumentationGap -> Text
+describeInstrumentationGap = \case
+  NoStatKey ->
+    "declare no stat key: neither estimated nor recorded"
+  ZeroMemoryEstimate ->
+    "have a stat key, but its memoryEstimate is zero"
+  NoFileStatKey ->
+    "produce output files, but none of them declares a file stat key"
+  ZeroFileSizeEstimate ->
+    "have file stat keys, but every output file's size is zero"
+
+-- | Instrumentation gaps in a task map, with the tags of the tasks affected.
+-- Deduplicated, so there is one entry per task type rather than per task.
+--
+-- These are diagnostics, not errors: they are reported by 'runTasks' rather
+-- than rejected by 'validateTaskMap', because a zero estimate is harmless for
+-- a small task and only costs an under-allocation for a large one. Tasks that
+-- compute nothing (no-ops, placeholders) are excluded entirely -- for them,
+-- declaring nothing is correct.
+taskInstrumentationGaps :: IsTask a => TaskMap a -> Map InstrumentationGap (Set (Maybe Tag))
+taskInstrumentationGaps taskMap = Map.fromListWith Set.union
+  [ (gap, Set.singleton (taskTag t))
+  | t <- Map.keys taskMap
+  , isJust (taskClosure 1 t)
+  , gap <- statGaps t <> fileGaps t
+  ]
+  where
+    statGaps t
+      | isNothing (taskStatKey t) = [NoStatKey]
+      | taskMemoryEstimate t == 0 = [ZeroMemoryEstimate]
+      | otherwise                 = []
+
+    -- NB: by the time 'runTasks' sees the map these sizes may already have
+    -- been replaced by measurements, so zero here means neither estimated nor
+    -- ever recorded.
+    fileGaps t
+      | Set.null outputs                              = []
+      | all (isNothing . (.fileStatKey)) outputsList  = [NoFileStatKey]
+      | all ((== 0) . (.fileSize)) outputsList        = [ZeroFileSizeEstimate]
+      | otherwise                                     = []
+      where
+        outputs = taskOutputs t
+        outputsList = Set.toList outputs

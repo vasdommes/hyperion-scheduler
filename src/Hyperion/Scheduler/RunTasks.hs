@@ -82,10 +82,12 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
 import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats                     (TaskRecord (..))
 import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
-                                                     TaskMap, taskInputPaths,
+                                                     TaskMap,
+                                                     describeInstrumentationGap,
+                                                     taskInputPaths,
+                                                     taskInstrumentationGaps,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
-                                                     uninstrumentedTaskTags,
                                                      validateTaskMap)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
@@ -552,10 +554,8 @@ runTasks config taskMap = do
   -- would be under-allocated and reserve no memory. Reported once per task
   -- type so that a forgotten 'toStatKey' is visible before the run, rather
   -- than as missing statistics afterwards.
-  case Set.toList (uninstrumentedTaskTags taskMap) of
-    []   -> pure ()
-    tags -> Log.warn
-      "Tasks compute but declare no stat key: not estimated, not recorded" tags
+  forM_ (Map.toList (taskInstrumentationGaps taskMap)) $ \(gap, tags) ->
+    Log.warn ("Tasks " <> describeInstrumentationGap gap) (Set.toList tags)
   nodes <- getJobNodes config
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let
