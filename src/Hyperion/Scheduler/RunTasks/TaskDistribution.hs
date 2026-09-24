@@ -15,11 +15,12 @@ import Data.MinMaxQueue               qualified as MinMaxQueue
 import Data.Ord                       (Down (..))
 import Data.Set                       (Set)
 import Data.Set                       qualified as Set
+import Data.Text                      (Text)
 import Data.Time.Clock                (NominalDiffTime)
 import Hyperion.Scheduler.Config      (Config)
 import Hyperion.Scheduler.FilePath    (VirtualFilePath, isNodeLocal)
 import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..),
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..), Tag,
                                        taskMemoryCapped)
 import Hyperion.Scheduler.Types       (FileSize, Node (..), NumCPUs)
 
@@ -74,6 +75,56 @@ taskLocalFileSizeMap config t =
   Set.toList $
   Set.filter (isNodeLocal config . (.path)) $
   Set.union (taskInputs t) (taskOutputs t)
+
+-- | Why no node could run a task even when that node is otherwise empty.
+data Unschedulable
+  = ExceedsNodeMemory
+  | ExceedsNodeCpus
+  | ExceedsNodeLocalStorage
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+describeUnschedulable :: Unschedulable -> Text
+describeUnschedulable = \case
+  ExceedsNodeMemory ->
+    "estimate more memory than any node has. The estimate is capped at the \
+    \node's memory so the task still runs, but that cap is a guess and the \
+    \task may be killed for running out of memory"
+  ExceedsNodeCpus ->
+    "require a larger minThreads than any node has CPUs, so no node can ever \
+    \accept them and the run will stall"
+  ExceedsNodeLocalStorage ->
+    "need more node-local storage than any node has, so no node can ever \
+    \accept them and the run will stall"
+
+-- | Tasks that no node could run on its own, reported before the run starts so
+-- that the cause is named rather than inferred from a stall. Deduplicated, so
+-- there is one entry per task type rather than per task.
+--
+-- Only 'ExceedsNodeCpus' and 'ExceedsNodeLocalStorage' actually prevent
+-- allocation. 'canHandleTask' caps memory at the node's own, so an oversized
+-- memory estimate is scheduled regardless; it is reported because that cap is
+-- optimistic, not because it blocks.
+unschedulableTaskTags
+  :: IsTask a => Config -> [Node] -> [a] -> Map Unschedulable (Set (Maybe Tag))
+unschedulableTaskTags config nodes tasks = case nodes of
+  [] -> Map.empty
+  _  -> Map.fromListWith Set.union
+    [ (reason, Set.singleton (taskTag t))
+    | t <- tasks
+    , reason <- reasonsFor t
+    ]
+  where
+    largestMemory       = maximum $ map (.memory) nodes
+    largestCpus         = maximum $ map (.cpus) nodes
+    largestLocalStorage = maximum $ map (.localStorageSize) nodes
+
+    reasonsFor t = concat
+      [ [ ExceedsNodeMemory       | taskMemoryEstimate t        > largestMemory       ]
+      , [ ExceedsNodeCpus         | taskMinThreads InitialRun t > largestCpus         ]
+      , [ ExceedsNodeLocalStorage | localStorageNeededBy t      > largestLocalStorage ]
+      ]
+
+    localStorageNeededBy t = sum $ Map.elems $ taskLocalFileSizeMap config t
 
 canHandleTask :: IsTask a => Config -> a -> (Node, CPUAllocation a) -> Bool
 canHandleTask config task (node, nodeAlloc) =

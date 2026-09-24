@@ -71,7 +71,9 @@ import Hyperion.Scheduler.RunTasks.Shared           (Shared (..), newShared,
 import Hyperion.Scheduler.RunTasks.Shared           qualified as Shared
 import Hyperion.Scheduler.RunTasks.TaskDistribution (CPUAllocation,
                                                      allocateCpusToTasks,
-                                                     distributeTasksToNodesWithScores)
+                                                     describeUnschedulable,
+                                                     distributeTasksToNodesWithScores,
+                                                     unschedulableTaskTags)
 import Hyperion.Scheduler.RunTasks.TaskPriority     (TaskPriority,
                                                      mkTaskPriorityHelper,
                                                      taskPriority)
@@ -557,6 +559,8 @@ runTasks config taskMap = do
   forM_ (Map.toList (taskInstrumentationGaps taskMap)) $ \(gap, tags) ->
     Log.warn ("Tasks " <> describeInstrumentationGap gap) (Set.toList tags)
   nodes <- getJobNodes config
+  forM_ (Map.toList (unschedulableTaskTags config nodes (Map.keys taskMap))) $ \(reason, tags) ->
+    Log.warn ("Tasks " <> describeUnschedulable reason) (Set.toList tags)
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let
         getTaskPriority = taskPriority $ mkTaskPriorityHelper nodes taskGraph
