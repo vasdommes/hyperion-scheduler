@@ -267,7 +267,10 @@ eitherReadFileStrict file = do
 
 -- TODO: rename to readTaskAndFileStats?
 readTaskStats :: MonadIO m => [OsPath] -> m TaskAndFileStats
-readTaskStats statFiles = go statFiles mempty
+readTaskStats statFiles = do
+  stats <- go statFiles mempty
+  warnOnSingletonGroups stats
+  pure stats
   where
     go [] acc = pure acc
     go (file : files) acc = do
@@ -276,6 +279,25 @@ readTaskStats statFiles = go statFiles mempty
         Left e  -> Log.warn "Couldn't parse stats file" (file, e) >> pure mempty
         Right s -> pure s
       newStats `deepseq` go files (acc <> newStats)
+
+-- | A stat key exists to group comparable observations, so that a curve can be
+-- fitted to them. If almost every group holds a single observation, the key is
+-- probably carrying fields that do not affect resource usage, and should be
+-- reduced -- no amount of further running will make such statistics useful.
+warnOnSingletonGroups :: MonadIO m => TaskAndFileStats -> m ()
+warnOnSingletonGroups (MkTaskAndFileStats (MkTaskStats taskStats) _)
+  | total == 0            = pure ()
+  | singletons * 2 <= total = pure ()
+  | otherwise             = Log.warn
+      "Most stat groups hold a single observation, so no runtime curve can be \
+      \fitted to them. The stat keys are probably not reduced enough \
+      \(groups with one observation, of total)"
+      (singletons, total)
+  where
+    total = Map.size taskStats
+    singletons = length $ filter isSingleton $ Map.elems taskStats
+    isSingleton (MkTaskResourceMap m) = sum (map trialCount (Map.elems m)) <= (1 :: Int)
+    trialCount r = maybe 0 (.numTrials) r.runtime
 
 -- | Write a json representation of 'x' to a temporary file, and then
 -- move the temporary file into place.

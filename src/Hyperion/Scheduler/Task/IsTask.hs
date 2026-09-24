@@ -89,10 +89,28 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   -- 'Hyperion.Scheduler.Task.Task.TaskKey' level: no statistics unless a task
   -- says otherwise. Defaulting instead to the whole task encoded as its own
   -- stat key would put every task in a group of one, which no curve can be
-  -- fitted to. 'Hyperion.Scheduler.Task.TaskMap.uninstrumentedTaskTags'
+  -- fitted to. 'Hyperion.Scheduler.Task.TaskMap.taskInstrumentationGaps'
   -- reports tasks that compute but leave this at 'Nothing'.
   taskStatKey :: a -> Maybe StatKey
   taskStatKey _ = Nothing
+
+  -- | Whether 'taskMemoryEstimate' and 'taskRuntimeEstimate' are the task's
+  -- own predictions or figures recovered from recorded statistics. Only
+  -- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' ever reports
+  -- anything else, which is why the default is the task's own.
+  taskEstimateSource :: a -> EstimateSource
+  taskEstimateSource _ = EstimatedByTask
+
+-- | Where a wrapped task's estimates came from.
+data EstimateSource
+  = EstimatedByTask
+    -- ^ The task's own model: no statistics matched its stat key, so
+    -- 'memoryEstimate' is what the task itself predicted.
+  | MeasuredFromStats MemorySize
+    -- ^ Recorded statistics replaced the estimates. The payload is what the
+    -- task's own model predicted, kept for comparison against the measurement
+    -- now in 'memoryEstimate'.
+  deriving (Eq, Ord, Show)
 
 -- NB: 'memoryToCpuTimeApprox' and 'defaultRuntimeEstimate' now live in
 -- 'Hyperion.Scheduler.Types', so that 'Hyperion.Scheduler.StatKey' can use

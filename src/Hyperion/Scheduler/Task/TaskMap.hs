@@ -26,7 +26,8 @@ import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
 import Hyperion.Scheduler.StatKey          (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), Tag, taskInputPaths,
+import Hyperion.Scheduler.Task.IsTask      (EstimateSource (..), IsTask (..),
+                                            Tag, taskInputPaths,
                                             taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
@@ -214,3 +215,35 @@ taskInstrumentationGaps taskMap = Map.fromListWith Set.union
       where
         outputs = taskOutputs t
         outputsList = Set.toList outputs
+
+-- | How many tasks are running on recorded statistics rather than on their own
+-- models, out of those that could be: a task with no stat key can never match,
+-- so counting it would dilute the ratio and make coverage always look poor.
+--
+-- A ratio near zero after statistics were supplied usually means the keys did
+-- not match at all -- a renamed stat key type, or a key whose shape changed --
+-- rather than a genuine absence of history.
+statsCoverage :: IsTask a => TaskMap a -> (Int, Int)
+statsCoverage taskMap = (length measured, length couldMatch)
+  where
+    couldMatch = filter (isJust . taskStatKey) (Map.keys taskMap)
+    measured = filter isMeasured couldMatch
+    isMeasured t = case taskEstimateSource t of
+      MeasuredFromStats _ -> True
+      EstimatedByTask     -> False
+
+-- | Tags of tasks whose recorded memory exceeded their own estimate by more
+-- than the given factor, i.e. whose model is optimistic. These are the tasks
+-- most likely to be killed for running out of memory on a machine with no
+-- statistics to fall back on.
+--
+-- Only tasks whose estimates actually came from statistics can be compared, so
+-- a task that has never run is never reported.
+underestimatedMemoryTags :: IsTask a => Rational -> TaskMap a -> Set (Maybe Tag)
+underestimatedMemoryTags factor taskMap = Set.fromList
+  [ taskTag t
+  | t <- Map.keys taskMap
+  , MeasuredFromStats predicted <- [taskEstimateSource t]
+  , let measured = taskMemoryEstimate t
+  , toRational measured > factor * toRational predicted
+  ]

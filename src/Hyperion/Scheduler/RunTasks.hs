@@ -86,10 +86,12 @@ import Hyperion.Scheduler.Stats                     (TaskRecord (..))
 import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
                                                      TaskMap,
                                                      describeInstrumentationGap,
+                                                     statsCoverage,
                                                      taskInputPaths,
                                                      taskInstrumentationGaps,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
+                                                     underestimatedMemoryTags,
                                                      validateTaskMap)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
@@ -558,6 +560,26 @@ runTasks config taskMap = do
   -- than as missing statistics afterwards.
   forM_ (Map.toList (taskInstrumentationGaps taskMap)) $ \(gap, tags) ->
     Log.warn ("Tasks " <> describeInstrumentationGap gap) (Set.toList tags)
+  -- How much of the map is running on measurements rather than on the tasks'
+  -- own models. Zero coverage where statistics were supplied usually means the
+  -- keys did not match -- a renamed stat key type, or one whose shape changed
+  -- -- rather than a genuine absence of history.
+  case statsCoverage taskMap of
+    (_, 0) -> pure ()
+    (measured, couldMatch) -> do
+      Log.info
+        "Tasks estimated from recorded statistics (matched, of those with a stat key)"
+        (measured, couldMatch)
+      when (measured == 0) $ Log.warn
+        "No task matched any recorded statistics, so every estimate is the \
+        \task's own. If statistics were supplied, their stat keys no longer \
+        \match these tasks'"
+        couldMatch
+  case Set.toList (underestimatedMemoryTags 2 taskMap) of
+    []   -> pure ()
+    tags -> Log.warn
+      "Tasks used over twice the memory their own model predicts, so they may \
+      \be killed for running out of memory where no statistics exist" tags
   nodes <- getJobNodes config
   forM_ (Map.toList (unschedulableTaskTags config nodes (Map.keys taskMap))) $ \(reason, tags) ->
     Log.warn ("Tasks " <> describeUnschedulable reason) (Set.toList tags)
