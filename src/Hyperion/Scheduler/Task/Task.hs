@@ -223,10 +223,15 @@ class ( All Eq (DepKeys k)
   -- | Maximum possible threads for the task.
   -- TODO: get rid of RunStage?
   maxThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
-  maxThreads _ _ _ = 1
+  maxThreads = minThreads
   -- | Minimum possible threads for the keyTask
+  -- NoOpTask's perform no computation, so they occupy no worker threads
+  -- (e.g. ListTaskKey).
   minThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
-  minThreads _ _ _ = 1
+  minThreads _ _ _ = case taskKind @k of
+    NoOpTask _ -> 0
+    _          -> 1
+
   tag        :: k -> Maybe Tag
   tag = Just . Text.pack . show . typeOf
   priority :: k -> Int
@@ -393,15 +398,8 @@ instance
   ) => IsTask (Task r k) where
   taskMemoryEstimate t   = memoryEstimate t.config t.key
   taskRuntimeEstimate t  = runtimeEstimate t.config t.key
-  -- TODO reorder arguments?
-  -- NoOpTask's perform no computation, so they occupy no worker threads
-  -- (cf. TaskLink.ListTask).
-  taskMaxThreads stage t = case taskKind @k of
-    NoOpTask _ -> 0
-    _          -> maxThreads stage t.config t.key
-  taskMinThreads stage t = case taskKind @k of
-    NoOpTask _ -> 0
-    _          -> minThreads stage t.config t.key
+  taskMaxThreads stage t = maxThreads stage t.config t.key
+  taskMinThreads stage t = minThreads stage t.config t.key
   taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
     toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
   taskOutputs t          = Set.map (toTaskKeyFileInfo t.resolver) $ outKeys t.config t.key
