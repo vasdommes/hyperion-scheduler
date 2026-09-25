@@ -23,7 +23,7 @@ import Control.Monad.Catch                          (Handler (..), catches)
 import Control.Monad.IO.Class                       (liftIO)
 import Control.Monad.Reader                         (lift)
 import Control.Monad.Writer                         (Writer, runWriter, tell)
-import Data.List.Extra                              (nubOrd, partition)
+import Data.List.Extra                              (nubOrd, partition, sortOn)
 import Data.List.NonEmpty                           (NonEmpty (..))
 import Data.List.NonEmpty                           qualified as NonEmpty
 import Data.Map.Strict                              (Map, (!?))
@@ -82,7 +82,10 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
                                                      notifyChangeM,
                                                      runWithRetry)
 import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Stats                     (TaskRecord (..))
+import Hyperion.Scheduler.Stats                     (Accuracy (..),
+                                                     TaskRecord (..),
+                                                     Trials (..), accuracyBy,
+                                                     taskEstimatesAt)
 import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
                                                      TaskMap,
                                                      describeInstrumentationGap,
@@ -99,7 +102,7 @@ import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
 import Hyperion.Scheduler.TPrioQueue                qualified as TPrioQueue
 import Hyperion.Scheduler.Types                     (FileSize (..),
                                                      MemorySize (..), Node (..),
-                                                     NumCPUs)
+                                                     NumCPUs, modelEstimate)
 import Hyperion.Scheduler.WorkerPool                (TWorker (workerId),
                                                      WorkerPool,
                                                      toReusableWorker,
@@ -414,6 +417,10 @@ runNodeLoop
         , taskNode    = node
         , taskNumCPUs = numCpus
         , taskFileSizes = Map.fromListWith (<>) $ mapMaybe toTaskFileSizeItem $ Map.toList res.remoteTaskFileSizes
+        -- What the task was scheduled on, recorded next to what it used, so
+        -- that estimates can be checked against reality after the run.
+        , taskEstimates = taskEstimatesAt numCpus task
+        , taskStatKey = taskStatKey task
         }
       -- NB: this should be the last operation, since the nodeLoop process is killed
       -- after monitorProgressAndDeps reads the last task from finishedTaskQueue!
@@ -682,7 +689,58 @@ runTasks config taskMap = do
       -- Finishing with AsyncFailed or AsyncLinkFailed will trigger throwOnAsyncFailed.
       mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
       _ <- lift $ Async.wait cleanupLoopHandle
-      flushQueue taskRecordQueue
+      records <- flushQueue taskRecordQueue
+      reportModelAccuracy records
+      pure records
+
+-- | Log how this run's measurements compared with what the tasks' own models
+-- predicted. The counterpart to the warning 'runTasks' emits beforehand from
+-- 'underestimatedMemoryTags', which can only speak for tasks that already had
+-- statistics; this speaks for every task that ran.
+--
+-- Grouped by tag rather than by stat key, so that it reads as a few lines:
+-- 'estimateAccuracy' and 'modelAccuracy' give the per-key figures for whatever
+-- reads the records afterwards.
+reportModelAccuracy :: IsTask a => TaskRecords a -> Job ()
+reportModelAccuracy records
+  | null worst = pure ()
+  | otherwise  = do
+      Log.info
+        "Measured over predicted by the tasks' own models, worst first \
+        \(tag, memory worst, memory mean, runtime mean, observations)"
+        (map summarise worst)
+      case [tag | (tag, accuracy) <- worst, worstMemory accuracy > 2] of
+        []   -> pure ()
+        tags -> Log.warn
+          "Some task used over twice the memory its own model predicts in this \
+          \run, so it would be under-allocated on a machine with no statistics \
+          \to correct the model" tags
+  where
+    -- Both the ordering and the warning read the worst observation rather than
+    -- the group's average: the warning is about a task being killed for running
+    -- out of memory, and one task at ten times its model among accurate
+    -- siblings hardly moves a mean. This is the figure the pre-run
+    -- 'underestimatedMemoryTags' check compares, which would otherwise disagree.
+    worst = sortOn (negate . worstMemory . snd) rows
+    worstMemory accuracy = maybe 0 (.max) accuracy.memory
+    -- A group appears if either quantity could be scored: the two are scored
+    -- independently, so a model predicting zero runtime can still be judged on
+    -- memory, and a task that reported no memory figure still on runtime.
+    rows =
+      [ (fromMaybe "untagged" tag, accuracy)
+      | (tag, accuracy) <- Map.toList byTag
+      , observations accuracy > 0
+      ]
+    summarise (tag, accuracy) =
+      ( tag
+      , (.max) <$> accuracy.memory
+      , (.mean) <$> accuracy.memory
+      , (.mean) <$> accuracy.runtime
+      , observations accuracy
+      )
+    observations accuracy = max (trials accuracy.memory) (trials accuracy.runtime)
+    trials = maybe 0 (.numTrials)
+    byTag = accuracyBy (Just . taskTag . (.task)) modelEstimate records
 
 
 -- Files that can be removed (if there are no other dependencies)

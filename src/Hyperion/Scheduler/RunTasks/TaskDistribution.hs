@@ -21,7 +21,8 @@ import Hyperion.Scheduler.Config      (Config)
 import Hyperion.Scheduler.FilePath    (VirtualFilePath, isNodeLocal)
 import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..), Tag,
-                                       taskMemoryCapped)
+                                       taskMemoryCapped, taskMemoryEstimate,
+                                       taskRuntimeEstimate)
 import Hyperion.Scheduler.Types       (FileSize, Node (..), NumCPUs)
 
 type CPUAllocation a = Map a NumCPUs

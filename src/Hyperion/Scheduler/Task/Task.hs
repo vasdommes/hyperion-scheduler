@@ -50,12 +50,13 @@ import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
                                             ToTaskKeyFileInfo, encodeStatKey,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag)
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
+                                            RunStage, Tag, estimatesFromModel)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
-import Hyperion.Scheduler.Types            (NumCPUs)
+import Hyperion.Scheduler.Types            (Estimate (..), NumCPUs)
 import Hyperion.Util.MonadPathExists       (MonadPathExists (..))
 import Type.Reflection                     (Typeable)
 
@@ -221,7 +222,7 @@ class ( All Eq (DepKeys k)
   -- looked up, and both its estimates are zero. That is correct for tasks that
   -- compute nothing (NoOpTask), and tolerable for small ones:
   -- a task with runtimeEstimate=0 gets 'minThreads' and lower priority.
-  -- 'Hyperion.Scheduler.Task.TaskMap.uninstrumentedTaskTags' reports tasks
+  -- 'Hyperion.Scheduler.Task.TaskMap.taskInstrumentationGaps' reports tasks
   -- that compute but declare no stat key, so you'll see them in the logs.
   --
   -- Stat key should include a /reduced/ projection of the key over the key itself:
@@ -407,8 +408,14 @@ instance
   -- Estimates always come from the stat key, so that the value used for
   -- scheduling is the same function that is validated against recorded
   -- statistics for that key.
-  taskMemoryEstimate t   = maybe 0         memoryEstimate  (toStatKey t.config t.key)
-  taskRuntimeEstimate t  = maybe (const 0) runtimeEstimate (toStatKey t.config t.key)
+  -- A task with no stat key estimates zero memory, hence (via
+  -- 'estimatesFromModel') zero runtime.
+  taskResourceEstimates t = case toStatKey t.config t.key of
+    Nothing      -> estimatesFromModel 0
+    Just statKey -> MkResourceEstimates
+      { memory = EstimatedByTask (memoryEstimate statKey)
+      , runtime = EstimatedByTask (runtimeEstimate statKey)
+      }
   taskStatKey t          = encodeStatKey <$> toStatKey t.config t.key
   -- TODO reorder arguments?
   -- NoOpTask's perform no computation, so they occupy no worker threads

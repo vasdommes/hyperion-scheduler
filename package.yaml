@@ -86,4 +86,5 @@ tests:
     - hyperion
     - hyperion-scheduler
     - text
+    - time
     ghc-options: -threaded

@@ -17,7 +17,8 @@ import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
 import Hyperion.Scheduler.StatKey  (StatKey, TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Types    (MemorySize, NumCPUs, defaultRuntimeEstimate)
+import Hyperion.Scheduler.Types    (Estimate (..), MemorySize, NumCPUs,
+                                    defaultRuntimeEstimate, schedulingEstimate)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
 -- computation (and, at the 'Hyperion.Scheduler.Task.Task.TaskKey' level, on
@@ -34,12 +35,12 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 --  default taskHash :: Binary a => a -> ByteString
 --  taskHash = hashBase64SafeByteString
 
-  -- | Estimated memory in bytes
-  taskMemoryEstimate     :: a -> MemorySize
-  taskMemoryEstimate = const 0
-  -- | Estimated runtime in seconds, as a function of NumCPUs
-  taskRuntimeEstimate    :: a -> NumCPUs -> NominalDiffTime
-  taskRuntimeEstimate t = defaultRuntimeEstimate (taskMemoryEstimate t)
+  -- | Estimated memory in bytes and runtime in seconds, with the provenance of
+  -- each. Ordinary tasks return 'estimatesFromModel', i.e. their own model; only
+  -- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' ever reports a
+  -- figure measured from statistics.
+  taskResourceEstimates :: a -> ResourceEstimates
+  taskResourceEstimates _ = estimatesFromModel 0
   -- | Maximum possible threads for the task
   -- TODO: get rid of RunStage?
   taskMaxThreads :: RunStage -> a -> NumCPUs
@@ -94,23 +95,30 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskStatKey :: a -> Maybe StatKey
   taskStatKey _ = Nothing
 
-  -- | Whether 'taskMemoryEstimate' and 'taskRuntimeEstimate' are the task's
-  -- own predictions or figures recovered from recorded statistics. Only
-  -- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' ever reports
-  -- anything else, which is why the default is the task's own.
-  taskEstimateSource :: a -> EstimateSource
-  taskEstimateSource _ = EstimatedByTask
+-- | A task's memory and runtime estimates with their provenance.
+data ResourceEstimates = MkResourceEstimates
+  { memory  :: Estimate MemorySize
+  , runtime :: Estimate (NumCPUs -> NominalDiffTime)
+  }
 
--- | Where a wrapped task's estimates came from.
-data EstimateSource
-  = EstimatedByTask
-    -- ^ The task's own model: no statistics matched its stat key, so
-    -- 'memoryEstimate' is what the task itself predicted.
-  | MeasuredFromStats MemorySize
-    -- ^ Recorded statistics replaced the estimates. The payload is what the
-    -- task's own model predicted, kept for comparison against the measurement
-    -- now in 'memoryEstimate'.
-  deriving (Eq, Ord, Show)
+-- | A task's own model: the memory it predicts, and a runtime curve derived
+-- from that memory. A task with a runtime model of its own builds
+-- 'MkResourceEstimates' directly instead.
+estimatesFromModel :: MemorySize -> ResourceEstimates
+estimatesFromModel memory = MkResourceEstimates
+  { memory  = EstimatedByTask memory
+  , runtime = EstimatedByTask (defaultRuntimeEstimate memory)
+  }
+
+-- | Estimated memory in bytes: the figure the task is scheduled on, whether
+-- that is the task's own prediction or one measured from statistics.
+taskMemoryEstimate :: IsTask a => a -> MemorySize
+taskMemoryEstimate t = schedulingEstimate (taskResourceEstimates t).memory
+
+-- | Estimated runtime in seconds, as a function of NumCPUs. See
+-- 'taskMemoryEstimate'.
+taskRuntimeEstimate :: IsTask a => a -> NumCPUs -> NominalDiffTime
+taskRuntimeEstimate t = schedulingEstimate (taskResourceEstimates t).runtime
 
 -- NB: 'memoryToCpuTimeApprox' and 'defaultRuntimeEstimate' now live in
 -- 'Hyperion.Scheduler.Types', so that 'Hyperion.Scheduler.StatKey' can use

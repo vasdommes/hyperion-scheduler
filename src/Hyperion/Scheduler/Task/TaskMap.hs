@@ -26,11 +26,13 @@ import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
 import Hyperion.Scheduler.StatKey          (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
-import Hyperion.Scheduler.Task.IsTask      (EstimateSource (..), IsTask (..),
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             Tag, taskInputPaths,
-                                            taskOutputPaths)
+                                            taskMemoryEstimate, taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
+import Hyperion.Scheduler.Types            (isMeasuredFromStats, modelEstimate,
+                                            schedulingEstimate)
 
 type TaskMap a = Map a (Set a)
 
@@ -228,9 +230,9 @@ statsCoverage taskMap = (length measured, length couldMatch)
   where
     couldMatch = filter (isJust . taskStatKey) (Map.keys taskMap)
     measured = filter isMeasured couldMatch
-    isMeasured t = case taskEstimateSource t of
-      MeasuredFromStats _ -> True
-      EstimatedByTask     -> False
+    isMeasured t = isMeasuredFromStats estimates.memory
+      || isMeasuredFromStats estimates.runtime
+      where estimates = taskResourceEstimates t
 
 -- | Tags of tasks whose recorded memory exceeded their own estimate by more
 -- than the given factor, i.e. whose model is optimistic. These are the tasks
@@ -243,7 +245,7 @@ underestimatedMemoryTags :: IsTask a => Rational -> TaskMap a -> Set (Maybe Tag)
 underestimatedMemoryTags factor taskMap = Set.fromList
   [ taskTag t
   | t <- Map.keys taskMap
-  , MeasuredFromStats predicted <- [taskEstimateSource t]
-  , let measured = taskMemoryEstimate t
-  , toRational measured > factor * toRational predicted
+  , let memory = (taskResourceEstimates t).memory
+  , isMeasuredFromStats memory
+  , toRational (schedulingEstimate memory) > factor * toRational (modelEstimate memory)
   ]
