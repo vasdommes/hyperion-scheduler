@@ -213,31 +213,23 @@ class ( All Eq (DepKeys k)
   default taskKind :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k) => TaskKind k
   taskKind = ComputeValueTask
 
-  -- | The identity under which this task's resource usage is recorded, and the
-  -- only input to its estimates. See 'IsStatKey'.
+  -- | StatKeyOf k is used for two things:
+  -- 1. as a key for TaskStats (resource usage stats);
+  -- 2. as the only input to 'memoryEstimate'/'runtimeEstimate' functions (see 'IsStatKey').
   --
   -- Defaults to 'Void', i.e. no statistics: the task is neither recorded nor
   -- looked up, and both its estimates are zero. That is correct for tasks that
-  -- compute nothing, and tolerable for small ones -- a zero runtime estimate
-  -- sorts as "fastest" in the CPU-refinement loop, so such tasks are given
-  -- 'minThreads' and CPUs go to tasks believed to be slow. It is wrong for a
-  -- large task, which would then be under-allocated and reserve no memory;
+  -- compute nothing (NoOpTask), and tolerable for small ones:
+  -- a task with runtimeEstimate=0 gets 'minThreads' and lower priority.
   -- 'Hyperion.Scheduler.Task.TaskMap.uninstrumentedTaskTags' reports tasks
-  -- that compute but declare no stat key, so this does not pass unnoticed.
+  -- that compute but declare no stat key, so you'll see them in the logs.
   --
-  -- Prefer a /reduced/ projection of the key over the key itself: statistics
-  -- are grouped by this type, so fields that do not affect resource usage
-  -- should be dropped or coarsened, or every task ends up in a group of one
-  -- and no curve can be fitted to it.
+  -- Stat key should include a /reduced/ projection of the key over the key itself:
+  -- the fields that do not affect resource usage should be dropped or coarsened.
   type StatKeyOf k :: Type
   type StatKeyOf k = Void
 
-  -- | Project this key (and the estimate-relevant part of its config) onto its
-  -- stat key.
-  --
-  -- The config is available here so that parts of it which genuinely change
-  -- resource usage (a version or variant tag) can be projected into the key;
-  -- see 'IsStatKey' for why a filesystem path must not be.
+  -- | Project this key (and the estimate-relevant part of its config) onto its stat key.
   toStatKey :: TaskConfig k -> k -> Maybe (StatKeyOf k)
   toStatKey _ _ = Nothing
 
