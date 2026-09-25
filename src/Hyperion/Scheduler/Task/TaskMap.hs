@@ -212,7 +212,7 @@ taskInstrumentationGaps taskMap = Map.fromListWith Set.union
     fileGaps t
       | Set.null outputs                              = []
       | all (isNothing . (.fileStatKey)) outputsList  = [NoFileStatKey]
-      | all ((== 0) . (.fileSize)) outputsList        = [ZeroFileSizeEstimate]
+      | all ((== 0) . schedulingEstimate . (.fileSize)) outputsList = [ZeroFileSizeEstimate]
       | otherwise                                     = []
       where
         outputs = taskOutputs t

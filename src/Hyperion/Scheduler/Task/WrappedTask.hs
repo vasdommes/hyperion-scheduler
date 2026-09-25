@@ -14,7 +14,6 @@ import Data.Aeson                     (ToJSON (..))
 import Data.Binary                    (Binary (..))
 import Data.BinaryHash                (hashBase64SafeByteString)
 import Data.ByteString                (ByteString)
-import Data.Maybe                     (fromMaybe)
 import Data.Set                       (Set)
 import Data.Set                       qualified as Set
 import Data.Time                      (NominalDiffTime)
@@ -135,9 +134,9 @@ decorateTaskWithStats stats task = task
     measuredMemory  = maybeTaskResourceMap >>= maxMemory
 
     -- A file with no stat key is never looked up and keeps its estimate.
-    updateFileSize fileInfo = fileInfo { fileSize = fileSize} where
-      fileSize = fromMaybe fileInfo.fileSize $
-        flip lookupMaxFileSize stats =<< fileInfo.fileStatKey
+    updateFileSize fileInfo = fileInfo { fileSize = fileSize } where
+      fileSize = maybe id overrideWithMeasured measured fileInfo.fileSize
+      measured = flip lookupMaxFileSize stats =<< fileInfo.fileStatKey
     inputs = Set.map updateFileSize $ taskInputs task
     outputs = Set.map updateFileSize $ taskOutputs task
 

@@ -23,6 +23,7 @@ module Hyperion.Scheduler.Stats
   , estimateAccuracy
   , modelAccuracy
   , accuracyBy
+  , fileSizeAccuracy
   , recordToTaskStats
   , approxRuntime
   , maxMemory
@@ -96,13 +97,11 @@ data TaskEstimates = MkTaskEstimates
   { memory    :: Estimate MemorySize
   , runtime   :: Estimate NominalDiffTime
     -- ^ At the 'NumCPUs' the task was given, so it pairs with 'taskRuntime'.
-  , fileSizes :: Map FileStatKey FileSize
+  , fileSizes :: Map FileStatKey (Estimate FileSize)
     -- ^ Keyed as 'taskFileSizes' is, so predicted and actual sizes line up key
-    -- by key. Unlike memory and runtime these carry no provenance:
-    -- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' overwrites a
-    -- file's declared size with the recorded one, so what the key's own
-    -- 'Hyperion.Scheduler.StatKey.fileSizeEstimate' predicted is no longer
-    -- recoverable here.
+    -- by key. Covers inputs as well as outputs, while only output sizes are
+    -- measured, so a record can predict a size it has no measurement for -- the
+    -- task that produced that file has it.
   } deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
 -- | The estimates a task was scheduled on, as of the given CPU allocation.
@@ -133,6 +132,19 @@ data Accuracy = MkAccuracy
   }
   deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
   deriving (Semigroup, Monoid) via (Generically Accuracy)
+
+-- | How measured file sizes compare with what was predicted for them, grouped
+-- by file stat key. Only sizes that were both predicted and measured are
+-- scored, which in one record means its output files.
+fileSizeAccuracy :: (forall x . Estimate x -> x) -> [TaskRecord a] -> Map FileStatKey (Trials Double)
+fileSizeAccuracy predicted records = getMonoidalMap $ foldMap one records
+  where
+    one record = MonoidalMap $ Map.mapMaybe id $
+      Map.intersectionWith score record.taskFileSizes record.taskEstimates.fileSizes
+    score measured estimate = case realToFrac (predicted estimate) of
+      prediction | prediction <= 0 -> Nothing
+                 | otherwise -> Just $
+                     toTrials $ NonEmpty.map ((/ prediction) . fromIntegral) measured
 
 -- | How a run's measurements compare with the estimates it was actually
 -- scheduled on, grouped by stat key. This scores the scheduling decisions,

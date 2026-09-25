@@ -31,8 +31,8 @@ import Hyperion.Scheduler.StatKey          (IsFileStatKey (..), IsStatKey (..),
 import Hyperion.Scheduler.Stats            (Accuracy (..), TaskAndFileStats,
                                             TaskEstimates (..), TaskRecord (..),
                                             Trials (..), estimateAccuracy,
-                                            modelAccuracy, recordToTaskStats,
-                                            taskEstimatesAt)
+                                            fileSizeAccuracy, modelAccuracy,
+                                            recordToTaskStats, taskEstimatesAt)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             estimatesFromModel,
                                             taskRuntimeEstimate)
@@ -76,7 +76,7 @@ instance IsTask EstTask where
   taskOutputs t = Set.singleton MkTaskKeyFileInfo
     { fileStatKey = Just $ encodeFileStatKey (MkEstFileStatKey t.name)
     , path        = VirtualFilePath $ fromString ("/data/" <> t.name)
-    , fileSize    = fileSizeEstimate (MkEstFileStatKey t.name)
+    , fileSize    = EstimatedByTask $ fileSizeEstimate (MkEstFileStatKey t.name)
     }
   taskTag t = Just (Text.pack t.name)
   taskClosure _ _ = Nothing
@@ -246,6 +246,37 @@ testWrapKeepsMeasuredEstimates = do
   expect "wrapping keeps a measured runtime measured" $
     isMeasuredFromStats estimates.runtime
 
+-- | A file's declared size survives being overridden by a recorded one, the
+-- same way a task's memory model does.
+testFileSizeKeepsOwnEstimate :: IO ()
+testFileSizeKeepsOwnEstimate = do
+  let
+    -- The key declares 100 bytes (see 'EstFileStatKey'); the run measured 4096.
+    stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
+    outputs = Set.toList $ taskOutputs $ decorateTaskWithStats stats (estTask "A" 1024)
+  case outputs of
+    [output] -> do
+      expect "the recorded file size is used" $
+        schedulingEstimate output.fileSize == 4096
+      expect "the key's own file size estimate is kept" $
+        modelEstimate output.fileSize == 100
+    _ -> throwIO $ AssertionFailed "FAILED: expected exactly one output file"
+
+-- | File sizes score like memory and runtime do: measured over predicted, and
+-- against either estimate.
+testFileSizeAccuracy :: IO ()
+testFileSizeAccuracy = do
+  let
+    records = [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
+    fileStatKey = encodeFileStatKey (MkEstFileStatKey "A")
+    modelRatio = (.mean) <$> Map.lookup fileStatKey (fileSizeAccuracy modelEstimate records)
+    scheduledRatio = (.mean) <$> Map.lookup fileStatKey (fileSizeAccuracy schedulingEstimate records)
+  -- An undecorated record predicts the declared 100 bytes either way.
+  expect "a file 41x bigger than declared scores 40.96" $
+    modelRatio == Just 40.96
+  expect "with no statistics, both file size accuracies agree" $
+    scheduledRatio == modelRatio
+
 -- | Accuracy is measured over predicted, so a model that predicts too little
 -- scores above one. The records here were scheduled on the tasks' own models,
 -- so both accuracies agree.
@@ -303,7 +334,7 @@ testTaskEstimatesAt = do
   expect "recorded memory estimate is the scheduler's figure" $
     schedulingEstimate estimates.memory == ownMemory
   expect "file size estimates are keyed as the recorded sizes are" $
-    Map.lookup fileStatKey estimates.fileSizes == Just 100
+    Map.lookup fileStatKey estimates.fileSizes == Just (EstimatedByTask 100)
 
 taskMapOf :: [WrappedTask] -> TaskMap WrappedTask
 taskMapOf tasks = Map.fromList [(t, Set.empty) | t <- tasks]
@@ -316,6 +347,8 @@ runTest = do
   testDecorateIsIdempotent
   testUnderestimatedMemoryIsReported
   testWrapKeepsMeasuredEstimates
+  testFileSizeKeepsOwnEstimate
+  testFileSizeAccuracy
   testAccuracyRatios
   testRecordRoundTrip
   testTaskEstimatesAt

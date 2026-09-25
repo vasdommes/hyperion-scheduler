@@ -28,6 +28,7 @@ import Data.Aeson                (FromJSON, ToJSON)
 import Data.Binary               (Binary)
 import Data.Matrix               (Matrix)
 import Data.Matrix               qualified as Matrix
+import Data.Maybe                (isJust)
 import Data.Traversable          (for)
 import Data.Typeable             (Typeable)
 import Data.Vector               (Vector)
@@ -368,8 +369,14 @@ instance
 
 -- * The job
 
--- | Build the task map for @problem@, run it, write task stats under
--- @baseDir@ and check the result against 'getOutputVector'.
+-- | Build the task map for @problem@, run it twice under @baseDir@, and check
+-- each result against 'getOutputVector'.
+--
+-- The second pass is scheduled from the statistics the first one recorded, so
+-- that the whole loop -- record, aggregate, write, read back, decorate -- runs
+-- for real rather than only in unit tests. Each pass computes in its own
+-- directory, so the artifacts of both survive for inspection; the two share
+-- statistics because a stat key holds no paths.
 --
 -- The scheduler config is passed as a 'Job' action (rather than a value) so
 -- that it can be evaluated on the node that actually runs the job: on a
@@ -379,35 +386,76 @@ linearTransformJob getSchedulerConfig baseDir problem = do
   schedulerConfig <- getSchedulerConfig
   let
     relDir = "shift_" <> showOs problem.shift <> "_dim_" <> showOs problem.dim
-    resolver = MkLinearPathResolver
-      { outDir = baseDir </> relDir
-      , tempDir = schedulerConfig.localStoragePath </> relDir
+    problemDir = baseDir </> relDir
+    resolverFor pass = MkLinearPathResolver
+      { outDir = problemDir </> pass
+      , tempDir = schedulerConfig.localStoragePath </> relDir </> pass
       }
     outputVectorKey = MkVectorKey
       { layerIndex = problem.shift
       , length = problem.dim
       , ctx = problem
       }
+    taskStatsFile = problemDir </> "task_stats.json"
 
-  Log.info "Running linear transform test" (problem, resolver)
-  liftIO $ do
-    removePathForcibly resolver.outDir
-    createDirectoryIfMissing True resolver.outDir
-  taskMap <- mkTaskMap resolver () outputVectorKey
-  taskRecords <- Scheduler.runTasks schedulerConfig taskMap
+    runPass :: OsPath -> Scheduler.TaskAndFileStats -> Job [Scheduler.TaskRecord Scheduler.WrappedTask]
+    runPass pass stats = do
+      let resolver = resolverFor pass
+      Log.info "Running linear transform test" (problem, resolver)
+      liftIO $ do
+        removePathForcibly resolver.outDir
+        createDirectoryIfMissing True resolver.outDir
+      taskMap <- Scheduler.decorateTaskMapWithStats stats <$> mkTaskMap resolver () outputVectorKey
+      taskRecords <- Scheduler.runTasks schedulerConfig taskMap
+      checkOutputVector resolver
+      pure taskRecords
 
-  let
-    taskRecordsFile = resolver.outDir </> "task_records.json"
-    taskStatsFile   = resolver.outDir </> "task_stats.json"
-  Log.info "Writing task records to file" taskRecordsFile
-  encodeJsonFileAtomic taskRecordsFile taskRecords
-  writeTaskStats taskStatsFile (foldMap recordToTaskStats taskRecords)
+    checkOutputVector resolver = do
+      outputValue <- readValueM outputVectorKey (resolvePath resolver outputVectorKey)
+      Log.info "Computed output vector" outputValue
+      let expectedValue = getOutputVector problem
+      unless (expectedValue == outputValue) $
+        Log.throw $ AssertionFailed $
+          "Wrong output vector for problem: " <> show problem <>
+          ": expected: " <> show expectedValue <>
+          ": got: " <> show outputValue
 
-  outputValue <- readValueM outputVectorKey (resolvePath resolver outputVectorKey)
-  Log.info "Computed output vector" outputValue
-  let expectedValue = getOutputVector problem
-  unless (expectedValue == outputValue) $
-    Log.throw $ AssertionFailed $
-      "Wrong output vector for problem: " <> show problem <>
-      ": expected: " <> show expectedValue <>
-      ": got: " <> show outputValue
+  -- Nothing is known about these tasks yet, so every estimate is the task's
+  -- own model.
+  firstRecords <- runPass "from_model" mempty
+  Log.info "Writing task records to file" (problemDir </> "task_records.json")
+  encodeJsonFileAtomic (problemDir </> "task_records.json") firstRecords
+  writeTaskStats taskStatsFile (foldMap recordToTaskStats firstRecords)
+
+  stats <- Scheduler.readTaskStats [taskStatsFile]
+  secondRecords <- runPass "from_stats" stats
+  encodeJsonFileAtomic (problemDir </> "task_records_from_stats.json") secondRecords
+  assertScheduledFromStats stats secondRecords
+
+-- | Every task with an identity in statistics must have been scheduled from
+-- them, which is the point of having recorded them. A task without a stat key
+-- is not looked up at all, so it is not expected to match.
+assertScheduledFromStats
+  :: Scheduler.TaskAndFileStats
+  -> [Scheduler.TaskRecord Scheduler.WrappedTask]
+  -> Job ()
+assertScheduledFromStats stats records = unless (null unmeasured) $
+  Log.throw $ AssertionFailed $
+    "Tasks with a stat key were not scheduled from the recorded statistics: " <>
+    show unmeasured
+  where
+    unmeasured =
+      [ (Scheduler.taskTag record.task, record.taskEstimates)
+      | record <- records
+      , Just statKey <- [record.taskStatKey]
+      , not (Scheduler.isMeasuredFromStats record.taskEstimates.runtime)
+        -- Memory statistics exist only where some earlier run recorded a memory
+        -- figure, so require them only where these statistics hold one. Asking
+        -- whether this run measured memory would be the wrong question: the two
+        -- passes need not allocate the same CPUs, and a task that runs on no
+        -- worker reports no memory.
+        || (recordsMemory statKey
+            && not (Scheduler.isMeasuredFromStats record.taskEstimates.memory))
+      ]
+    recordsMemory statKey = isJust $
+      Scheduler.maxMemory =<< Scheduler.lookupTaskStats statKey stats

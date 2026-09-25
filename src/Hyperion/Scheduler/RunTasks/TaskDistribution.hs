@@ -23,7 +23,8 @@ import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..), Tag,
                                        taskMemoryCapped, taskMemoryEstimate,
                                        taskRuntimeEstimate)
-import Hyperion.Scheduler.Types       (FileSize, Node (..), NumCPUs)
+import Hyperion.Scheduler.Types       (FileSize, Node (..), NumCPUs,
+                                       schedulingEstimate)
 
 type CPUAllocation a = Map a NumCPUs
 
@@ -72,7 +73,7 @@ allocateCpusToTasks stage totalCpus tasks =
 taskLocalFileSizeMap :: IsTask a => Config -> a -> Map VirtualFilePath FileSize
 taskLocalFileSizeMap config t =
   Map.fromList $
-  map (\fileInfo -> (fileInfo.path, fileInfo.fileSize)) $
+  map (\fileInfo -> (fileInfo.path, schedulingEstimate fileInfo.fileSize)) $
   Set.toList $
   Set.filter (isNodeLocal config . (.path)) $
   Set.union (taskInputs t) (taskOutputs t)

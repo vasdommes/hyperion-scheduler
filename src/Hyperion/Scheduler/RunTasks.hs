@@ -102,7 +102,8 @@ import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
 import Hyperion.Scheduler.TPrioQueue                qualified as TPrioQueue
 import Hyperion.Scheduler.Types                     (FileSize (..),
                                                      MemorySize (..), Node (..),
-                                                     NumCPUs, modelEstimate)
+                                                     NumCPUs, modelEstimate,
+                                                     schedulingEstimate)
 import Hyperion.Scheduler.WorkerPool                (TWorker (workerId),
                                                      WorkerPool,
                                                      toReusableWorker,
@@ -577,10 +578,12 @@ runTasks config taskMap = do
       Log.info
         "Tasks estimated from recorded statistics (matched, of those with a stat key)"
         (measured, couldMatch)
+      -- A decorated map does not say whether it was decorated with anything, so
+      -- this cannot tell a first run from a run whose keys stopped matching.
       when (measured == 0) $ Log.warn
         "No task matched any recorded statistics, so every estimate is the \
-        \task's own. If statistics were supplied, their stat keys no longer \
-        \match these tasks'"
+        \task's own model. Expected on a first run; otherwise the stat keys no \
+        \longer match these tasks' (tasks with a stat key)"
         couldMatch
   case Set.toList (underestimatedMemoryTags 2 taskMap) of
     []   -> pure ()
@@ -600,7 +603,8 @@ runTasks config taskMap = do
           distributeTasksToNodesWithScores 0.75 config nodes (TaskGraph.independentKeys taskGraph) getTaskPriority
 
         toFileInfos t = Set.toList $ Set.union (taskInputs t) (taskOutputs t)
-        toFileSizeMap t = Map.fromList $ map (\fileInfo -> (fileInfo.path, fileInfo.fileSize)) $ toFileInfos t
+        toFileSizeMap t = Map.fromList $
+          map (\fileInfo -> (fileInfo.path, schedulingEstimate fileInfo.fileSize)) $ toFileInfos t
         fileSizeEstimates = Map.unions $ map toFileSizeMap $ Set.toList $ TaskGraph.keys taskGraph
 
       -- TODO for debug
