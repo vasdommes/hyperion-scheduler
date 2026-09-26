@@ -39,9 +39,9 @@ import Hyperion.Log              qualified as Log
 import Hyperion.OsPath           (OsPath, (<.>), (</>))
 import Hyperion.OsString         (showOs)
 import Hyperion.Scheduler        (IsFileStatKey (..), IsStatKey (..),
-                                  PathResolver (..), ToFileStatKey (..),
-                                  encodeJsonFileAtomic, recordToTaskStats,
-                                  writeTaskStats)
+                                  MemorySize, PathResolver (..),
+                                  ToFileStatKey (..), encodeJsonFileAtomic,
+                                  recordToTaskStats, writeTaskStats)
 import Hyperion.Scheduler        qualified as Scheduler
 import Hyperion.Scheduler.Config qualified as Scheduler
 import Hyperion.Scheduler.Task   (ComputeValue (..), DepKeys, FetchesKey,
@@ -68,6 +68,17 @@ layerOutputVectorLength :: LinearTransformContext a => Int -> a -> Int
 layerOutputVectorLength layerIndex ctx = nrows
   where (nrows, _ncols) = layerMatrixDims layerIndex ctx
 
+-- | Every task here multiplies or sums a handful of 'Int's, so what a node must
+-- hold while one runs is the worker's own resident set rather than anything the
+-- task allocates -- see 'memoryEstimate', which is measured per worker and
+-- summed per concurrent task.
+--
+-- Measured at 86-95 MiB across tasks on the machine this was written on. The
+-- figure is not portable, which is why the scheduler prefers recorded
+-- statistics to it as soon as there are any.
+workerBaselineMemory :: MemorySize
+workerBaselineMemory = 96 * 1024 * 1024
+
 -- * Key types
 
 -- | A single product @A_ik x_k@.
@@ -91,7 +102,7 @@ data MultiplyStatKey = MkMultiplyStatKey
   deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
 instance IsStatKey MultiplyStatKey where
-  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ = workerBaselineMemory
 
 computeMultiplyM :: (Applicative f, FetchesKey (VectorKey a) f, LinearTransformContext a) => MultiplyKey a -> f (Process Int)
 computeMultiplyM key = do
@@ -164,7 +175,7 @@ newtype VectorElementStatKey = MkVectorElementStatKey { inputLength :: Int }
   deriving newtype (ToJSON, FromJSON)
 
 instance IsStatKey VectorElementStatKey where
-  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ = workerBaselineMemory
 
 vectorElementInputKeys :: LinearTransformContext a => VectorElementKey a -> [MultiplyKey a]
 vectorElementInputKeys key = map mkKey ks where
@@ -267,7 +278,8 @@ newtype VectorStatKey = MkVectorStatKey { size :: Int }
   deriving newtype (ToJSON, FromJSON)
 
 instance IsStatKey VectorStatKey where
-  memoryEstimate _ = 1024 * 1024
+  -- One Int per element, which is nothing beside the worker itself.
+  memoryEstimate key = workerBaselineMemory + fromIntegral (8 * key.size)
 
 -- * A concrete problem: cyclic shift
 

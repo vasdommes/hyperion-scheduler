@@ -57,7 +57,18 @@ newtype StatKey = MkStatKey Aeson.Value
 -- about the computation changed, which would split recorded history for no
 -- reason.
 class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
-  -- | Estimated memory in bytes.
+  -- | Estimated memory in bytes: what a node must hold while this task runs,
+  -- which is the resident set of the whole worker process and not only what
+  -- the task itself allocates.
+  --
+  -- The distinction is easy to get wrong and costs an order of magnitude for a
+  -- small task. Each concurrent task is its own worker, and
+  -- 'Hyperion.Scheduler.RunTasks.NodeStatus.addTask' sums these figures, so
+  -- each must carry the executable's own footprint -- tens of megabytes before
+  -- the task allocates anything. Recorded statistics measure the same thing
+  -- (the worker's peak resident set, its own or its children's), so a model
+  -- that omits the baseline is reported as under-predicting once the two are
+  -- compared.
   memoryEstimate :: a -> MemorySize
 
   -- | Estimated runtime in seconds, as a function of 'NumCPUs'.
