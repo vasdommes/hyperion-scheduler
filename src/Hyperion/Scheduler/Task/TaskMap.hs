@@ -27,7 +27,7 @@ import Hyperion.OsString                   (OsString, showOs)
 import Hyperion.Scheduler.StatKey          (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
-                                            Tag, taskInputPaths,
+                                            RunStage (..), Tag, taskInputPaths,
                                             taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
@@ -61,6 +61,8 @@ instance Exception InvalidTaskMap
 -- - Each input path produced by some task in the map can be found in output
 --   paths of dependencies (input paths produced by no task in the map are
 --   assumed to already exist on disk -- see 'assertCorrectDependencyPaths')
+-- - Every task with work to run remotely asks for at least one CPU
+--   (see 'assertComputeTasksHaveCpus')
 validateTaskMap :: (IsTask a, MonadThrow m) => TaskMap a -> m ()
 validateTaskMap taskMap = do
   assertAllTasksAreInKeys
@@ -68,6 +70,7 @@ validateTaskMap taskMap = do
   assertNoCycles
   assertNoDuplicatePaths
   assertCorrectDependencyPaths
+  assertComputeTasksHaveCpus
   where
     assert cond msg = case cond of
       True  -> pure ()
@@ -101,6 +104,28 @@ validateTaskMap taskMap = do
         assert (Set.notMember path existingPaths) $
           "Duplicate path: " <> showOs path
         pure $ Set.insert path existingPaths
+
+    -- A task that has something to run remotely needs a worker to run it on,
+    -- and a worker is what a CPU buys, so a minimum of zero is a declaration
+    -- that contradicts itself: 'Hyperion.Scheduler.RunTasks.RemoteRunTask.remoteRunTask'
+    -- throws when it holds a closure and no worker.
+    --
+    -- Rejected rather than warned about, because 'taskMinThreads' is a floor,
+    -- not the allocation. Such a task may be given CPUs for hours and then be
+    -- drained to none -- 'refineAllocation' takes threads from the fastest task
+    -- down to exactly this floor -- so the failure is load-dependent and
+    -- arrives once dependencies have already been computed.
+    assertComputeTasksHaveCpus = assert (null starvable) $
+      "Tasks have work to run remotely but declare minThreads = 0, so the \
+      \allocator may give them no CPUs and they would then fail for want of a \
+      \worker: " <> showOs (map taskLabel starvable)
+      where
+        starvable =
+          [ t
+          | t <- Map.keys taskMap
+          , isJust (taskClosure 0 t)
+          , any (\stage -> taskMinThreads stage t == 0) [InitialRun, InProgressRun]
+          ]
 
     -- Each input path for a task either:
     -- 1. Is produced by some task in the TaskMap

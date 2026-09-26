@@ -67,7 +67,12 @@ remoteRunTask :: IsTask a => Maybe TWorker -> NumCPUs -> a -> Job RemoteRunTaskR
 remoteRunTask mWorker numCpus task = case taskClosure numCpus task of
   Nothing -> pure emptyRemoteRunTaskResult
   Just closure -> case mWorker of
-    Nothing -> Log.throwError "remoteRunTask expected (Just TWorker), but got Nothing"
+    -- 'Hyperion.Scheduler.Task.TaskMap.validateTaskMap' rejects a task that has
+    -- work to run yet allows itself no CPUs, so this is reachable only for an
+    -- 'IsTask' that bypassed validation.
+    Nothing -> Log.throwError $
+      "remoteRunTask has work to run but no worker to run it on, because the \
+      \task was allocated no CPUs: " <> show (taskTag task, numCpus)
     Just w -> do
       -- TODO: is setTaskCpus really needed?
       local (setTaskCpus numCpus) $
