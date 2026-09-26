@@ -18,6 +18,7 @@ module Hyperion.Scheduler.Stats
   , TaskStats (..)
   , FileStats (..)
   , Trials (..)
+  , toTrials
   , Accuracy (..)
   , taskEstimatesAt
   , estimateAccuracy
@@ -186,27 +187,38 @@ accuracyBy groupKey predicted records = getMonoidalMap $ foldMap one records
       | prediction <= 0 = Nothing
       | otherwise       = Just $ singleTrial (measured / prediction)
 
--- TODO: Maybe we don't need all of these quantities
+-- | Observations of one quantity, summarised so that they can be merged
+-- without keeping the observations themselves.
+--
+-- 'mean' and 'variance' are 'Double' whatever is being measured, while 'min'
+-- and 'max' keep the measured type. That is not just because an average of
+-- integers is not an integer: a variance in bytes-squared overflows a 64-bit
+-- 'Int' at 3 GB, and the merge below squares a difference of means before
+-- dividing, which overflows at a 30 MB spread once a group holds a hundred
+-- observations. 'min' and 'max' are only ever compared, never combined
+-- arithmetically, so they can be exact.
 data Trials a = MkTrials
-  { mean      :: a
+  { mean      :: Double
   , min       :: a
   , max       :: a
-  , variance  :: a -- ^ biased variance, i.e. sqrt (<x^2> - <x>^2)
+  , variance  :: Double -- ^ biased variance, i.e. <x^2> - <x>^2
   , numTrials :: Int
   } deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON, NFData)
 
-singleTrial :: Num a => a -> Trials a
-singleTrial x = MkTrials x x x 0 1
+singleTrial :: Real a => a -> Trials a
+singleTrial x = MkTrials (realToFrac x) x x 0 1
 
-toTrials :: (Num a, Semigroup (Trials a)) => NonEmpty a -> Trials a
+toTrials :: Real a => NonEmpty a -> Trials a
 toTrials (x :| xs) = foldr (<>) (singleTrial x) $ map singleTrial xs
 
-instance (Floating a, Ord a) => Semigroup (Trials a) where
+-- | Merging needs nothing of the measured type but 'Ord': the statistics that
+-- require arithmetic are held as 'Double'.
+instance Ord a => Semigroup (Trials a) where
   t1 <> t2 = MkTrials
     { mean      = (t1.mean*n1 + t2.mean*n2)/n12
     , min       = min t1.min t2.min
     , max       = max t1.max t2.max
-    , variance  = sqrt $ (t1.mean-t2.mean)^2*n1*n2/(n12^2) + (n1*t1.variance^2 + n2*t2.variance^2)/n12
+    , variance  = (t1.mean-t2.mean)^2*n1*n2/(n12^2) + (n1*t1.variance + n2*t2.variance)/n12
     , numTrials = t1.numTrials + t2.numTrials
     }
     where
@@ -337,16 +349,14 @@ recordToTaskStats record = MkTaskAndFileStats taskStats fileStats where
   taskStats = MkTaskStats $ case record.taskStatKey of
     Nothing      -> Map.empty
     Just statKey -> Map.singleton statKey (taskResourceMapSingleton record)
-  fileStats = MkFileStats $ Map.map toTrials' $ record.taskFileSizes
-  fromIntegral' = NonEmpty.map fromIntegral
-  toTrials' = toTrials . fromIntegral'
+  fileStats = MkFileStats $ Map.map toTrials record.taskFileSizes
 
--- We need Double instead of Int because of Trials.variance
--- TODO: variance is never used, shall we remove it and switch to Int?
-newtype FileStats = MkFileStats (Map FileStatKey (Trials Double))
+-- | Sizes are exact: 'Trials' keeps its extremes in the measured type, so a
+-- byte count never passes through a 'Double'.
+newtype FileStats = MkFileStats (Map FileStatKey (Trials FileSize))
   deriving stock (Eq, Ord, Show)
   deriving newtype (FromJSON, ToJSON, NFData)
-  deriving (Semigroup, Monoid) via (MonoidalMap FileStatKey (Trials Double))
+  deriving (Semigroup, Monoid) via (MonoidalMap FileStatKey (Trials FileSize))
 
 data TaskAndFileStats = MkTaskAndFileStats TaskStats FileStats
   deriving (Eq, Ord, Show, Generic, FromJSON, ToJSON, NFData)
@@ -354,7 +364,7 @@ data TaskAndFileStats = MkTaskAndFileStats TaskStats FileStats
 
 lookupMaxFileSize :: FileStatKey -> TaskAndFileStats -> Maybe FileSize
 lookupMaxFileSize key (MkTaskAndFileStats _ (MkFileStats fileSizes)) =
-  FileSize <$> ceiling <$> (.max) <$> Map.lookup key fileSizes
+  (.max) <$> Map.lookup key fileSizes
 
 -- | Statistics are grouped by stat key, so lookup is an exact match: a key
 -- that differs (for instance because an estimate-relevant config field

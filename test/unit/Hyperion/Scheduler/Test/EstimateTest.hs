@@ -32,7 +32,8 @@ import Hyperion.Scheduler.Stats            (Accuracy (..), TaskAndFileStats,
                                             TaskEstimates (..), TaskRecord (..),
                                             Trials (..), estimateAccuracy,
                                             fileSizeAccuracy, modelAccuracy,
-                                            recordToTaskStats, taskEstimatesAt)
+                                            recordToTaskStats, taskEstimatesAt,
+                                            toTrials)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             estimatesFromModel,
                                             taskRuntimeEstimate)
@@ -246,6 +247,26 @@ testWrapKeepsMeasuredEstimates = do
   expect "wrapping keeps a measured runtime measured" $
     isMeasuredFromStats estimates.runtime
 
+-- | Merging is the only arithmetic these statistics do, and it had no test.
+-- Checked against the mean and biased variance computed directly from the same
+-- observations.
+testTrialsSummary :: IO ()
+testTrialsSummary = do
+  let
+    xs = [1, 2, 3, 4, 10] :: [Double]
+    trials = toTrials (NonEmpty.fromList xs)
+    reversed = toTrials (NonEmpty.fromList (reverse xs))
+    n = fromIntegral (length xs) :: Double
+    expectedMean = sum xs / n
+    expectedVariance = sum (map (^ (2 :: Int)) xs) / n - expectedMean * expectedMean
+    close a b = abs (a - b) < 1e-9
+  expect "mean of the observations" $ close trials.mean expectedMean
+  expect "biased variance of the observations" $ close trials.variance expectedVariance
+  expect "extremes and count of the observations" $
+    (trials.min, trials.max, trials.numTrials) == (1, 10, 5)
+  expect "the summary does not depend on merge order" $
+    close reversed.mean trials.mean && close reversed.variance trials.variance
+
 -- | A file's declared size survives being overridden by a recorded one, the
 -- same way a task's memory model does.
 testFileSizeKeepsOwnEstimate :: IO ()
@@ -347,6 +368,7 @@ runTest = do
   testDecorateIsIdempotent
   testUnderestimatedMemoryIsReported
   testWrapKeepsMeasuredEstimates
+  testTrialsSummary
   testFileSizeKeepsOwnEstimate
   testFileSizeAccuracy
   testAccuracyRatios
