@@ -63,6 +63,8 @@ instance Exception InvalidTaskMap
 --   assumed to already exist on disk -- see 'assertCorrectDependencyPaths')
 -- - Every task with work to run remotely asks for at least one CPU
 --   (see 'assertComputeTasksHaveCpus')
+-- - No task declares a maxThreads below its minThreads
+--   (see 'assertThreadRangesAreOrdered')
 validateTaskMap :: (IsTask a, MonadThrow m) => TaskMap a -> m ()
 validateTaskMap taskMap = do
   assertAllTasksAreInKeys
@@ -71,12 +73,15 @@ validateTaskMap taskMap = do
   assertNoDuplicatePaths
   assertCorrectDependencyPaths
   assertComputeTasksHaveCpus
+  assertThreadRangesAreOrdered
   where
     assert cond msg = case cond of
       True  -> pure ()
       False -> throwM $ InvalidTaskMap msg
 
     taskLabel t = (taskTag t, taskOutputPaths t)
+
+    stages = [InitialRun, InProgressRun]
 
     assertAllTasksAreInKeys = do
       let
@@ -124,7 +129,25 @@ validateTaskMap taskMap = do
           [ t
           | t <- Map.keys taskMap
           , isJust (taskClosure 0 t)
-          , any (\stage -> taskMinThreads stage t == 0) [InitialRun, InProgressRun]
+          , any (\stage -> taskMinThreads stage t == 0) stages
+          ]
+
+    -- An allocation may give a task no fewer threads than its minimum and no
+    -- more than its maximum, so a maximum below the minimum can be satisfied by
+    -- nothing. 'basicValidAllocation' resolves the contradiction by capping at
+    -- the maximum, handing out fewer threads than the task asked for -- none at
+    -- all when the maximum is zero, which fails the same way
+    -- 'assertComputeTasksHaveCpus' describes, and reaches a task whose minimum
+    -- is positive.
+    assertThreadRangesAreOrdered = assert (null inverted) $
+      "Tasks declare a maxThreads below their minThreads, which no allocation \
+      \can satisfy (task, stage, minThreads, maxThreads): " <> showOs inverted
+      where
+        inverted =
+          [ (taskLabel t, stage, taskMinThreads stage t, taskMaxThreads stage t)
+          | t <- Map.keys taskMap
+          , stage <- stages
+          , taskMaxThreads stage t < taskMinThreads stage t
           ]
 
     -- Each input path for a task either:

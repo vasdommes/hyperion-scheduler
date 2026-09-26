@@ -25,6 +25,7 @@ import Hyperion.Scheduler.Types    (Estimate (..), MemorySize, NumCPUs,
 -- the task config). TODO: Really, minThreads and maxThreads should be able
 -- to depend on stats. How do we achieve that?
 data RunStage = InitialRun | InProgressRun
+  deriving (Eq, Ord, Show)
 
 type Tag = Text
 

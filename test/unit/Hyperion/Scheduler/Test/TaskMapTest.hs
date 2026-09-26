@@ -47,6 +47,7 @@ data TestTask = MkTestTask
     -- ^ Whether the task has something to run remotely. The closure itself is
     -- never forced: these tests only ask whether one exists.
   , minThreads    :: NumCPUs
+  , maxThreads    :: NumCPUs
   } deriving (Eq, Ord, Show, Generic, ToJSON)
 
 -- | A file's identity in these fixtures is just its path.
@@ -70,6 +71,7 @@ instance IsTask TestTask where
     | t.computes = Just $ error "TestTask closure is never run"
     | otherwise  = Nothing
   taskMinThreads _ t  = t.minThreads
+  taskMaxThreads _ t  = t.maxThreads
   taskIsPlaceholder t = t.isPlaceholder
 
 testTask :: String -> [OsPath] -> [OsPath] -> TestTask
@@ -80,6 +82,7 @@ testTask name ins outs = MkTestTask
   , isPlaceholder = False
   , computes      = False
   , minThreads    = 1
+  , maxThreads    = 1
   }
 
 -- * A placeholder TaskKey, exercising the real 'TaskKind' machinery
@@ -243,6 +246,17 @@ testInstrumentationGaps = do
   expect "a task that computes nothing is not reported" $
     Set.null (gapsOf (testTask "A" [] [q]))
 
+-- | A maximum below the minimum can be satisfied by no allocation, and the
+-- allocator resolves it by capping at the maximum -- handing the task fewer
+-- threads than it asked for, or none at all.
+testThreadRangesAreOrdered :: IO ()
+testThreadRangesAreOrdered = do
+  let computing = (testTask "A" [] [q]) { computes = True }
+  expectInvalid "maxThreads below minThreads is invalid" $
+    taskMapOf computing { minThreads = 2, maxThreads = 1 }
+  expectValid "maxThreads equal to minThreads is valid" $
+    taskMapOf computing { minThreads = 2, maxThreads = 2 }
+
 runTest :: IO ()
 runTest = do
   testPrunedInputIsValid
@@ -254,5 +268,6 @@ runTest = do
   testNoOpTaskKeySemantics
   testPlaceholdersOfType
   testComputeTasksHaveCpus
+  testThreadRangesAreOrdered
   testInstrumentationGaps
   putStrLn "All TaskMap tests passed."
