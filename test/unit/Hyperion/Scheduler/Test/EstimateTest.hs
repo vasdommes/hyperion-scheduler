@@ -32,9 +32,11 @@ import Hyperion.Scheduler.StatKey          (IsFileStatKey (..), IsStatKey (..),
 import Hyperion.Scheduler.Stats            (Accuracy (..), TaskAndFileStats,
                                             TaskEstimates (..), TaskRecord (..),
                                             Trials (..), estimateAccuracy,
-                                            fileSizeAccuracy, lookupMaxFileSize,
-                                            modelAccuracy, recordToTaskStats,
-                                            taskEstimatesAt, toTrials)
+                                            estimateFileSizeAccuracy,
+                                            lookupMaxFileSize, modelAccuracy,
+                                            modelFileSizeAccuracy,
+                                            recordToTaskStats, taskEstimatesAt,
+                                            toTrials)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             estimatesFromModel,
                                             taskRuntimeEstimate)
@@ -312,8 +314,8 @@ testFileSizeAccuracy = do
   let
     records = [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
     fileStatKey = encodeFileStatKey (MkEstFileStatKey "A")
-    modelRatio = (.mean) <$> Map.lookup fileStatKey (fileSizeAccuracy modelEstimate records)
-    scheduledRatio = (.mean) <$> Map.lookup fileStatKey (fileSizeAccuracy schedulingEstimate records)
+    modelRatio = (.mean) <$> Map.lookup fileStatKey (modelFileSizeAccuracy records)
+    scheduledRatio = (.mean) <$> Map.lookup fileStatKey (estimateFileSizeAccuracy records)
   -- An undecorated record predicts the declared 100 bytes either way.
   expect "a file 41x bigger than declared scores 40.96" $
     modelRatio == Just 40.96

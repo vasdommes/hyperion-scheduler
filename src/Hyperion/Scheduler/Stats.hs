@@ -24,7 +24,9 @@ module Hyperion.Scheduler.Stats
   , estimateAccuracy
   , modelAccuracy
   , accuracyBy
-  , fileSizeAccuracy
+  , estimateFileSizeAccuracy
+  , modelFileSizeAccuracy
+  , fileSizeAccuracyBy
   , recordToTaskStats
   , approxRuntime
   , maxMemory
@@ -100,9 +102,9 @@ data TaskEstimates = MkTaskEstimates
     -- ^ At the 'NumCPUs' the task was given, so it pairs with 'taskRuntime'.
   , fileSizes :: Map FileStatKey (Estimate FileSize)
     -- ^ Keyed as 'taskFileSizes' is, so predicted and actual sizes line up key
-    -- by key. Covers inputs as well as outputs, while only output sizes are
-    -- measured, so a record can predict a size it has no measurement for -- the
-    -- task that produced that file has it.
+    -- by key. Output files only, because those are the ones a run measures; an
+    -- input's predicted size belongs to the record of the task that produced
+    -- it.
   } deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
 -- | The estimates a task was scheduled on, as of the given CPU allocation.
@@ -116,7 +118,7 @@ taskEstimatesAt numCpus task = MkTaskEstimates
   -- discards are equal anyway.
   , fileSizes = Map.fromListWith max
       [ (statKey, info.fileSize)
-      | info <- Set.toList $ Set.union (taskInputs task) (taskOutputs task)
+      | info <- Set.toList (taskOutputs task)
       , Just statKey <- [info.fileStatKey]
       ]
   }
@@ -134,11 +136,23 @@ data Accuracy = MkAccuracy
   deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
   deriving (Semigroup, Monoid) via (Generically Accuracy)
 
--- | How measured file sizes compare with what was predicted for them, grouped
--- by file stat key. Only sizes that were both predicted and measured are
--- scored, which in one record means its output files.
-fileSizeAccuracy :: (forall x . Estimate x -> x) -> [TaskRecord a] -> Map FileStatKey (Trials Double)
-fileSizeAccuracy predicted records = getMonoidalMap $ foldMap one records
+-- | 'estimateAccuracy' for the sizes of the files a run produced.
+estimateFileSizeAccuracy :: [TaskRecord a] -> Map FileStatKey (Trials Double)
+estimateFileSizeAccuracy = fileSizeAccuracyBy schedulingEstimate
+
+-- | 'modelAccuracy' for the sizes of the files a run produced, i.e. whether
+-- 'Hyperion.Scheduler.StatKey.fileSizeEstimate' needs fixing.
+modelFileSizeAccuracy :: [TaskRecord a] -> Map FileStatKey (Trials Double)
+modelFileSizeAccuracy = fileSizeAccuracyBy modelEstimate
+
+-- | 'accuracyBy' for file sizes, which need no grouping function: a file stat
+-- key is what they are grouped by. A size is scored where it was both predicted
+-- and measured, so a file whose size could not be measured is left out.
+fileSizeAccuracyBy
+  :: (forall x . Estimate x -> x)
+  -> [TaskRecord a]
+  -> Map FileStatKey (Trials Double)
+fileSizeAccuracyBy predicted records = getMonoidalMap $ foldMap one records
   where
     one record = MonoidalMap $ Map.mapMaybe id $
       Map.intersectionWith score record.taskFileSizes record.taskEstimates.fileSizes
