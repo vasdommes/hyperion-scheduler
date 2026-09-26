@@ -123,13 +123,24 @@ instance
   toStatKey _ _ = Just MkMultiplyStatKey
   tag _ = Just "Multiply"
 
-instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
-  type FileStatKeyOf (MultiplyKey a) = MultiplyKey a
-  fileStatKeyOf = Just
+-- | A file holding one serialized 'Int'. Both products and vector elements
+-- write one, and a file's size is a property of what was computed rather than of
+-- which task computed it, so they share a single group -- which sees every such
+-- file in the run rather than a fraction of them.
+--
+-- Projecting a key onto itself would instead put every file in a group of its
+-- own, which can report the size of a file already produced but can never
+-- predict a new one.
+data IntFileStatKey = MkIntFileStatKey
+  deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
--- | Every product is one Int, so all of them share a size.
-instance LinearTransformContext a => IsFileStatKey (MultiplyKey a) where
-  fileSizeEstimate = const 1
+instance IsFileStatKey IntFileStatKey where
+  fileSizeEstimate _ = 8
+
+-- NB: needs nothing of the key, hence nothing of its context either.
+instance ToFileStatKey (MultiplyKey a) where
+  type FileStatKeyOf (MultiplyKey a) = IntFileStatKey
+  fileStatKeyOf _ = Just MkIntFileStatKey
 
 -- | One element of an output vector, @sum_k A_ik x_k@.
 data VectorElementKey a = MkVectorElementKey
@@ -192,13 +203,12 @@ instance
       liftIO $ Log.info "Computing vector element" (key, inputs, outputPath)
       runVectorElementScript inputs (key, outputPath)
 
-instance LinearTransformContext a => ToFileStatKey (VectorElementKey a) where
-  type FileStatKeyOf (VectorElementKey a) = VectorElementKey a
-  fileStatKeyOf = Just
-
--- | One Int per element, as for 'MultiplyKey'.
-instance LinearTransformContext a => IsFileStatKey (VectorElementKey a) where
-  fileSizeEstimate = const 1
+-- | An element is one Int, exactly as a product is, so it shares that group.
+-- Its /task/ statistics cannot be shared with a product's: runtime grows with
+-- the number of terms summed, while the file stays one Int.
+instance ToFileStatKey (VectorElementKey a) where
+  type FileStatKeyOf (VectorElementKey a) = IntFileStatKey
+  fileStatKeyOf _ = Just MkIntFileStatKey
 
 -- | The vector @x_i@ entering layer @i@.
 data VectorKey a = MkVectorKey
@@ -235,17 +245,21 @@ instance
  , ToFileStatKey (VectorKey a)
  ) => TaskKey (VectorKey a) where
   type StatKeyOf (VectorKey a) = VectorStatKey
-  toStatKey _ key = Just MkVectorStatKey
-    { size = layerInputVectorLength key.layerIndex key.ctx }
+  toStatKey _ key = Just MkVectorStatKey { size = key.length }
   tag _ = Just "Vector"
 
-instance LinearTransformContext a => ToFileStatKey (VectorKey a) where
-  type FileStatKeyOf (VectorKey a) = VectorKey a
-  fileStatKeyOf = Just
+-- | Here the task stat key does double duty: a vector's file size and the work
+-- of gathering it both depend on its length and nothing else, so one projection
+-- -- the very same one 'toStatKey' makes -- serves both, and there is no second
+-- type to declare. Reuse a task stat key only when that is true: an element's
+-- runtime and file size disagree, so 'VectorElementKey' cannot.
+instance ToFileStatKey (VectorKey a) where
+  type FileStatKeyOf (VectorKey a) = VectorStatKey
+  fileStatKeyOf key = Just MkVectorStatKey { size = key.length }
 
--- | A vector's file scales with its length.
-instance LinearTransformContext a => IsFileStatKey (VectorKey a) where
-  fileSizeEstimate key = fromIntegral key.length
+-- | A serialized @Vector Int@: one Int per element, after a length prefix.
+instance IsFileStatKey VectorStatKey where
+  fileSizeEstimate key = fromIntegral (8 * key.size + 8)
 
 -- | Vectors of equal size share statistics, whichever layer they belong to.
 newtype VectorStatKey = MkVectorStatKey { size :: Int }
@@ -339,12 +353,12 @@ instance Typeable a => Static (PathResolver LinearPathResolver (VectorElementKey
 instance (Typeable a, Static(LinearTransformContext a)) => Static (PathResolver LinearPathResolver (VectorKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
 
-instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (MultiplyKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
-instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (VectorElementKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
-instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (VectorKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
+instance Typeable a => Static (ToFileStatKey (MultiplyKey a)) where
+  closureDict = static Dict
+instance Typeable a => Static (ToFileStatKey (VectorElementKey a)) where
+  closureDict = static Dict
+instance Typeable a => Static (ToFileStatKey (VectorKey a)) where
+  closureDict = static Dict
 
 instance
   ( Typeable a
