@@ -28,7 +28,7 @@ import Hyperion.Scheduler.StatKey          (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             Tag, taskInputPaths,
-                                            taskMemoryEstimate, taskOutputPaths)
+                                            taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
 import Hyperion.Scheduler.Types            (isMeasuredFromStats, modelEstimate,
@@ -162,6 +162,10 @@ placeholdersOfType taskMap =
 -- | A way in which a task is not instrumented, i.e. will be scheduled on a
 -- guess rather than on a declared or measured figure.
 --
+-- These read what a task /declares/, never a figure recovered from statistics:
+-- a task that declares nothing is a gap whether or not this particular run
+-- happens to have history for it, since the next machine may have none.
+--
 -- There are two independent axes -- task statistics and file statistics -- and
 -- the two gaps on each axis are mutually exclusive. A task is therefore
 -- reported at most once per axis: one that declares no stat key at all is not
@@ -203,16 +207,15 @@ taskInstrumentationGaps taskMap = Map.fromListWith Set.union
   where
     statGaps t
       | isNothing (taskStatKey t) = [NoStatKey]
-      | taskMemoryEstimate t == 0 = [ZeroMemoryEstimate]
+      | declaredMemory t == 0      = [ZeroMemoryEstimate]
       | otherwise                 = []
 
-    -- NB: by the time 'runTasks' sees the map these sizes may already have
-    -- been replaced by measurements, so zero here means neither estimated nor
-    -- ever recorded.
+    declaredMemory t = modelEstimate (taskResourceEstimates t).memory
+
     fileGaps t
       | Set.null outputs                              = []
       | all (isNothing . (.fileStatKey)) outputsList  = [NoFileStatKey]
-      | all ((== 0) . schedulingEstimate . (.fileSize)) outputsList = [ZeroFileSizeEstimate]
+      | all ((== 0) . modelEstimate . (.fileSize)) outputsList = [ZeroFileSizeEstimate]
       | otherwise                                     = []
       where
         outputs = taskOutputs t
