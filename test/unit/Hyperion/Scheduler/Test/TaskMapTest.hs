@@ -28,8 +28,8 @@ import Hyperion.Scheduler.StatKey      (TaskKeyFileInfo (..),
                                         ToFileStatKey (..),
                                         mkFileStatKeyViaJSON)
 import Hyperion.Scheduler.Task.IsTask  (IsTask (..), taskInputPaths)
-import Hyperion.Scheduler.Task.Task    (DepKeys, ListTaskKey (..), TaskKey (..),
-                                        TaskKind (..), dependencies, outKeys)
+import Hyperion.Scheduler.Task.Task    (DepKeys, TaskKey (..), TaskKind (..),
+                                        dependencies, listTaskKey, outKeys)
 import Hyperion.Scheduler.Task.TaskMap (TaskMap, placeholdersOfType,
                                         replaceTasks, validateTaskMap)
 
@@ -172,7 +172,7 @@ testPlaceholderTaskKeySemantics = do
 -- element.
 testNoOpTaskKeySemantics :: IO ()
 testNoOpTaskKeySemantics = do
-  let listKey = MkListTaskKey [MkPKey "a", MkPKey "b"]
+  let listKey = listTaskKey [MkPKey "a", MkPKey "b"]
   expect "list task has no outputs" $
     Set.null (outKeys () listKey)
   expect "list task depends on all its elements" $
