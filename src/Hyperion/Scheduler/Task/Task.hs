@@ -37,7 +37,7 @@ import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
-import Data.Text                           qualified as Text
+import Data.Text                           (Text)
 import Data.Time                           (NominalDiffTime)
 import Data.Typeable                       (cast, typeOf)
 import Data.Void                           (Void)
@@ -52,7 +52,9 @@ import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
-                                            defaultRuntimeEstimate)
+                                            defaultRuntimeEstimate,
+                                            defaultTaskTag,
+                                            defaultTaskTagForType)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
@@ -232,8 +234,8 @@ class ( All Eq (DepKeys k)
     NoOpTask _ -> 0
     _          -> 1
 
-  tag        :: k -> Maybe Tag
-  tag = Just . Text.pack . show . typeOf
+  tag :: k -> Maybe Tag
+  tag = defaultTaskTag
   priority :: k -> Int
   priority = const 0
 
@@ -455,15 +457,23 @@ instance {-# OVERLAPPABLE #-}
   taskChain resolver cfg = TaskNode (wrapTask <$> taskLink resolver cfg) (taskChain resolver cfg)
 
 
-newtype ListTaskKey k = MkListTaskKey [k]
-  deriving stock (Eq, Ord, Show)
-  deriving newtype (Binary, ToJSON)
+data ListTaskKey k = MkListTaskKey
+  { tag  :: Maybe Text
+  , keys :: [k]
+  }
+  deriving (Generic, Eq, Ord, Show, Binary, ToJSON)
+
+-- Create ListTaskKey with default tag = "ListTaskKey MyKey" (for k ~ MyKey)
+-- Use 'MkListTaskKey myTag myKeys' or 'listTaskKey myKeys { tag = myTag }' to override it.
+listTaskKey :: forall k. Typeable k => [k] -> ListTaskKey k
+listTaskKey = MkListTaskKey $ defaultTaskTagForType @(ListTaskKey k)
 
 type instance DepKeys (ListTaskKey k) = '[k]
 instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
   type OutKey (ListTaskKey k) = Void
 
-  taskKind = NoOpTask $ \(MkListTaskKey keys) -> traverse_ getPath keys
+  taskKind = NoOpTask $ \t -> traverse_ getPath t.keys
+  tag t = t.tag
 
 instance (Typeable k , Static(Binary k)) => Static (Binary (ListTaskKey k)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary k)
