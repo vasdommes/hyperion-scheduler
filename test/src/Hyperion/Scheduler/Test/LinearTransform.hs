@@ -445,7 +445,8 @@ linearTransformJob getSchedulerConfig baseDir problem = do
         removePathForcibly resolver.outDir
         createDirectoryIfMissing True resolver.outDir
       taskMap <- Scheduler.decorateTaskMapWithStats stats <$> mkTaskMap resolver () outputVectorKey
-      taskRecords <- Scheduler.runTasks schedulerConfig taskMap
+      (taskRecords, schedulerStats) <- Scheduler.runTasksWithStats schedulerConfig taskMap
+      encodeJsonFileAtomic (problemDir </> "scheduler_stats_" <> pass <.> "json") schedulerStats
       checkOutputVector resolver
       pure taskRecords
 

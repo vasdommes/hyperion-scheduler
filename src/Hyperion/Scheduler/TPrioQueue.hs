@@ -39,6 +39,10 @@ read (MkTPrioQueue qVar _) = do
   writeTVar qVar queue'
   pure x
 
+-- | Number of elements in the queue.
+size :: TPrioQueue k a -> STM Int
+size (MkTPrioQueue qVar _) = MaxQueue.size <$> readTVar qVar
+
 -- | Return the first element of a TPrioQueue, or Nothing if
 -- the queue is empty. Does not block. Modeled on 'tryPeekTQueue'.
 tryPeek :: TPrioQueue k a -> STM (Maybe a)

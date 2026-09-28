@@ -6,9 +6,16 @@
 {-# LANGUAGE StaticPointers        #-}
 
 module Hyperion.Scheduler.RunTasks
-(runTasks)
+( runTasks
+, runTasksWithStats
+, SchedulerStats (..)
+, TimerStats (..)
+, Sample (..)
+)
 where
 
+import Control.Concurrent                           (forkIO, killThread,
+                                                     threadDelay)
 import Control.Concurrent.STM                       (TVar, atomically, check,
                                                      newTVarIO, readTVar,
                                                      writeTVar)
@@ -19,10 +26,13 @@ import Control.Distributed.Process.Async            (Async)
 import Control.Distributed.Process.Async            qualified as Async
 import Control.Monad                                (foldM, forM_, forever,
                                                      unless, when)
-import Control.Monad.Catch                          (Handler (..), catches)
+import Control.Monad.Catch                          (Handler (..), bracket,
+                                                     catches)
 import Control.Monad.IO.Class                       (liftIO)
 import Control.Monad.Reader                         (lift)
 import Control.Monad.Writer                         (Writer, runWriter, tell)
+import Data.IORef                                   (modifyIORef', newIORef,
+                                                     readIORef)
 import Data.List.Extra                              (nubOrd, partition, sortOn)
 import Data.List.NonEmpty                           (NonEmpty (..))
 import Data.List.NonEmpty                           qualified as NonEmpty
@@ -33,6 +43,7 @@ import Data.Maybe                                   (catMaybes, fromMaybe,
                                                      mapMaybe)
 import Data.Set                                     (Set)
 import Data.Set                                     qualified as Set
+import Data.Text                                    (Text)
 import Data.Time.Clock                              (addUTCTime, diffUTCTime,
                                                      getCurrentTime)
 import Hyperion                                     (Job, Process, RemoteError)
@@ -66,6 +77,15 @@ import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
 import Hyperion.Scheduler.RunTasks.ProgressMap      qualified as ProgressMap
 import Hyperion.Scheduler.RunTasks.RemoteRunTask    (RemoteRunTaskResult (..),
                                                      remoteRunTask)
+import Hyperion.Scheduler.RunTasks.SchedulerStats   (Instruments (..),
+                                                     Sample (..),
+                                                     SchedulerStats (..),
+                                                     TimerStats (..),
+                                                     countEvent, getSeconds,
+                                                     incrGauge, newInstruments,
+                                                     readGauge, readTimers,
+                                                     recordTime, timed,
+                                                     withGauge)
 import Hyperion.Scheduler.RunTasks.Shared           (Shared (..), newShared,
                                                      readShared)
 import Hyperion.Scheduler.RunTasks.Shared           qualified as Shared
@@ -144,6 +164,7 @@ allNodesStalling statuses = case nubOrd statuses of
 runNodeLoop
   :: forall a . IsTask a
   => Config
+  -> Instruments
   -> Node
   -> FileService
   -> WorkerPool
@@ -160,6 +181,7 @@ runNodeLoop
   -> Job ()
 runNodeLoop
   config
+  instruments
   node
   fileService
   workerPool
@@ -192,6 +214,8 @@ runNodeLoop
   forever getAndRunTasks
 
   where
+    timers = instruments.timers
+
     reserveLocalTaskFiles :: a -> Process (Response, Map VirtualFilePath FileSize)
     reserveLocalTaskFiles t = do
       let localFiles = Set.filter (isNodeLocal config) $ Set.union (taskInputPaths t) (taskOutputPaths t)
@@ -225,6 +249,7 @@ runNodeLoop
         return maybeTask
       -- Optimize for the case (freeCpus == 0), avoid extra synchronization in dequeueTask
       else do
+        countEvent timers "nodeLoop.attempt.noFreeCpus"
         liftIO $ atomically $ writeTVar isNodeStallingVar NotStalling
         return Nothing
 
@@ -243,18 +268,32 @@ runNodeLoop
     --     to ensure `atomic` behaviour guarded by taskQueueLock.
     --     This ensures that the correct task is passed to isNodeStallingVar.
     dequeueTask :: MemorySize -> NumCPUs -> Job (Maybe a, Maybe a)
-    dequeueTask freeMem freeCpus = lift $ withLock taskQueueLock $ do
+    dequeueTask freeMem freeCpus = lift $ do
+      requested <- getSeconds
+      withLock taskQueueLock $ do
+        acquired <- getSeconds
+        recordTime timers "dequeue.lockWait" (acquired - requested)
+        (outcome, result) <- dequeueLocked freeMem freeCpus
+        released <- getSeconds
+        recordTime timers ("dequeue.lockHold." <> outcome) (released - acquired)
+        pure result
+
+    -- The body of 'dequeueTask', run under 'taskQueueLock'. Also returns
+    -- the outcome, to name the lock hold timer.
+    dequeueLocked :: MemorySize -> NumCPUs -> Process (Text, (Maybe a, Maybe a))
+    dequeueLocked freeMem freeCpus = do
       maybeTask <- liftIO $ atomically $ TPrioQueue.tryPeek taskQueue
       case maybeTask of
         Just t -> do
           if (taskMemoryCapped node.memory t <= freeMem && taskMinThreads InProgressRun t <= freeCpus) then do
-            (response, localFileSizes) <- reserveLocalTaskFiles t
+            (response, localFileSizes) <- timed timers "dequeue.reserveFiles" $ reserveLocalTaskFiles t
             case response of
               ReserveSuccess -> do
                 -- Mark input files as used, so they won't be deleted until the task finishes.
                 -- NB: this should be done now (and not in remoteRunAndUpdateNodeStatus before/after fetching)
                 -- to ensure that the Reserve request from the next `dequeueTask` will not try to delete these files.
-                _ <- checkChangeActiveUsagesResponse <$> incrementActiveFileUsages fileService (taskInputPaths t) node.address
+                _ <- checkChangeActiveUsagesResponse <$> timed timers "dequeue.incrementUsages"
+                  (incrementActiveFileUsages fileService (taskInputPaths t) node.address)
                 (newTask, mNextTaskInQueue) <- liftIO $ atomically $ do
                   liftA2 (,) (TPrioQueue.read taskQueue) (TPrioQueue.tryPeek taskQueue)
                 notifyChangeM taskQueueNotifier
@@ -264,18 +303,18 @@ runNodeLoop
                     "Non-atomic dequeueTask: someone else modified taskQueue without taking taskQueueLock! (peekTask,readTask): "
                     ++ show (taskInfo' t, taskInfo' newTask)
                 else
-                  return $ (Just newTask, mNextTaskInQueue)
+                  return ("dispatched", (Just newTask, mNextTaskInQueue))
               ReserveLimitExceeded _ _ -> do
                 -- TODO: if all CPUs are free, shall we try to run the next task? Makes sense if it would help with cleanup.
                 -- TODO: if all CPUs on all nodes are free, we should definitely do something. Either take another task or throw error and exit.
                 Log.text $ "WARN: Cannot dequeue task, waiting until more local storage space becomes available: " <> Log.showText
                   -- TODO: we print only one of the files to make logs more compact
                   (response, node.address, taskTag t, listToMaybe $ Map.toAscList localFileSizes)
-                pure (Nothing, maybeTask)
+                pure ("noDiskSpace", (Nothing, maybeTask))
               _ -> Log.throwError $ "Failed to reserve space for task files: " ++ show (response, localFileSizes)
           else
-            pure (Nothing, maybeTask)
-        Nothing -> pure (Nothing, maybeTask)
+            pure ("doesNotFit", (Nothing, maybeTask))
+        Nothing -> pure ("queueEmpty", (Nothing, maybeTask))
 
     -- Grow newTasks by repeatedly dequeueing from the taskQueue until
     -- we have no more free cpus or memory. This operation is not
@@ -305,8 +344,8 @@ runNodeLoop
     -- all the tasks that can fit on the available resources.
     getNewTasks :: Job (NonEmpty a)
     getNewTasks = do
-      newTask <- blockUntilNewTask
-      getMoreTasks (NonEmpty.singleton newTask)
+      newTask <- timed timers "nodeLoop.blockUntilNewTask" blockUntilNewTask
+      timed timers "nodeLoop.getMoreTasks" $ getMoreTasks (NonEmpty.singleton newTask)
 
     runRemoteTasks :: CPUAllocation a -> Job ()
     runRemoteTasks allocation = do
@@ -319,12 +358,15 @@ runNodeLoop
       -- Add all the tasks to NodeStatus
       liftIO $ Shared.withWrite_ nodeStatusVar $
         \s -> foldr NodeStatus.addTask s allocList
-      mapM_ spawnTask allocList
+      timed timers "nodeLoop.spawnTasks" $ mapM_ spawnTask allocList
 
     -- Run a RemoteTask and update NodeStatus when the task is
     -- finished.
     remoteRunAndUpdateNodeStatus :: (a, NumCPUs) -> Job ()
-    remoteRunAndUpdateNodeStatus t@(task, numCpus) = withWorkersFromPool workerPool node.address numCpus $ \workers -> do
+    remoteRunAndUpdateNodeStatus t@(task, numCpus) = withGauge instruments.inFlight $ do
+     dispatched <- getSeconds
+     withWorkersFromPool workerPool node.address numCpus $ \workers -> do
+      getSeconds >>= \acquired -> recordTime timers "task.acquireWorkers" (acquired - dispatched)
       -- TODO:
       -- Resolve input/output file paths from taskInfo, using pathResolveMapVar. Put output files to Data.Bimap?
       let localVirtualPaths = Set.filter (isNodeLocal config) $ taskInputPaths task
@@ -362,7 +404,8 @@ runNodeLoop
       -- Shall we redirect all logs to a single file?
       _ <- when (not $ Set.null localInputPaths) $ do
         reusableWorkers <- mapM toReusableWorker workers
-        fetchResponse <- lift $ fetchFilesToNode fileService localInputPaths node.address reusableWorkers
+        fetchResponse <- timed timers "task.fetchInputs" $ lift $
+          fetchFilesToNode fileService localInputPaths node.address reusableWorkers
         lift $ checkFetchResponse fetchResponse
 
       -- If numCpus == 0, the task is not in fact running remotely (see CleanupTask and BoundTask).
@@ -373,11 +416,12 @@ runNodeLoop
 
       -- TODO for debug
       selfPid <- lift getSelfPid
-      Log.info "remoteRunTask (masterPid,workerId,tag,numCPUs,priority,outputPaths)"
+      timed timers "task.logStart" $ Log.info "remoteRunTask (masterPid,workerId,tag,numCPUs,priority,outputPaths)"
         (selfPid, workerCpuIdToString <$> (.workerId) <$> firstWorker, taskTag task, numCpus, taskQueue.elemPriority task, taskOutputPaths task)
 
       start <- liftIO getCurrentTime
-      res <- remoteRunTask firstWorker numCpus task
+      res <- withGauge instruments.running $ timed timers "task.remoteRun" $
+        remoteRunTask firstWorker numCpus task
       end <- liftIO getCurrentTime
       let
         -- TODO: currently afterReturnRemoteRunTaskResult measures file sizes only for taskOutputs
@@ -398,16 +442,18 @@ runNodeLoop
       -- Add to Sheduler's FilePathResolveMap the files created by this task. This should happen before adding the task to finishedTaskQueue.
       liftIO $ Shared.withWrite_ pathResolveMapVar $ Map.unionWithKey onDuplicate outputPathsMap
       liftIO $ Shared.withWrite_ nodeStatusVar $ NodeStatus.removeTask t
+      getSeconds >>= \freed -> recordTime timers "task.slot" (freed - dispatched)
 
       -- Map.union is left-biased and thus will override old file sizes (or estimates)
       liftIO $ Shared.withWrite_ fileSizeMapVar $ Map.union res.remoteTaskFileSizes
-      registerRes <- lift $ registerFilesOnNode fileService res.remoteTaskFileSizes node.address
+      registerRes <- timed timers "task.registerOutputs" $ lift $
+        registerFilesOnNode fileService res.remoteTaskFileSizes node.address
       case registerRes of
         RegisterSuccess -> pure ()
         _               -> Log.throwError $ "Failed to register output files: " ++ show (node.address, registerRes)
 
-      _ <- lift $ checkChangeActiveUsagesResponse <$>
-        decrementActiveFileUsages fileService (taskInputPaths task) node.address
+      _ <- lift $ checkChangeActiveUsagesResponse <$> timed timers "task.decrementUsages"
+        (decrementActiveFileUsages fileService (taskInputPaths task) node.address)
 
       -- TODO: use a node-specific TChangeNotifier here?
       notifyChangeM taskQueueNotifier
@@ -424,6 +470,8 @@ runNodeLoop
         , taskEstimates = taskEstimatesAt numCpus task
         , taskStatKey = taskStatKey task
         }
+      getSeconds >>= \done -> recordTime timers "task.total" (done - dispatched)
+      incrGauge instruments.finished
       -- NB: this should be the last operation, since the nodeLoop process is killed
       -- after monitorProgressAndDeps reads the last task from finishedTaskQueue!
       liftIO $ writeQueue finishedTaskQueue task
@@ -437,8 +485,8 @@ runNodeLoop
         allocation = allocateCpusToTasks InProgressRun freeCpus (NonEmpty.toList newTasks)
       runRemoteTasks allocation
 
-cleanupLoop :: Config -> FileService -> TChangeNotifier -> CleanupQueue -> Job ()
-cleanupLoop config fileService taskQueueNotifier cleanupQueue =
+cleanupLoop :: Config -> Instruments -> FileService -> TChangeNotifier -> CleanupQueue -> Job ()
+cleanupLoop config instruments fileService taskQueueNotifier cleanupQueue =
   lift $ labelMyThread "scheduler: cleanupLoop" >> go
   where
   go = do
@@ -453,7 +501,8 @@ cleanupLoop config fileService taskQueueNotifier cleanupQueue =
         FileDoesNotExist -> pure ()
         _ -> do Log.err $ "Unexpected response: " <> show (response, localPaths)
 
-    localResponses <- deleteFilesFromAllNodes fileService localPaths
+    localResponses <- timed instruments.timers "cleanup.deleteLocalFiles" $
+      deleteFilesFromAllNodes fileService localPaths
     mapM_ checkResponse localResponses
 
     globalResponses <- deleteGlobalFiles fileService globalPaths
@@ -474,6 +523,7 @@ cleanupLoop config fileService taskQueueNotifier cleanupQueue =
 monitorProgressAndDeps
   :: IsTask a
   => Config
+  -> Instruments
   -> TPrioQueue TaskPriority a
   -> TChangeNotifier
   -> Lock
@@ -484,7 +534,7 @@ monitorProgressAndDeps
   -> Map Node (Shared IO NodeStatus, TVar (IsNodeStalling a))
   -> ProgressMap
   -> Job ()
-monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finishedTaskQueue taskGraph initCleanupDepCounts cleanupQueue nodeStatusMap initProgressMap = do
+monitorProgressAndDeps config instruments taskQueue taskQueueNotifier taskQueueLock finishedTaskQueue taskGraph initCleanupDepCounts cleanupQueue nodeStatusMap initProgressMap = do
   labelMyThread "scheduler: monitorProgressAndDeps"
   Log.info "Building" (catMaybes (Map.keys initProgressMap))
   report initProgressMap
@@ -498,7 +548,8 @@ monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finished
 
   let initDepCounts = TaskGraph.dependencyCounts taskGraph
   -- TODO initialize initCleanupDepCounts here instead of passing it
-  go start initDepCounts initCleanupDepCounts initProgressMap
+  startSeconds <- getSeconds
+  go start startSeconds initDepCounts initCleanupDepCounts initProgressMap
 
   _ <- lift $ Async.cancelWait monitorStallingHandle
 
@@ -517,26 +568,40 @@ monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finished
     reportIfAfterInterval lastReportTime progressMap = do
       now <- liftIO getCurrentTime
       if now > addUTCTime config.reportInterval lastReportTime
-        then report progressMap >> pure now
+        then timed timers "monitor.report" (report progressMap) >> pure now
         else pure lastReportTime
 
-    go lastReportTime depCounts cleanupDepCounts progressMap
+    timers = instruments.timers
+
+    -- 'lastReceived': when the previous finished task was read, so that the
+    -- time until the next read (forcing this iteration's lazy updates
+    -- included) is recorded as processing.
+    go lastReportTime lastReceived depCounts cleanupDepCounts progressMap
       | ProgressMap.isFinished progressMap = do
         writeQueue cleanupQueue Nothing
         pure ()
       | otherwise = do
+          waiting <- getSeconds
+          recordTime timers "monitor.processFinishedTask" (waiting - lastReceived)
           finishedTask <- liftIO $ readQueue finishedTaskQueue
+          received <- getSeconds
+          recordTime timers "monitor.waitFinishedTask" (received - waiting)
           let
             progressMap' = ProgressMap.update finishedTask progressMap
             (depCounts', newTasks) = TaskGraph.decrementReverseDependencies taskGraph depCounts finishedTask
             filesToCleanup = taskFilesToCleanup config finishedTask
             (cleanupDepCounts', pathsToCleanup) = runWriter $
               decrementCleanupCounts filesToCleanup cleanupDepCounts
-          withLock taskQueueLock $ mapM_ (TPrioQueue.write taskQueue) newTasks
+          requested <- getSeconds
+          withLock taskQueueLock $ do
+            acquired <- getSeconds
+            recordTime timers "monitor.lockWait" (acquired - requested)
+            mapM_ (TPrioQueue.write taskQueue) newTasks
+            getSeconds >>= \released -> recordTime timers "monitor.lockHold" (released - acquired)
           writeListQueue cleanupQueue $ map Just pathsToCleanup
           notifyChangeM taskQueueNotifier
           lastReportTime' <- reportIfAfterInterval lastReportTime progressMap'
-          go lastReportTime' depCounts' cleanupDepCounts' progressMap'
+          go lastReportTime' received depCounts' cleanupDepCounts' progressMap'
 
     -- Wait until all nodes are stalling.
     waitForGlobalStalling :: Process ()
@@ -559,7 +624,16 @@ runTasks
   => Config
   -> TaskMap a
   -> Job (TaskRecords a)
-runTasks config taskMap = do
+runTasks config taskMap = fst <$> runTasksWithStats config taskMap
+
+-- | 'runTasks', also returning where the scheduler spent its time. The
+-- timers are logged at the end as well.
+runTasksWithStats
+  :: IsTask a
+  => Config
+  -> TaskMap a
+  -> Job (TaskRecords a, SchedulerStats)
+runTasksWithStats config taskMap = do
   let
     taskGraph = TaskGraph.fromEdges taskMap
     cleanupDependencies = buildCleanupDependenciesMap config taskMap
@@ -634,6 +708,8 @@ runTasks config taskMap = do
       -- NB: here we don't need taskQueueNotifier and taskQueueLock,
       -- since no one is accessing taskQueue yet.
       mapM_ (TPrioQueue.write taskQueue) moreIndependentTasks
+      instruments <- newInstruments
+      startSeconds <- getSeconds
       nodeLoopMap :: Map Node ((Shared IO NodeStatus, TVar (IsNodeStalling a)), Async ()) <- flip Map.traverseWithKey initialAllocs $
         \node alloc -> do
           nodeStatusVar <- liftIO $ newShared NodeStatus.empty
@@ -655,6 +731,7 @@ runTasks config taskMap = do
             -- TODO: implement graceful exit for runNodeLoop.
             runNodeLoop
               config
+              instruments
               node
               fileService
               workerPool
@@ -679,11 +756,34 @@ runTasks config taskMap = do
         nodeLoopHandleMap = fmap snd nodeLoopMap
         nodeStatusMap  = fmap fst nodeLoopMap
 
-      cleanupLoopHandle <- asyncLinkedLocalJob $ cleanupLoop config fileService taskQueueNotifier cleanupQueue
+      cleanupLoopHandle <- asyncLinkedLocalJob $ cleanupLoop config instruments fileService taskQueueNotifier cleanupQueue
       lift $ throwOnAsyncFailed cleanupLoopHandle
 
-      monitorProgressAndDeps
+      samplesVar <- liftIO $ newIORef []
+      let
+        takeSample = do
+          now <- getSeconds
+          queueLength <- atomically $ TPrioQueue.size taskQueue
+          statuses <- traverse (readShared . fst) nodeStatusMap
+          inFlight <- readGauge instruments.inFlight
+          running <- readGauge instruments.running
+          finished <- readGauge instruments.finished
+          modifyIORef' samplesVar (MkSample
+            { seconds     = now - startSeconds
+            , queueLength = queueLength
+            , cpusInUse   = sum [st.cpusInUse | st <- Map.elems statuses]
+            , inFlight    = inFlight
+            , running     = running
+            , finished    = finished
+            } :)
+        sampler = do
+          labelMyThread "scheduler: sampler"
+          forever $ takeSample >> threadDelay 1000000
+
+      bracket (liftIO (forkIO sampler)) (liftIO . killThread) $ \_ ->
+       monitorProgressAndDeps
         config
+        instruments
         taskQueue
         taskQueueNotifier
         taskQueueLock
@@ -697,9 +797,29 @@ runTasks config taskMap = do
       -- Finishing with AsyncFailed or AsyncLinkFailed will trigger throwOnAsyncFailed.
       mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
       _ <- lift $ Async.wait cleanupLoopHandle
+      liftIO takeSample
+      endSeconds <- getSeconds
       records <- flushQueue taskRecordQueue
       reportModelAccuracy records
-      pure records
+      timers <- readTimers instruments.timers
+      samples <- liftIO $ reverse <$> readIORef samplesVar
+      let stats = MkSchedulerStats
+            { wallSeconds = endSeconds - startSeconds
+            , timers      = timers
+            , samples     = samples
+            }
+      logTimers stats
+      pure (records, stats)
+
+logTimers :: SchedulerStats -> Job ()
+logTimers stats = Log.info "Scheduler timers (name, count, total s, max s)"
+  ( roundMs stats.wallSeconds
+  , [ (name, t.count, roundMs t.totalSeconds, roundMs t.maxSeconds)
+    | (name, t) <- Map.toList stats.timers ]
+  )
+  where
+    roundMs :: Double -> Double
+    roundMs x = fromIntegral (round (x * 1000) :: Integer) / 1000
 
 -- | Log how this run's measurements compared with what the tasks' own models
 -- predicted. The counterpart to the warning 'runTasks' emits beforehand from
