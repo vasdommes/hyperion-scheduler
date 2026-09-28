@@ -33,6 +33,7 @@ import Hyperion                                hiding (opts)
 import Hyperion.Log                            qualified as Log
 import Hyperion.OsPath                         (OsPath, (</>))
 import Hyperion.OsString                       (fromString, showOs)
+import Hyperion.Scheduler.Config               qualified as Scheduler
 import Hyperion.Scheduler.Test.Config          (Site)
 import Hyperion.Scheduler.Test.Config          qualified as TestConfig
 import Hyperion.Scheduler.Test.LinearTransform (CyclicShiftProblem (..),
@@ -55,9 +56,10 @@ import System.Exit                             (die, exitSuccess)
 
 -- | Options shared by the local and cluster entry points.
 data ProblemOptions = ProblemOptions
-  { shift   :: Int
-  , dim     :: Int
-  , baseDir :: Maybe OsPath
+  { shift       :: Int
+  , dim         :: Int
+  , taskSeconds :: Double
+  , baseDir     :: Maybe OsPath
   } deriving (Show)
 
 problemOptsParser :: Parser ProblemOptions
@@ -66,17 +68,21 @@ problemOptsParser = do
     <> help "Shift the input vector cyclically by this many positions (one layer per position)"
   dim <- option auto $ long "dim" <> metavar "INT" <> value 3
     <> help "Input vector size"
+  taskSeconds <- option auto $ long "task-seconds" <> metavar "SECONDS" <> value 0
+    <> help "Make each product and vector element sleep this long, standing in for real work"
   baseDir <- optional $ option (fromString <$> str) $ long "base-dir" <> metavar "DIR"
     <> help "Base directory for output files"
   pure ProblemOptions{..}
 
 toProblem :: ProblemOptions -> CyclicShiftProblem
-toProblem opts = MkCyclicShiftProblem { shift = opts.shift, dim = opts.dim }
+toProblem opts = MkCyclicShiftProblem
+  { shift = opts.shift, dim = opts.dim, taskSeconds = opts.taskSeconds }
 
 -- | @local@ options: 'ProblemOptions' plus the size of the fake node.
 data LocalOptions = LocalOptions
-  { problem :: ProblemOptions
-  , cpus    :: Maybe Int
+  { problem    :: ProblemOptions
+  , cpus       :: Maybe Int
+  , nodeMemory :: Int
   } deriving (Show)
 
 localOptsParser :: Parser LocalOptions
@@ -84,6 +90,9 @@ localOptsParser = do
   problem <- problemOptsParser
   cpus <- optional $ option auto $ long "cpus" <> metavar "INT"
     <> help "CPUs to give the local node (default: all available)"
+  nodeMemory <- option auto $ long "node-memory" <> metavar "GiB" <> value 4
+    <> help "Memory the scheduler may allocate on the local node. Not checked \
+            \against the machine: raise it with --cpus, or memory limits concurrency"
   pure LocalOptions{..}
 
 localOptsInfo :: ParserInfo LocalOptions
@@ -125,7 +134,8 @@ runLocal opts = withConcurrentOutput $ do
       , programLogDir   = baseDir </> "logs"
       , programDataDir  = baseDir </> "data"
       }
-    schedulerConfig = TestConfig.localSchedulerConfig (baseDir </> "node_local_storage")
+    schedulerConfig = (TestConfig.localSchedulerConfig (baseDir </> "node_local_storage"))
+      { Scheduler.nodeMemory = fromIntegral opts.nodeMemory * 1024 * 1024 * 1024 }
   Log.info "Running locally" (baseDir, cpus)
   runJobLocal defaultHyperionStaticConfig programInfo $
     -- 'runJobLocal' hardcodes one CPU; 'getJobNodes' reads this to size the node.

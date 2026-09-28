@@ -21,8 +21,9 @@
 module Hyperion.Scheduler.Test.LinearTransform where
 
 import Bootstrap.Build           (Fetches (..))
+import Control.Concurrent        (threadDelay)
 import Control.Exception         (AssertionFailed (..))
-import Control.Monad             (unless)
+import Control.Monad             (unless, when)
 import Control.Monad.IO.Class    (liftIO)
 import Data.Aeson                (FromJSON, ToJSON)
 import Data.Binary               (Binary)
@@ -59,6 +60,14 @@ class (ToJSON a, Ord a, Show a, Binary a, Typeable a) => LinearTransformContext 
   layerMatrix :: a -> Closure (Int -> Matrix Int)
   inputVector :: a -> Closure (Vector Int)
   layerMatrixDims :: Int -> a -> (Int, Int)
+  -- | Seconds each product and vector element sleeps, standing in for real
+  -- work. Sleeping uses no CPU, so a local node can pretend to have more
+  -- CPUs than the machine.
+  taskSleep :: a -> Double
+
+sleepFor :: LinearTransformContext a => a -> IO ()
+sleepFor ctx = when (s > 0) $ threadDelay (round (s * 1e6))
+  where s = taskSleep ctx
 
 layerInputVectorLength :: LinearTransformContext a => Int -> a -> Int
 layerInputVectorLength layerIndex ctx = ncols
@@ -108,6 +117,7 @@ computeMultiplyM :: (Applicative f, FetchesKey (VectorKey a) f, LinearTransformC
 computeMultiplyM key = do
   v <- fVector
   pure $ do
+    liftIO $ sleepFor key.ctx
     getLayerMatrix' <- unClosure (layerMatrix key.ctx)
     let
       matrix = getLayerMatrix' key.layerIndex
@@ -212,6 +222,7 @@ instance
     outputPath <- getPath key
     pure $ do
       liftIO $ Log.info "Computing vector element" (key, inputs, outputPath)
+      liftIO $ sleepFor key.ctx
       runVectorElementScript inputs (key, outputPath)
 
 -- | An element is one Int, exactly as a product is, so it shares that group.
@@ -287,8 +298,9 @@ instance IsStatKey VectorStatKey where
 -- position per layer. The output is @[shift+1, .., dim, 1, .., shift]@.
 -- @shift@ therefore controls the depth of the task graph and @dim@ its width.
 data CyclicShiftProblem = MkCyclicShiftProblem
-  { shift :: Int
-  , dim   :: Int
+  { shift       :: Int
+  , dim         :: Int
+  , taskSeconds :: Double
   }
   deriving (Eq, Ord, Generic, Binary, ToJSON, Show)
 
@@ -302,6 +314,7 @@ instance LinearTransformContext CyclicShiftProblem where
   layerMatrix x = static getLayerMatrix `cAp` cPure x
   inputVector x = static getInputVector `cAp` cPure x
   layerMatrixDims _layer x = (x.dim, x.dim)
+  taskSleep x = x.taskSeconds
 
 instance Static (LinearTransformContext CyclicShiftProblem) where
   closureDict = static Dict
