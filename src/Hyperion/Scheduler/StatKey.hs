@@ -20,17 +20,16 @@ import Data.Aeson                      (FromJSON, FromJSONKey, ToJSON (..),
                                         ToJSONKey, (.:), (.=))
 import Data.Aeson                      qualified as Aeson
 import Data.Aeson.Types                qualified as Aeson
-import Data.Proxy                      (Proxy (..))
 import Data.Text                       (Text)
-import Data.Text                       qualified as Text
 import Data.Time.Clock                 (NominalDiffTime)
-import Data.Typeable                   (Typeable, typeRep)
+import Data.Typeable                   (Typeable)
 import Data.Void                       (Void, absurd)
 import GHC.Generics                    (Generic)
 import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
 import Hyperion.Scheduler.PathResolver (PathResolver (..))
 import Hyperion.Scheduler.Types        (Estimate (..), FileSize, MemorySize,
                                         NumCPUs, defaultRuntimeEstimate)
+import Hyperion.Scheduler.Util         (typeRepText)
 
 newtype StatKey = MkStatKey Aeson.Value
   deriving stock (Eq, Ord, Show)
@@ -80,7 +79,7 @@ class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
   -- module and want previously recorded statistics to keep matching.
   statKeyTypeName :: Text
   default statKeyTypeName :: Text
-  statKeyTypeName = Text.pack $ show $ typeRep (Proxy @a)
+  statKeyTypeName = typeRepText @a
 
 -- | The identity under which the size of an /output file/ is recorded.
 --
@@ -101,7 +100,7 @@ class (Typeable a, ToJSON a) => IsFileStatKey a where
   -- | See 'statKeyTypeName'.
   fileStatKeyTypeName :: Text
   default fileStatKeyTypeName :: Text
-  fileStatKeyTypeName = Text.pack $ show $ typeRep (Proxy @a)
+  fileStatKeyTypeName = typeRepText @a
 
 instance IsFileStatKey Void where
   fileSizeEstimate = absurd

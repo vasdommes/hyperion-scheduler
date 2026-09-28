@@ -11,15 +11,15 @@ import Data.Aeson                  (ToJSON)
 import Data.Set                    (Set)
 import Data.Set                    qualified as Set
 import Data.Text                   (Text)
-import Data.Text                   qualified as Text
 import Data.Time.Clock             (NominalDiffTime)
-import Data.Typeable               (Proxy (..), Typeable, typeRep)
+import Data.Typeable               (Typeable)
 import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
 import Hyperion.Scheduler.StatKey  (StatKey, TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Types    (Estimate (..), MemorySize, NumCPUs,
                                     defaultRuntimeEstimate, schedulingEstimate)
+import Hyperion.Scheduler.Util     (typeRepText)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
 -- computation (and, at the 'Hyperion.Scheduler.Task.Task.TaskKey' level, on
@@ -105,7 +105,7 @@ data ResourceEstimates = MkResourceEstimates
 
 -- | Default task tag = its type.
 defaultTaskTagForType :: forall a. Typeable a => Maybe Tag
-defaultTaskTagForType = Just $ Text.pack $ show $ typeRep $ Proxy @a
+defaultTaskTagForType = Just $ typeRepText @a
 
 defaultTaskTag :: forall a. Typeable a => a -> Maybe Tag
 defaultTaskTag _ = defaultTaskTagForType @a
