@@ -58,7 +58,7 @@ import Hyperion.Scheduler.FileService               (FileService, Response (..),
                                                      withFileService)
 import Hyperion.Scheduler.RemoteUtil                (AsyncFailedException (..),
                                                      asyncLinkedLocalJob,
-                                                     getJobNodes,
+                                                     getJobNodes, labelMyThread,
                                                      throwOnAsyncFailed)
 import Hyperion.Scheduler.RunTasks.NodeStatus       (NodeStatus)
 import Hyperion.Scheduler.RunTasks.NodeStatus       qualified as NodeStatus
@@ -174,6 +174,7 @@ runNodeLoop
   taskRecordQueue
   initialAllocation = do
 
+  labelMyThread $ "scheduler: runNodeLoop " <> show node.address
   forM_ (Map.keys initialAllocation) $ \task -> do
      (response, localFileSizes) <- lift $ reserveLocalTaskFiles task
      case response of
@@ -437,7 +438,9 @@ runNodeLoop
       runRemoteTasks allocation
 
 cleanupLoop :: Config -> FileService -> TChangeNotifier -> CleanupQueue -> Job ()
-cleanupLoop config fileService taskQueueNotifier cleanupQueue = lift go where
+cleanupLoop config fileService taskQueueNotifier cleanupQueue =
+  lift $ labelMyThread "scheduler: cleanupLoop" >> go
+  where
   go = do
     mPaths <- readAndFlushQueue cleanupQueue
     let
@@ -482,6 +485,7 @@ monitorProgressAndDeps
   -> ProgressMap
   -> Job ()
 monitorProgressAndDeps config taskQueue taskQueueNotifier taskQueueLock finishedTaskQueue taskGraph initCleanupDepCounts cleanupQueue nodeStatusMap initProgressMap = do
+  labelMyThread "scheduler: monitorProgressAndDeps"
   Log.info "Building" (catMaybes (Map.keys initProgressMap))
   report initProgressMap
   start <- liftIO getCurrentTime

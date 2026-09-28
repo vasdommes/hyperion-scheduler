@@ -110,6 +110,7 @@ import Hyperion.Scheduler.RemoteUtil               (RequestType, ResponseType,
                                                     Service (..),
                                                     StartupResponseType,
                                                     getServiceProcessId,
+                                                    labelMyThread,
                                                     startRemoteService)
 import Hyperion.Scheduler.ReusableWorker           (ReusableWorker (..),
                                                     getNodeId,
@@ -1191,6 +1192,7 @@ mainLoop :: NodeLocalFileManagerConfig -> FileSenders -> SendPort StartupRespons
 mainLoop config fileSenders startupPort = do
   selfPid <- getSelfPid
   Log.info "Start NodeLocalFileManager" (selfPid, config)
+  labelMyThread "NodeLocalFileManager"
   sendChan startupPort selfPid
 
   state <- liftIO initialState

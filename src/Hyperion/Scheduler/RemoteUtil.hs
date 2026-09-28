@@ -21,13 +21,14 @@ import Control.Distributed.Process.Async   (Async, AsyncResult (..), async,
                                             wait)
 import Control.Distributed.Process.Closure (SerializableDict (..))
 import Control.Exception                   (Exception, throwTo)
-import Control.Monad.IO.Class              (liftIO)
+import Control.Monad.IO.Class              (MonadIO, liftIO)
 import Control.Monad.Reader                (ask, asks, runReaderT)
 import Control.Monad.Trans                 (lift)
 import Data.Binary                         (Binary)
 import Data.Kind                           (Type)
 import Data.Map.Strict                     qualified as Map
 import Data.Typeable                       (Typeable)
+import GHC.Conc                            (labelThread)
 import Hyperion                            (Dict (..), Job, JobEnv (..),
                                             Serializable, Static,
                                             WorkerAddr (..), cAp, closureDict,
@@ -39,6 +40,10 @@ import Hyperion.Scheduler.Types            (Node (..))
 -- TODO orphan instance
 instance Static (Binary (SendPort ProcessId)) where
   closureDict = static Dict
+
+-- | Name the current thread in the eventlog (e.g. for ThreadScope).
+labelMyThread :: MonadIO m => String -> m ()
+labelMyThread name = liftIO $ myThreadId >>= flip labelThread name
 
 -- | Get all the nodes accessible to a Job
 getJobNodes :: Config -> Job [Node]

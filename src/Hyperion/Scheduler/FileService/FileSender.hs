@@ -72,7 +72,7 @@ import Hyperion.OsPath                             (OsPath, splitFileName,
                                                     takeDirectory)
 import Hyperion.Scheduler.FileService.RetryTimeout (RetryTimeoutPolicy (..),
                                                     runWithRetryTimeout)
-import Hyperion.Scheduler.RemoteUtil               (Service (..),
+import Hyperion.Scheduler.RemoteUtil               (Service (..), labelMyThread,
                                                     startRemoteService)
 import Hyperion.Scheduler.TPrioQueue               (TPrioQueue (..))
 import Hyperion.Scheduler.TPrioQueue               qualified as TPrioQueue
@@ -206,6 +206,7 @@ fileSenderMainLoop :: FileSenderConfig -> SendPort StartupResponse -> Process ()
 fileSenderMainLoop config startupPort = do
   selfPid <- getSelfPid
   Log.info "Start FileSender" selfPid
+  labelMyThread "FileSender"
   sendChan startupPort selfPid
 
   statsVar <- liftIO $ newTVarIO zeroStats
