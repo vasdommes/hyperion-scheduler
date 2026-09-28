@@ -37,7 +37,7 @@ import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
-import Data.Text                           qualified as Text
+import Data.Text                           (Text)
 import Data.Typeable                       (cast, typeOf)
 import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
@@ -51,7 +51,9 @@ import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
-                                            RunStage, Tag, estimatesFromModel)
+                                            RunStage, Tag, defaultTaskTag,
+                                            defaultTaskTagForType,
+                                            estimatesFromModel)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
@@ -237,12 +239,17 @@ class ( All Eq (DepKeys k)
   -- | Maximum possible threads for the task.
   -- TODO: get rid of RunStage?
   maxThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
-  maxThreads _ _ _ = 1
+  maxThreads = minThreads
   -- | Minimum possible threads for the keyTask
+  -- NoOpTask's perform no computation, so they occupy no worker threads
+  -- (e.g. ListTaskKey).
   minThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
-  minThreads _ _ _ = 1
-  tag        :: k -> Maybe Tag
-  tag = Just . Text.pack . show . typeOf
+  minThreads _ _ _ = case taskKind @k of
+    NoOpTask _ -> 0
+    _          -> 1
+
+  tag :: k -> Maybe Tag
+  tag = defaultTaskTag
   priority :: k -> Int
   priority = const 0
 
@@ -417,15 +424,8 @@ instance
       , runtime = EstimatedByTask (runtimeEstimate statKey)
       }
   taskStatKey t          = encodeStatKey <$> toStatKey t.config t.key
-  -- TODO reorder arguments?
-  -- NoOpTask's perform no computation, so they occupy no worker threads
-  -- (cf. TaskLink.ListTask).
-  taskMaxThreads stage t = case taskKind @k of
-    NoOpTask _ -> 0
-    _          -> maxThreads stage t.config t.key
-  taskMinThreads stage t = case taskKind @k of
-    NoOpTask _ -> 0
-    _          -> minThreads stage t.config t.key
+  taskMaxThreads stage t = maxThreads stage t.config t.key
+  taskMinThreads stage t = minThreads stage t.config t.key
   taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
     toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
   taskOutputs t          = Set.map (toTaskKeyFileInfo t.resolver) $ outKeys t.config t.key
@@ -475,9 +475,16 @@ instance {-# OVERLAPPABLE #-}
   taskChain resolver cfg = TaskNode (wrapTask <$> taskLink resolver cfg) (taskChain resolver cfg)
 
 
-newtype ListTaskKey k = MkListTaskKey [k]
-  deriving stock (Eq, Ord, Show)
-  deriving newtype (Binary, ToJSON)
+data ListTaskKey k = MkListTaskKey
+  { tag  :: Maybe Text
+  , keys :: [k]
+  }
+  deriving (Generic, Eq, Ord, Show, Binary, ToJSON)
+
+-- Create ListTaskKey with default tag = "ListTaskKey MyKey" (for k ~ MyKey)
+-- Use 'MkListTaskKey myTag myKeys' or 'listTaskKey myKeys { tag = myTag }' to override it.
+listTaskKey :: forall k. Typeable k => [k] -> ListTaskKey k
+listTaskKey = MkListTaskKey $ defaultTaskTagForType @(ListTaskKey k)
 
 type instance DepKeys (ListTaskKey k) = '[k]
 instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
@@ -486,7 +493,8 @@ instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
   -- A pure grouping node: it performs no computation, so it is never scheduled
   -- by estimate and has nothing to record. That is the default 'StatKeyOf'
   -- ('Void') and the default 'toStatKey' ('Nothing'), so neither is declared.
-  taskKind = NoOpTask $ \(MkListTaskKey keys) -> traverse_ getPath keys
+  taskKind = NoOpTask $ \t -> traverse_ getPath t.keys
+  tag t = t.tag
 
 instance (Typeable k , Static(Binary k)) => Static (Binary (ListTaskKey k)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary k)

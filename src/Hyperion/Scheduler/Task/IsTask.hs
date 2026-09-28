@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes   #-}
 {-# LANGUAGE DefaultSignatures     #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors      #-}
@@ -12,7 +13,7 @@ import Data.Set                    qualified as Set
 import Data.Text                   (Text)
 import Data.Text                   qualified as Text
 import Data.Time.Clock             (NominalDiffTime)
-import Data.Typeable               (Typeable, typeOf)
+import Data.Typeable               (Proxy (..), Typeable, typeRep)
 import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
@@ -60,7 +61,7 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskDefaultPriority = const 0
 
   taskTag        :: a -> Maybe Tag
-  taskTag = Just . Text.pack . show . typeOf
+  taskTag = defaultTaskTag
 
   taskClosure :: NumCPUs -> a -> Maybe (Closure (Process ()))
 
@@ -101,6 +102,13 @@ data ResourceEstimates = MkResourceEstimates
   { memory  :: Estimate MemorySize
   , runtime :: Estimate (NumCPUs -> NominalDiffTime)
   }
+
+-- | Default task tag = its type.
+defaultTaskTagForType :: forall a. Typeable a => Maybe Tag
+defaultTaskTagForType = Just $ Text.pack $ show $ typeRep $ Proxy @a
+
+defaultTaskTag :: forall a. Typeable a => a -> Maybe Tag
+defaultTaskTag _ = defaultTaskTagForType @a
 
 -- | A task's own model: the memory it predicts, and a runtime curve derived
 -- from that memory. A task with a runtime model of its own builds
