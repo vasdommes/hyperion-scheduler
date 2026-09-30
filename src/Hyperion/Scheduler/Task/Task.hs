@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes     #-}
 {-# LANGUAGE ApplicativeDo           #-}
 {-# LANGUAGE DataKinds               #-}
 {-# LANGUAGE DefaultSignatures       #-}
@@ -21,9 +22,9 @@ import Bootstrap.Build                     (All, FList, FetchConfig (..),
                                             HasForce (..), Keys, KnownKeyVals,
                                             KnownLength (..), Length (..),
                                             Variant (..), getDependencies,
-                                            headF, runFetchTAll, setsFromLists,
-                                            tailF, toVariants, vAll)
-import Control.DeepSeq                     (deepseq)
+                                            headF, runFetchTAll, runMemoFetchT,
+                                            setsFromLists, tailF, toVariants,
+                                            vAll)
 import Control.Distributed.Process         (Process)
 import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
@@ -33,7 +34,6 @@ import Data.Binary                         qualified as Binary
 import Data.Data                           (Proxy (..))
 import Data.Foldable.Extra                 (allM, traverse_)
 import Data.Functor                        (($>), (<&>))
-import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
 import Data.Map.Strict                     qualified as Map
 import Data.Maybe                          (isJust)
@@ -46,8 +46,9 @@ import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
 import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
-import Hyperion.Scheduler.PathResolver     (PathResolver (..),
-                                            PathResolverForAll)
+import Hyperion.Scheduler.PathResolver     (MapResolver (..), PathResolver (..),
+                                            PathResolverForAll,
+                                            mapResolverForAllDict)
 import Hyperion.Scheduler.StatKey          (FromInputFiles (..), InputFile,
                                             IsFileStatKey (..), IsStatKey (..),
                                             TaskFile (..), ToFileStatKey (..),
@@ -159,7 +160,11 @@ data TaskKind k where
   -- | Compute the value with 'ComputeValue' and save it with
   -- 'ValueSerializable'. This is 'taskKind''s default.
   ComputeValueTask
-    :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k)
+    :: ( ComputeValue k
+       , ValueSerializableM Process k
+       , All (ValueSerializableM Process) (DepKeys k)
+       , OutKey k ~ k
+       )
     => TaskKind k
   -- | A stand-in for another task producing the same output file (@OutKey k ~
   -- k@ by construction, so the output is definitionally the key's own path,
@@ -223,7 +228,13 @@ class ( All Eq (DepKeys k)
   -- 1. GetDependencies (OutAndDepsWithPaths k) to get the dependencies of the key.
   -- 2. FetchT (OutAndDepsWithPaths k) Process to actually compute the value and write it to disk
   taskKind :: TaskKind k
-  default taskKind :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k) => TaskKind k
+  default taskKind
+    :: ( ComputeValue k
+       , ValueSerializableM Process k
+       , All (ValueSerializableM Process) (DepKeys k)
+       , OutKey k ~ k
+       )
+    => TaskKind k
   taskKind = ComputeValueTask
 
   -- | StatKeyOf k is used for two things:
@@ -305,13 +316,40 @@ class ( All Eq (DepKeys k)
       allM (doesTaskFileExist . resolvePath resolver) $ outKeys cfg key
 
 
+-- | The (key, value) pairs of the given keys, where each value is the key's
+-- 'ValueType'.
+type family ValueKeyVals (ks :: [Type]) :: [(Type, Type)] where
+  ValueKeyVals '[] = '[]
+  ValueKeyVals (k ': ks) = '(k, ValueType k) ': ValueKeyVals ks
+
+-- | What a 'ComputeValue' task fetches: its dependencies' values.
+type DepKeyVals k = ValueKeyVals (DepKeys k)
+
+-- | Compute a task's value from the values of its dependencies, fetched with
+-- 'fetch'. The fetches define the task's dependencies. They must not depend
+-- on 'NumCPUs': the task graph is built with @NumCPUs = 1@.
+--
+-- The computation is polymorphic in @f@, so that the scheduler can run it
+-- with 'Bootstrap.Build.GetDependencies' to find the dependencies, and with
+-- 'Bootstrap.Build.runMemoFetchT' to compute the value. The latter reads each
+-- dependency once, even if it is fetched many times. Values captured by the
+-- result's 'Process' action stay in memory until it runs.
+--
+-- Define 'computeValue' for a pure computation, or 'computeValueM' to compute
+-- the value with effects in a 'Process' action run after the fetches.
 class ComputeValue k where
   {-# MINIMAL computeValue | computeValueM #-}
 
-  computeValue :: (Applicative f, FetchesPaths (DepKeys k) f) => NumCPUs -> TaskConfig k -> k -> WrappedProcess f (ValueType k)
-  computeValue numCpus cfg key = joinWrapped $ computeValueM numCpus cfg key
+  computeValue
+    :: (Applicative f, HasForce f, FetchesAll (DepKeyVals k) f)
+    => NumCPUs -> TaskConfig k -> k -> f (ValueType k)
+  -- A computation with effects has no pure form. The scheduler calls only
+  -- 'computeValueM'.
+  computeValue = error "ComputeValue: computeValue is undefined for an instance that defines computeValueM"
 
-  computeValueM :: (Applicative f, FetchesPaths (DepKeys k) f) => NumCPUs -> TaskConfig k -> k -> WrappedProcess f (Process (ValueType k))
+  computeValueM
+    :: (Applicative f, HasForce f, FetchesAll (DepKeyVals k) f)
+    => NumCPUs -> TaskConfig k -> k -> f (Process (ValueType k))
   computeValueM numCpus cfg key = pure <$> computeValue numCpus cfg key
 
 type family ValueType k :: Type
@@ -339,25 +377,6 @@ type family FetchesKeys ks m :: Constraint where
   FetchesKeys '[] m = ()
   FetchesKeys (k ': ks) m = (FetchesKey k m, FetchesKeys ks m)
 
-newtype WrappedProcess f a = MkWrappedProcess (Compose f Process a)
-  deriving newtype (Applicative, Functor)
-
-instance Applicative f => HasForce (WrappedProcess f) where
-  forceM (MkWrappedProcess (Compose go)) = MkWrappedProcess $ Compose $ do
-    getVal <- go
-    pure $ do
-      x <- getVal
-      x `deepseq` pure x
-
-instance (Functor f, FetchesPath k f, ValueSerializableM Process k, v ~ ValueType k) => Fetches k v (WrappedProcess f) where
-  fetch key = MkWrappedProcess . Compose . fmap (readValueM key) $ getPath key
-
-unWrappedProcess :: WrappedProcess f a -> f (Process a)
-unWrappedProcess (MkWrappedProcess (Compose x)) = x
-
-joinWrapped :: Functor f => WrappedProcess f (Process a) -> WrappedProcess f a
-joinWrapped (MkWrappedProcess (Compose f)) = MkWrappedProcess (Compose (fmap join f))
-
 getPath :: Fetches k OsPath f => k -> f OsPath
 getPath = fetch
 
@@ -379,10 +398,16 @@ computeAndSaveValue
 computeAndSaveValue numCpus cfg key = case taskKind @k of
   ComputeValueTask -> do
     path <- getPath key
-    getVal <- unWrappedProcess (computeValue numCpus cfg key)
-    pure $ do
-      val <- getVal
-      saveValueM key path val
+    depPaths <- traverse getPathVariant deps
+    pure $ case mapResolverForAllDict @(DepKeys k) of
+      Dict -> do
+        let resolver = MkMapResolver (Map.fromList (zip deps depPaths))
+        getVal <- runComputeValueM @k (computeValueM numCpus cfg key) resolver
+        val <- getVal
+        saveValueM key path val
+    where
+      -- Same numCpus as the run below, so the resolver has every key it fetches.
+      deps = Set.toList (computeValueDependencies numCpus cfg key)
   -- The 'getPath' call declares the placeholder's output (OutKey k ~ k),
   -- so its graph node has the same output path as the real task it stands in for.
   -- It should never execute: validateTaskMap rejects unreplaced placeholders.
@@ -392,6 +417,51 @@ computeAndSaveValue numCpus cfg key = case taskKind @k of
       error $ "computeAndSaveValue: unreplaced placeholder task " <> show (typeOf key)
   CustomTask go -> go numCpus cfg key
   NoOpTask go -> go key $> pure ()
+
+-- | Evidence about 'ValueKeyVals' that GHC cannot derive for an abstract
+-- key list.
+valueKeyValsDict
+  :: forall ks . KnownLength ks
+  => Dict (KnownKeyVals (ValueKeyVals ks), Keys (ValueKeyVals ks) ~ ks)
+valueKeyValsDict = go (knownLength @ks)
+  where
+    go :: Length ks' -> Dict (KnownKeyVals (ValueKeyVals ks'), Keys (ValueKeyVals ks') ~ ks')
+    go LZero      = Dict
+    go (LSucc l') = case go l' of
+      Dict -> Dict
+
+-- | Fetch each key's value from the file that the resolver gives for it.
+valueFetchConfig
+  :: forall ks r m . (MonadIO m, All (ValueSerializableM m) ks, PathResolverForAll r ks)
+  => Length ks -> r -> FetchConfig m (ValueKeyVals ks)
+valueFetchConfig LZero _          = FetchNil
+valueFetchConfig (LSucc l) resolver =
+  (\key -> readValueM key (resolvePath resolver key)) :&: valueFetchConfig l resolver
+
+-- | The dependencies of a 'ComputeValue' task: the keys that 'computeValueM'
+-- fetches.
+computeValueDependencies
+  :: forall k . (TaskKey k, ComputeValue k)
+  => NumCPUs -> TaskConfig k -> k -> Set (Variant (DepKeys k))
+computeValueDependencies numCpus cfg key = case valueKeyValsDict @(DepKeys k) of
+  Dict -> toVariants . setsFromLists $
+    getDependencies (Proxy @(DepKeyVals k)) (computeValueM numCpus cfg key)
+
+-- | Run a 'ComputeValue' computation, reading the dependencies' values from
+-- the files that the resolver gives. Each value is read once (see
+-- 'runMemoFetchT').
+runComputeValueM
+  :: forall k r a .
+     ( TaskKey k
+     , All (ValueSerializableM Process) (DepKeys k)
+     , PathResolverForAll r (DepKeys k)
+     )
+  => (forall f . (Applicative f, HasForce f, FetchesAll (DepKeyVals k) f) => f a)
+  -> r
+  -> Process a
+runComputeValueM action resolver = case valueKeyValsDict @(DepKeys k) of
+  Dict -> runMemoFetchT @(DepKeyVals k) action $
+    valueFetchConfig (knownLength @(DepKeys k)) resolver
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)
 outAndDependencies cfg key =
