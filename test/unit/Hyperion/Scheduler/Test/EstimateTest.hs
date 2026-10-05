@@ -18,6 +18,7 @@ import Data.Aeson                          qualified as Aeson
 import Data.Binary                         (Binary)
 import Data.List.NonEmpty                  qualified as NonEmpty
 import Data.Map.Strict                     qualified as Map
+import Data.Maybe                          (isJust)
 import Data.Set                            qualified as Set
 import Data.Text                           qualified as Text
 import Data.Time                           (UTCTime (..), fromGregorian)
@@ -30,8 +31,9 @@ import Hyperion.Scheduler.StatKey          (IsFileStatKey (..), IsStatKey (..),
                                             encodeFileStatKey, encodeStatKey)
 import Hyperion.Scheduler.Stats            (TaskAndFileStats,
                                             TaskEstimates (..), TaskRecord (..),
-                                            Trials (..), recordToTaskStats,
-                                            taskEstimatesAt, toTrials)
+                                            Trials (..), lookupMaxFileSize,
+                                            recordToTaskStats, taskEstimatesAt,
+                                            toTrials)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             estimatesFromModel,
                                             taskRuntimeEstimate)
@@ -226,6 +228,27 @@ testWrapKeepsMeasuredEstimates = do
   expect "wrapping keeps a measured runtime measured" $
     isMeasuredFromStats estimates.runtime
 
+-- | A task that ran on no CPUs contributes no resource statistics: its runtime
+-- measured scheduler bookkeeping, and the sample could not be fitted anyway --
+-- the speedup curve interpolates towards the origin, so a point at zero CPUs
+-- divides by zero and yields NaN and infinity for every CPU count.
+testZeroCpuRecordContributesNothing :: IO ()
+testZeroCpuRecordContributesNothing = do
+  let
+    stats = statsOf [estRecord "A" 0 (Just (8 * 1024 * 1024)) 4096]
+    estimates = taskResourceEstimates $ decorateTaskWithStats stats (estTask "A" 1024)
+    finite n = not (isNaN t) && not (isInfinite t)
+      where t = realToFrac (schedulingEstimate estimates.runtime n) :: Double
+  expect "a run on no CPUs leaves memory unmeasured" $
+    not (isMeasuredFromStats estimates.memory)
+  expect "a run on no CPUs leaves the runtime curve unmeasured" $
+    not (isMeasuredFromStats estimates.runtime)
+  expect "the runtime estimate stays finite at every CPU count" $
+    all finite [0, 1, 4]
+  -- File sizes are a property of the file, so they are recorded regardless.
+  expect "a run on no CPUs still records its file sizes" $
+    isJust (lookupMaxFileSize (encodeFileStatKey (MkEstFileStatKey "A")) stats)
+
 -- | Merging is the only arithmetic these statistics do, and it had no test.
 -- Checked against the mean and biased variance computed directly from the same
 -- observations.
@@ -309,6 +332,7 @@ runTest = do
   testNoMatchKeepsTaskEstimates
   testDecorateIsIdempotent
   testWrapKeepsMeasuredEstimates
+  testZeroCpuRecordContributesNothing
   testTrialsSummary
   testFileSizeKeepsOwnEstimate
   testRecordRoundTrip

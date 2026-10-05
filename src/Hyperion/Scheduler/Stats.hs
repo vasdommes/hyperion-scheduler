@@ -184,9 +184,12 @@ nonEmptyMemoryEntries (MkTaskResourceMap m) = nonEmpty $ mapMaybe getMemory (Map
 nonEmptyRuntimeEntries :: TaskResourceMap -> Maybe (NonEmpty (NumCPUs, Trials Double))
 nonEmptyRuntimeEntries (MkTaskResourceMap m) = nonEmpty $ mapMaybe getRuntime (Map.toList m)
   where
+    -- Samples at zero CPUs are no longer recorded, but a stat file written
+    -- before that may hold some, and one is enough to make 'fitSpeedup' divide
+    -- by zero. A task whose only samples are there keeps its own model.
     getRuntime (n, r) = case r.runtime of
-      Just t  -> Just (n,t)
-      Nothing -> Nothing
+      Just t | n > 0 -> Just (n, t)
+      _              -> Nothing
 
 maxMemory :: TaskResourceMap -> Maybe MemorySize
 maxMemory = fmap (round . maximum . fmap ((.max) . snd)) . nonEmptyMemoryEntries
@@ -275,9 +278,16 @@ recordToTaskStats record = MkTaskAndFileStats taskStats fileStats where
   -- A task with no stat key contributes no resource statistics: it performed
   -- no computation, so the only thing its runtime would measure is scheduler
   -- bookkeeping. Its file sizes (if any) are still recorded below.
+  --
+  -- The same goes for a task that ran on no CPUs, which is how a task that does
+  -- not run remotely appears here. Beyond measuring nothing, such an
+  -- observation cannot be fitted: 'fitSpeedup' interpolates towards the origin,
+  -- so a sample at zero CPUs divides by zero and yields a curve of NaN and
+  -- infinity for every CPU count.
   taskStats = MkTaskStats $ case record.taskStatKey of
-    Nothing      -> Map.empty
-    Just statKey -> Map.singleton statKey (taskResourceMapSingleton record)
+    Just statKey | record.taskNumCPUs > 0 ->
+      Map.singleton statKey (taskResourceMapSingleton record)
+    _ -> Map.empty
   fileStats = MkFileStats $ Map.map toTrials record.taskFileSizes
 
 -- | Sizes are exact: 'Trials' keeps its extremes in the measured type, so a
