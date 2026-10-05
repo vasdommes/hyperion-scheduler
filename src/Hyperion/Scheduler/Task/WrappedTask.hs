@@ -75,7 +75,7 @@ instance IsTask WrappedTask where
   taskOutputs t = t.outputs
   taskDefaultPriority (MkWrappedTask { task = t }) = taskDefaultPriority t
   taskTag (MkWrappedTask { task = t }) = taskTag t
-  taskClosure numCpus (MkWrappedTask { task = t }) = taskClosure numCpus t
+  taskClosure (MkWrappedTask { task = t }) = taskClosure t
   taskIsPlaceholder (MkWrappedTask { task = t }) = taskIsPlaceholder t
   taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
 

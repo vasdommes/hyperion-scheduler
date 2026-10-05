@@ -410,9 +410,9 @@ instance
   -- A closure-less task completes instantly without a worker round-trip
   -- (see 'Hyperion.Scheduler.RunTasks.RemoteRunTask.remoteRunTask'), which is
   -- all a NoOpTask needs.
-  taskClosure numCpus t  = case taskKind @k of
+  taskClosure t  = case taskKind @k of
     NoOpTask _ -> Nothing
-    _ -> Just $ static computeAndWrite
+    _ -> Just $ \numCpus -> static computeAndWrite
       `cAp` closureDict
       `cAp` cPure numCpus
       `cAp` cPure t

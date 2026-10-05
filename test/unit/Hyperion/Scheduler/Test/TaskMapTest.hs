@@ -53,7 +53,7 @@ instance IsTask TestTask where
   taskInputs t        = Set.map mkFileInfo t.inputs
   taskOutputs t       = Set.map mkFileInfo t.outputs
   taskTag t           = Just (Text.pack t.name)
-  taskClosure _ _     = Nothing
+  taskClosure   _     = Nothing
   taskIsPlaceholder t = t.isPlaceholder
 
 testTask :: String -> [OsPath] -> [OsPath] -> TestTask

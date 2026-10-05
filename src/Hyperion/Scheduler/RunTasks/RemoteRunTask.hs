@@ -64,9 +64,9 @@ afterReturnRemoteRunTaskResultM files go = do
   return $ MkRemoteRunTaskResult { remoteTaskMemory = Just mem, remoteTaskFileSizes = fileSizes }
 
 remoteRunTask :: IsTask a => Maybe TWorker -> NumCPUs -> a -> Job RemoteRunTaskResult
-remoteRunTask mWorker numCpus task = case taskClosure numCpus task of
+remoteRunTask mWorker numCpus task = case taskClosure task of
   Nothing -> pure emptyRemoteRunTaskResult
-  Just closure -> case mWorker of
+  Just getClosure -> case mWorker of
     Nothing -> Log.throwError "remoteRunTask expected (Just TWorker), but got Nothing"
     Just w -> do
       -- TODO: is setTaskCpus really needed?
@@ -75,5 +75,4 @@ remoteRunTask mWorker numCpus task = case taskClosure numCpus task of
         static afterReturnRemoteRunTaskResultM
         -- TODO: measure input file sizes too?
         `cAp` cPure (taskOutputPaths task)
-        `cAp` closure
-
+        `cAp` getClosure numCpus

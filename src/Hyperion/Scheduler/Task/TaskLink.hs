@@ -67,7 +67,7 @@ instance (Eq k, Ord k, ToJSON k, Typeable k) => IsTask (ListTask k) where
   taskInputs _       = Set.empty
   taskOutputs _      = Set.empty
   taskTag _          = Nothing
-  taskClosure _ _    = Nothing
+  taskClosure _      = Nothing
 
 instance ToStatKey (ListTask k) where
   toStatKey _ = toStatKey ()

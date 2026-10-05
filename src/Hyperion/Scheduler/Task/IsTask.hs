@@ -8,6 +8,7 @@
 module Hyperion.Scheduler.Task.IsTask where
 
 import Data.Aeson                  (ToJSON)
+import Data.Maybe                  (isJust)
 import Data.Set                    (Set)
 import Data.Set                    qualified as Set
 import Data.Text                   (Text)
@@ -61,7 +62,7 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskTag :: a -> Maybe Tag
   taskTag = defaultTaskTag
 
-  taskClosure :: NumCPUs -> a -> Maybe (Closure (Process ()))
+  taskClosure :: a -> Maybe (NumCPUs -> Closure (Process ()))
 
   -- | Whether this task is a placeholder (see 'Hyperion.Scheduler.Task.Task.TaskKind')
   -- that must be replaced before running.
@@ -123,3 +124,6 @@ taskInputPaths t = Set.map (.path) $ taskInputs t
 
 taskOutputPaths :: IsTask a => a -> Set VirtualFilePath
 taskOutputPaths t = Set.map (.path) $ taskOutputs t
+
+taskHasClosure :: IsTask a => a -> Bool
+taskHasClosure = isJust . taskClosure
