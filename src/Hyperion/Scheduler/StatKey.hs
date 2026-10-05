@@ -218,7 +218,8 @@ class (Typeable a, ToJSON a, FromJSON a, IsSummary (InputSummary a)) => IsStatKe
   -- each must carry the executable's own footprint -- tens of megabytes before
   -- the task allocates anything. Recorded statistics measure the same thing
   -- (the worker's peak resident set, its own or its children's), so a model
-  -- that omits the baseline predicts too little.
+  -- that omits the baseline is reported as under-predicting once the two are
+  -- compared.
   memoryEstimate :: a -> InputSummary a -> MemorySize
 
   -- | Estimated runtime in seconds, as a function of 'NumCPUs'.

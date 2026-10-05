@@ -43,8 +43,11 @@ import Hyperion.Scheduler.Task.IsTask           (IsTask (..), TaskSummary (..),
 import Hyperion.Scheduler.Task.Task             (DepKeys, TaskKey (..),
                                                  TaskKind (..), dependencies,
                                                  listTaskKey, outKeys)
-import Hyperion.Scheduler.Task.TaskMap          (TaskMap, placeholdersOfType,
-                                                 replaceTasks, validateTaskMap)
+import Hyperion.Scheduler.Task.TaskMap          (InstrumentationGap (..),
+                                                 TaskMap, placeholdersOfType,
+                                                 replaceTasks,
+                                                 taskInstrumentationGaps,
+                                                 validateTaskMap)
 import Hyperion.Scheduler.Task.WrappedTask      (wrapTask)
 import Hyperion.Scheduler.TaskFiles             (MonadTaskFiles (..))
 import Hyperion.Scheduler.Types                 (Estimate (..), FileSize,
@@ -250,6 +253,20 @@ testComputeTasksHaveCpus = do
   expectValid "a task with nothing to run may ask for no CPUs" $
     taskMapOf (testTask "B" [] [r]) { minThreads = 0 }
 
+-- | Instrumentation gaps are reported for tasks that compute, and only those:
+-- declaring nothing is correct for a task that performs no computation.
+testInstrumentationGaps :: IO ()
+testInstrumentationGaps = do
+  let
+    gapsOf t = Set.fromList $ Map.keys $ taskInstrumentationGaps (taskMapOf t)
+  -- 'mkFileInfo' declares a size of zero, so this task is reported on both
+  -- axes: no stat key, and no declared size for the file it produces.
+  expect "a computing task that declares nothing is reported on both axes" $
+    gapsOf ((testTask "A" [] [q]) { computes = True })
+      == Set.fromList [NoStatKey, ZeroFileSizeEstimate]
+  expect "a task that computes nothing is not reported" $
+    Set.null (gapsOf (testTask "A" [] [q]))
+
 -- | A maximum below the minimum can be satisfied by no allocation, and the
 -- allocator resolves it by capping at the maximum -- handing the task fewer
 -- threads than it asked for, or none at all.
@@ -361,4 +378,5 @@ runTest = do
   testPlaceholdersOfType
   testComputeTasksHaveCpus
   testThreadRangesAreOrdered
+  testInstrumentationGaps
   putStrLn "All TaskMap tests passed."

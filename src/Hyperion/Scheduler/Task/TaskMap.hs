@@ -2,7 +2,9 @@
 {-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GADTs                 #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE NoFieldSelectors      #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE StaticPointers        #-}
 {-# LANGUAGE UndecidableInstances  #-}
@@ -16,23 +18,31 @@ import Data.Graph                          (SCC (..), stronglyConnComp)
 import Data.List.NonEmpty                  qualified as NonEmpty
 import Data.Map.Strict                     (Map)
 import Data.Map.Strict                     qualified as Map
+import Data.Maybe                          (isNothing)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
+import Data.Text                           (Text)
 import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage (..),
-                                            taskHasClosure, taskInputPaths,
-                                            taskOutputPaths)
+import Hyperion.Scheduler.StatKey          (TaskKeyFileInfo (..))
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
+                                            RunStage (..), Tag, taskHasClosure,
+                                            taskInputPaths, taskOutputPaths,
+                                            taskOutputs, taskResourceEstimates,
+                                            taskStatKey)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask)
+import Hyperion.Scheduler.Types            (isFromStats, modelEstimate,
+                                            schedulingEstimate)
 
 type TaskMap a = Map a (Set a)
 
--- | The tasks needed to create the key's files. Statistics are not applied
--- yet: call 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap' on
--- the final map.
+-- | The tasks needed to create the key's files. Their estimates are not
+-- computed yet: call
+-- 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap' on the final
+-- map.
 mkTaskMap :: (Monad m, HasTaskChain m r c k) => r -> c -> k -> m (TaskMap WrappedTask)
-mkTaskMap resolver cfg = toTaskEdges (taskChain resolver cfg)
+mkTaskMap resolver cfg key = toTaskEdges (taskChain resolver cfg) key
 
 -- | Update all tasks (keys and values) in a TaskMap. A dependency in the
 -- values becomes the updated task from the keys, so that each task is one
@@ -192,3 +202,81 @@ replaceTasks replacementMap = addNewKeys . replaceDeps . removeOldKeys where
 placeholdersOfType :: (IsTask a, Typeable k) => TaskMap a -> [(a, k)]
 placeholdersOfType taskMap =
   [ (t, k) | t <- Map.keys taskMap, Just k <- [taskPlaceholderKey t] ]
+
+-- | A way in which a task is not instrumented, i.e. will be scheduled on a
+-- guess rather than on a declared or measured figure.
+--
+-- These read what a task /declares/, never a figure recovered from statistics:
+-- a task that declares nothing is a gap whether or not this particular run
+-- happens to have history for it, since the next machine may have none.
+--
+-- There are two independent axes -- task statistics and file statistics -- and
+-- the two gaps on each axis are mutually exclusive. A task is therefore
+-- reported at most once per axis: one that declares no stat key at all is not
+-- also reported for estimating zero memory, since that follows from the first
+-- and has a different remedy.
+data InstrumentationGap
+  = NoStatKey
+  | ZeroMemoryEstimate
+  | NoFileStatKey
+  | ZeroFileSizeEstimate
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+describeInstrumentationGap :: InstrumentationGap -> Text
+describeInstrumentationGap = \case
+  NoStatKey ->
+    "declare no stat key: neither estimated nor recorded"
+  ZeroMemoryEstimate ->
+    "have a stat key, but its memoryEstimate is zero"
+  NoFileStatKey ->
+    "produce output files, but none of them declares a file stat key"
+  ZeroFileSizeEstimate ->
+    "have file stat keys, but every output file's size is zero"
+
+-- | Instrumentation gaps in a task map, with the tags of the tasks affected.
+-- Deduplicated, so there is one entry per task type rather than per task.
+--
+-- These are diagnostics, not errors: they are reported by 'runTasks' rather
+-- than rejected by 'validateTaskMap', because a zero estimate is harmless for
+-- a small task and only costs an under-allocation for a large one. Tasks that
+-- compute nothing (no-ops, placeholders) are excluded entirely -- for them,
+-- declaring nothing is correct.
+taskInstrumentationGaps :: IsTask a => TaskMap a -> Map InstrumentationGap (Set (Maybe Tag))
+taskInstrumentationGaps taskMap = Map.fromListWith Set.union
+  [ (gap, Set.singleton (taskTag t))
+  | t <- Map.keys taskMap
+  , taskHasClosure t
+  , gap <- statGaps t <> fileGaps t
+  ]
+  where
+    statGaps t
+      | isNothing (taskStatKey t) = [NoStatKey]
+      | declaredMemory t == 0      = [ZeroMemoryEstimate]
+      | otherwise                 = []
+
+    declaredMemory t = modelEstimate (taskResourceEstimates t).memory
+
+    fileGaps t
+      | Set.null outputs                              = []
+      | all (isNothing . (.fileStatKey)) outputsList  = [NoFileStatKey]
+      | all ((== 0) . modelEstimate . (.fileSize)) outputsList = [ZeroFileSizeEstimate]
+      | otherwise                                     = []
+      where
+        outputs = taskOutputs t
+        outputsList = Set.toList outputs
+
+-- | Tags of tasks whose recorded memory exceeded their own estimate by more
+-- than the given factor, i.e. whose model is optimistic. These are the tasks
+-- most likely to be killed for running out of memory on a machine with no
+-- statistics to fall back on.
+--
+-- Only tasks whose estimates actually came from statistics can be compared, so
+-- a task that has never run is never reported.
+underestimatedMemoryTags :: IsTask a => Rational -> TaskMap a -> Set (Maybe Tag)
+underestimatedMemoryTags factor taskMap = Set.fromList
+  [ taskTag t
+  | t <- Map.keys taskMap
+  , let memory = (taskResourceEstimates t).memory
+  , isFromStats memory
+  , toRational (schedulingEstimate memory) > factor * toRational (modelEstimate memory)
+  ]

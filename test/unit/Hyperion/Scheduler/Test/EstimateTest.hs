@@ -40,6 +40,7 @@ import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             filesOnlySummary, taskOutputs,
                                             taskResourceEstimates,
                                             taskRuntimeEstimate, taskStatKey)
+import Hyperion.Scheduler.Task.TaskMap     (TaskMap, underestimatedMemoryTags)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats,
                                             wrapTask)
 import Hyperion.Scheduler.Types            (Estimate (..), FileSize,
@@ -221,6 +222,19 @@ testDecorateIsIdempotent = do
   expect "decorating twice keeps the measured memory" $
     schedulingEstimate estimates.memory == 8 * 1024 * 1024
 
+-- | A task whose measured memory dwarfs its own model is reported.
+testUnderestimatedMemoryIsReported :: IO ()
+testUnderestimatedMemoryIsReported = do
+  let
+    stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
+    decorate = decorateTaskWithStats stats
+    overOptimistic = decorate (estTask "A" (1024 * 1024))
+    accurate       = decorate (estTask "A" (7 * 1024 * 1024))
+  expect "a model 8x below the measurement is reported" $
+    underestimatedMemoryTags 2 (taskMapOf [overOptimistic]) == Set.singleton (Just "A")
+  expect "a model close to the measurement is not reported" $
+    Set.null (underestimatedMemoryTags 2 (taskMapOf [accurate]))
+
 -- | 'wrapTask' must not relabel a measurement as the task's own prediction.
 -- No task in this repository reports measurements of its own -- only
 -- 'decorateTaskWithStats' does, and a 'WrappedTask' cannot be wrapped again for
@@ -340,12 +354,16 @@ testTaskEstimatesAt = do
   expect "file size estimates are keyed as the recorded sizes are" $
     Map.lookup fileStatKey estimates.fileSizes == Just (EstimatedByTask 100)
 
+taskMapOf :: [WrappedTask] -> TaskMap WrappedTask
+taskMapOf tasks = Map.fromList [(t, Set.empty) | t <- tasks]
+
 runTest :: IO ()
 runTest = do
   testStatsOverrideKeepsOwnEstimate
   testRuntimeMeasuredWithoutMemory
   testNoMatchKeepsTaskEstimates
   testDecorateIsIdempotent
+  testUnderestimatedMemoryIsReported
   testWrapKeepsMeasuredEstimates
   testZeroCpuRecordContributesNothing
   testTrialsSummary

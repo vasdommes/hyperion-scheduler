@@ -73,7 +73,9 @@ import Hyperion.Scheduler.RunTasks.Shared           (Shared (..), newShared,
 import Hyperion.Scheduler.RunTasks.Shared           qualified as Shared
 import Hyperion.Scheduler.RunTasks.TaskDistribution (CPUAllocation,
                                                      allocateCpusToTasks,
-                                                     distributeTasksToNodesWithScores)
+                                                     describeUnschedulable,
+                                                     distributeTasksToNodesWithScores,
+                                                     unschedulableTaskTags)
 import Hyperion.Scheduler.RunTasks.TaskPriority     (TaskPriority,
                                                      mkTaskPriorityHelper,
                                                      taskPriority)
@@ -87,12 +89,15 @@ import Hyperion.Scheduler.Stats                     (TaskRecord (..),
 import Hyperion.Scheduler.Task                      (EstimatedTaskMap,
                                                      IsTask (..), RunStage (..),
                                                      TaskMap, TaskSummary (..),
+                                                     describeInstrumentationGap,
                                                      estimatedTasks,
                                                      originalTask,
                                                      taskInputPaths, taskInputs,
+                                                     taskInstrumentationGaps,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
                                                      taskOutputs, taskStatKey,
+                                                     underestimatedMemoryTags,
                                                      validateTaskMap)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
@@ -578,7 +583,20 @@ runTaskMap config taskMap = do
   _ <- case validateTaskMap taskMap of
     Left err -> Log.throw err
     Right _  -> pure ()
+  -- Not fatal: a zero estimate is harmless for a small task, but a large one
+  -- would be under-allocated and reserve no memory. Reported once per task
+  -- type so that a forgotten 'toStatKey' is visible before the run, rather
+  -- than as missing statistics afterwards.
+  forM_ (Map.toList (taskInstrumentationGaps taskMap)) $ \(gap, tags) ->
+    Log.warn ("Tasks " <> describeInstrumentationGap gap) (Set.toList tags)
+  case Set.toList (underestimatedMemoryTags 2 taskMap) of
+    []   -> pure ()
+    tags -> Log.warn
+      "Tasks used over twice the memory their own model predicts, so they may \
+      \be killed for running out of memory where no statistics exist" tags
   nodes <- getJobNodes config
+  forM_ (Map.toList (unschedulableTaskTags config nodes (Map.keys taskMap))) $ \(reason, tags) ->
+    Log.warn ("Tasks " <> describeUnschedulable reason) (Set.toList tags)
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let
         getTaskPriority = taskPriority $ mkTaskPriorityHelper nodes taskGraph

@@ -100,6 +100,8 @@ data TaskSummary = MkTaskSummary
     -- whose only measurable quantity would be scheduler bookkeeping latency.
     -- Setting it instead to the whole task encoded as its own stat key would
     -- put every task in a group of one, which no curve can be fitted to.
+    -- 'Hyperion.Scheduler.Task.TaskMap.taskInstrumentationGaps' reports tasks
+    -- that compute but leave this at 'Nothing'.
   , statKey     :: Maybe StatKey
     -- | Estimated memory in bytes and runtime in seconds, with the provenance
     -- of each. Ordinary tasks give their own model (e.g.
