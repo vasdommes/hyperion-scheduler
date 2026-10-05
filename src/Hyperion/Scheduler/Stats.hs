@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes   #-}
 {-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE DefaultSignatures     #-}
 {-# LANGUAGE DeriveAnyClass        #-}
@@ -7,6 +8,7 @@
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE StaticPointers        #-}
 {-# LANGUAGE TypeFamilies          #-}
 
@@ -18,7 +20,17 @@ module Hyperion.Scheduler.Stats
   , FileStats (..)
   , Trials (..)
   , toTrials
+  , Accuracy (..)
   , taskEstimatesAt
+  , estimateAccuracy
+  , modelAccuracy
+  , accuracyBy
+  , accuracyWith
+  , modelAccuracyOf
+  , modelFileSizeAccuracyOf
+  , estimateFileSizeAccuracy
+  , modelFileSizeAccuracy
+  , fileSizeAccuracyBy
   , recordToTaskStats
   , approxRuntime
   , maxMemory
@@ -54,12 +66,16 @@ import GHC.Generics                   (Generic, Generically (..))
 import Hyperion.Log                   qualified as Log
 import Hyperion.OsPath                (OsPath, takeDirectory)
 import Hyperion.OsString              (fromString, toString)
-import Hyperion.Scheduler.StatKey     (EncodedSummary, FileStatKey, StatKey,
-                                       TaskKeyFileInfo (..), unitSummary)
+import Hyperion.Scheduler.StatKey     (EncodedSummary, FileStatKey,
+                                       IsFileStatKey (..), IsStatKey (..),
+                                       StatKey, TaskKeyFileInfo (..),
+                                       decodeFileStatKey, decodeStatKey,
+                                       decodeSummary, unitSummary)
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), ResourceEstimates (..),
                                        taskOutputs, taskResourceEstimates)
 import Hyperion.Scheduler.Types       (Estimate, FileSize (..), MemorySize (..),
-                                       Node, NumCPUs)
+                                       Node, NumCPUs, modelEstimate,
+                                       schedulingEstimate)
 import Hyperion.Util                  (randomString)
 import Prelude                        hiding (readFile, (^))
 import Prelude qualified
@@ -125,6 +141,118 @@ taskEstimatesAt numCpus task = MkTaskEstimates
   }
   where
     estimates = taskResourceEstimates task
+
+-- | Measured resource usage over what was predicted for it, so a ratio above
+-- one means the run used more than predicted -- the dangerous direction for
+-- memory. 'Nothing' where nothing could be scored: no memory figure was
+-- measured, or the prediction was zero and no ratio exists.
+data Accuracy = MkAccuracy
+  { memory  :: Maybe (Trials Double)
+  , runtime :: Maybe (Trials Double)
+  }
+  deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
+  deriving (Semigroup, Monoid) via (Generically Accuracy)
+
+-- | 'estimateAccuracy' for the sizes of the files a run produced.
+estimateFileSizeAccuracy :: [TaskRecord a] -> Map FileStatKey (Trials Double)
+estimateFileSizeAccuracy = fileSizeAccuracyBy schedulingEstimate
+
+-- | 'modelAccuracy' for the sizes of the files a run produced, i.e. whether
+-- 'Hyperion.Scheduler.StatKey.fileSizeEstimate' needs fixing.
+modelFileSizeAccuracy :: [TaskRecord a] -> Map FileStatKey (Trials Double)
+modelFileSizeAccuracy = fileSizeAccuracyBy modelEstimate
+
+-- | 'accuracyBy' for file sizes, which need no grouping function: a file stat
+-- key is what they are grouped by. A size is scored where it was both predicted
+-- and measured, so a file whose size could not be measured is left out.
+fileSizeAccuracyBy
+  :: (forall x . Estimate x -> x)
+  -> [TaskRecord a]
+  -> Map FileStatKey (Trials Double)
+fileSizeAccuracyBy predicted records = getMonoidalMap $ foldMap one records
+  where
+    one record = MonoidalMap $ Map.mapMaybe id $
+      Map.intersectionWith score record.taskFileSizes record.taskEstimates.fileSizes
+    score measured estimate = case realToFrac (predicted estimate) of
+      prediction | prediction <= 0 -> Nothing
+                 | otherwise -> Just $
+                     toTrials $ NonEmpty.map ((/ prediction) . fromIntegral) measured
+
+-- | How a run's measurements compare with the estimates it was actually
+-- scheduled on, grouped by stat key. This scores the scheduling decisions,
+-- including those made from recorded statistics.
+estimateAccuracy :: [TaskRecord a] -> Map StatKey Accuracy
+estimateAccuracy = accuracyBy (.taskStatKey) schedulingEstimate
+
+-- | How a run's measurements compare with what the tasks' own models predicted,
+-- ignoring any statistics that overrode them. This is what says whether a
+-- 'Hyperion.Scheduler.StatKey.memoryEstimate' needs fixing, and it is
+-- answerable for a task that has never run before.
+modelAccuracy :: [TaskRecord a] -> Map StatKey Accuracy
+modelAccuracy = accuracyBy (.taskStatKey) modelEstimate
+
+-- | Scores records against one of their two estimates, grouped by whatever
+-- identifies them. Records the grouping function rejects are left out.
+--
+-- Grouping by stat key is the precise choice and what the two functions above
+-- use; grouping by a task's tag instead trades precision for a summary a person
+-- can read, since a stat key prints as a whole JSON object.
+accuracyBy
+  :: Ord k
+  => (TaskRecord a -> Maybe k)
+  -> (forall x . Estimate x -> x)
+  -> [TaskRecord a]
+  -> Map k Accuracy
+accuracyBy groupKey predicted = accuracyWith groupKey $ \record -> Just
+  (predicted record.taskEstimates.memory, predicted record.taskEstimates.runtime)
+
+-- | 'accuracyBy' with the memory and runtime predictions given per record.
+-- Records with no prediction are left out.
+accuracyWith
+  :: Ord k
+  => (TaskRecord a -> Maybe k)
+  -> (TaskRecord a -> Maybe (MemorySize, NominalDiffTime))
+  -> [TaskRecord a]
+  -> Map k Accuracy
+accuracyWith groupKey predict records = getMonoidalMap $ foldMap one records
+  where
+    one record = case (,) <$> groupKey record <*> predict record of
+      Nothing -> mempty
+      Just (key, (memory, runtime)) -> MonoidalMap $ Map.singleton key MkAccuracy
+        { memory = do
+            measured <- record.taskMemory
+            ratio (realToFrac measured) (realToFrac memory)
+        , runtime = ratio (realToFrac record.taskRuntime) (realToFrac runtime)
+        }
+    ratio measured prediction
+      | prediction <= 0 = Nothing
+      | otherwise       = Just $ singleTrial (measured / prediction)
+
+-- | 'modelAccuracy' for the current model of the stat key type @k@, evaluated
+-- at each record's stat key and input summary, rather than for the model the
+-- run had. It judges a changed model against recorded runs. Records of other
+-- key types, or whose summary does not decode, are left out.
+modelAccuracyOf :: forall k a . IsStatKey k => [TaskRecord a] -> Map StatKey Accuracy
+modelAccuracyOf = accuracyWith (.taskStatKey) $ \record -> do
+  key <- decodeStatKey @k =<< record.taskStatKey
+  summary <- decodeSummary =<< record.taskInputSummary
+  pure (memoryEstimate key summary, runtimeEstimate key summary record.taskNumCPUs)
+
+-- | 'modelAccuracyOf' for file sizes, evaluated at each record's file stat
+-- keys and producer input summary.
+modelFileSizeAccuracyOf
+  :: forall k a . (IsFileStatKey k, FromJSON k)
+  => [TaskRecord a] -> Map FileStatKey (Trials Double)
+modelFileSizeAccuracyOf records = getMonoidalMap $ foldMap one records
+  where
+    one record = MonoidalMap $ Map.fromList
+      [ (fileStatKey, toTrials (NonEmpty.map ((/ prediction) . fromIntegral) sizes))
+      | Just summary <- [decodeSummary =<< record.taskProducerSummary]
+      , (fileStatKey, sizes) <- Map.toList record.taskFileSizes
+      , Just key <- [decodeFileStatKey @k fileStatKey]
+      , let prediction = realToFrac (fileSizeEstimate key summary) :: Double
+      , prediction > 0
+      ]
 
 -- | Observations of one quantity, summarised so that they can be merged
 -- without keeping the observations themselves.

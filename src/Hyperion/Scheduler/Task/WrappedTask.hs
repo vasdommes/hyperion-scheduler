@@ -41,8 +41,10 @@ data WrappedTask = forall a . IsTask a => MkWrappedTask
   -- Computed once here, where the task's config is still in hand, so that
   -- nothing on the runtime path has to rebuild it. Its estimates can come
   -- from the task or be overriden by stats. Each remembers which it was, so
-  -- that a task record can state what the task's own model predicted
-  -- alongside what actually happened.
+  -- that 'runTasks' can report how much of the map is running on measurements
+  -- rather than guesses without needing the statistics itself, and so that a
+  -- task record can state what the task's own model predicted alongside what
+  -- actually happened.
   , summary :: TaskSummary
   }
 
@@ -106,9 +108,11 @@ wrapTask t = MkWrappedTask
 --    'fileSizeCorrection'.
 -- 3. Otherwise the task's own model.
 --
--- A miss shows in the resulting 'Estimate's. Memory and runtime are replaced
--- independently: memory statistics are absent whenever no run recorded a
--- memory figure, while runtime statistics are always recorded.
+-- A miss is not reported here -- this function is pure, and its callers have
+-- no 'MonadIO' -- but it is visible in the resulting 'Estimate's, which
+-- 'runTasks' reports. Memory and runtime are replaced independently: memory
+-- statistics are absent whenever no run recorded a memory figure, while
+-- runtime statistics are always recorded.
 decorateSummaryWithStats :: TaskAndFileStats -> TaskSummary -> TaskSummary
 decorateSummaryWithStats stats summary = summary
   { outputs   = Set.map decorateFile summary.outputs

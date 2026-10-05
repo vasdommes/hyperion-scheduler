@@ -12,13 +12,13 @@
 module Hyperion.Scheduler.Task.TaskMap where
 
 import Control.Exception                   (Exception)
-import Control.Monad                       (foldM, foldM_)
+import Control.Monad                       (foldM, foldM_, void)
 import Control.Monad.Catch                 (MonadThrow, throwM)
 import Data.Graph                          (SCC (..), stronglyConnComp)
 import Data.List.NonEmpty                  qualified as NonEmpty
 import Data.Map.Strict                     (Map)
 import Data.Map.Strict                     qualified as Map
-import Data.Maybe                          (isNothing)
+import Data.Maybe                          (isJust, isNothing)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           (Text)
@@ -32,8 +32,8 @@ import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             taskStatKey)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask)
-import Hyperion.Scheduler.Types            (isFromStats, modelEstimate,
-                                            schedulingEstimate)
+import Hyperion.Scheduler.Types            (Estimate (..), isFromStats,
+                                            modelEstimate, schedulingEstimate)
 
 type TaskMap a = Map a (Set a)
 
@@ -264,6 +264,38 @@ taskInstrumentationGaps taskMap = Map.fromListWith Set.union
       where
         outputs = taskOutputs t
         outputsList = Set.toList outputs
+
+-- | How many tasks are running on recorded statistics rather than on their own
+-- models, out of those that could be: a task with no stat key can never match,
+-- so counting it would dilute the ratio and make coverage always look poor.
+--
+-- A ratio near zero after statistics were supplied usually means the keys did
+-- not match at all -- a renamed stat key type, or a key whose shape changed --
+-- rather than a genuine absence of history.
+data StatsCoverage = MkStatsCoverage
+  { measured    :: Int
+    -- ^ Tasks with a figure recorded for the same stat key and input summary.
+  , corrected   :: Int
+    -- ^ The other tasks with a figure corrected by statistics recorded for
+    -- close input summaries.
+  , withStatKey :: Int
+  }
+  deriving (Eq, Show)
+
+statsCoverage :: IsTask a => TaskMap a -> StatsCoverage
+statsCoverage taskMap = MkStatsCoverage
+  { measured    = length (filter (any isMeasured . figures) withKey)
+  , corrected   = length (filter (\t -> not (any isMeasured (figures t)) && any isFromStats (figures t)) withKey)
+  , withStatKey = length withKey
+  }
+  where
+    withKey = filter (isJust . taskStatKey) (Map.keys taskMap)
+    -- Memory and runtime are looked up independently.
+    figures t = [void estimates.memory, void estimates.runtime]
+      where estimates = taskResourceEstimates t
+    isMeasured = \case
+      MeasuredFromStats _ _ -> True
+      _                     -> False
 
 -- | Tags of tasks whose recorded memory exceeded their own estimate by more
 -- than the given factor, i.e. whose model is optimistic. These are the tasks
