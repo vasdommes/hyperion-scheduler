@@ -15,8 +15,9 @@ stack build
 
 ### Unit tests
 
-Pure tests for `TaskMap` validation, task replacement and placeholders. No
-cluster, no filesystem:
+Tests for task maps (validation, replacement, placeholders, input sizes),
+statistics and estimates, and input summaries. No cluster; only the `TaskFiles`
+test touches the filesystem, in a temporary directory:
 
 ```sh
 stack test
@@ -69,8 +70,13 @@ directory.
 
 #### Output
 
-Both modes write, next to the final vector:
+Both modes run the problem twice, in `from_model/` and `from_stats/`. The
+second pass is scheduled from the statistics the first one recorded, and the
+test fails if a task with a stat key did not use them. Next to the two
+directories:
 
-- `task_records.json` — one record per task (start time, runtime, memory, node,
-  CPUs, output file sizes)
-- `task_stats.json` — the same aggregated per task type
+- `task_records.json` — one record per task of the first pass (start time,
+  runtime, memory, node, CPUs, output file sizes, the estimates and their
+  sources, the stat key and the input summaries)
+- `task_stats.json` — the same, aggregated by stat key and input summary
+- `task_records_from_stats.json` — the records of the second pass

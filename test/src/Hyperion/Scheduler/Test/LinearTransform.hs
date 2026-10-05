@@ -28,6 +28,7 @@ import Data.Aeson                (FromJSON, ToJSON)
 import Data.Binary               (Binary)
 import Data.Matrix               (Matrix)
 import Data.Matrix               qualified as Matrix
+import Data.Maybe                (isJust)
 import Data.Traversable          (for)
 import Data.Typeable             (Typeable)
 import Data.Vector               (Vector)
@@ -38,7 +39,8 @@ import Hyperion.Log              qualified as Log
 import Hyperion.OsPath           (OsPath, (<.>), (</>))
 import Hyperion.OsString         (showOs)
 import Hyperion.Scheduler        (IsFileStatKey (..), IsStatKey (..),
-                                  PathResolver (..), ToFileStatKey (..),
+                                  MemorySize, PathResolver (..),
+                                  ToFileStatKey (..), TotalInputFileSize (..),
                                   encodeJsonFileAtomic, recordToTaskStats,
                                   writeTaskStats)
 import Hyperion.Scheduler        qualified as Scheduler
@@ -67,6 +69,17 @@ layerOutputVectorLength :: LinearTransformContext a => Int -> a -> Int
 layerOutputVectorLength layerIndex ctx = nrows
   where (nrows, _ncols) = layerMatrixDims layerIndex ctx
 
+-- | Every task here multiplies or sums a handful of 'Int's, so what a node must
+-- hold while one runs is the worker's own resident set rather than anything the
+-- task allocates -- see 'memoryEstimate', which is measured per worker and
+-- summed per concurrent task.
+--
+-- Measured at 86-95 MiB across tasks on the machine this was written on. The
+-- figure is not portable, which is why the scheduler prefers recorded
+-- statistics to it as soon as there are any.
+workerBaselineMemory :: MemorySize
+workerBaselineMemory = 96 * 1024 * 1024
+
 -- * Key types
 
 -- | A single product @A_ik x_k@.
@@ -90,7 +103,7 @@ data MultiplyStatKey = MkMultiplyStatKey
   deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
 instance IsStatKey MultiplyStatKey where
-  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ _ = workerBaselineMemory
 
 computeMultiplyM :: (Applicative f, FetchesKey (VectorKey a) f, LinearTransformContext a) => MultiplyKey a -> f (Process Int)
 computeMultiplyM key = do
@@ -122,13 +135,24 @@ instance
   toStatKey _ _ = Just MkMultiplyStatKey
   tag _ = Just "Multiply"
 
-instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
-  type FileStatKeyOf (MultiplyKey a) = MultiplyKey a
-  fileStatKeyOf = Just
+-- | A file holding one serialized 'Int'. Both products and vector elements
+-- write one, and a file's size is a property of what was computed rather than of
+-- which task computed it, so they share a single group -- which sees every such
+-- file in the run rather than a fraction of them.
+--
+-- Projecting a key onto itself would instead put every file in a group of its
+-- own, which can report the size of a file already produced but can never
+-- predict a new one.
+data IntFileStatKey = MkIntFileStatKey
+  deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
--- | Every product is one Int, so all of them share a size.
-instance LinearTransformContext a => IsFileStatKey (MultiplyKey a) where
-  fileSizeEstimate _ _ = 1
+instance IsFileStatKey IntFileStatKey where
+  fileSizeEstimate _ _ = 8
+
+-- NB: needs nothing of the key, hence nothing of its context either.
+instance ToFileStatKey (MultiplyKey a) where
+  type FileStatKeyOf (MultiplyKey a) = IntFileStatKey
+  fileStatKeyOf _ = Just MkIntFileStatKey
 
 -- | One element of an output vector, @sum_k A_ik x_k@.
 data VectorElementKey a = MkVectorElementKey
@@ -152,7 +176,7 @@ newtype VectorElementStatKey = MkVectorElementStatKey { inputLength :: Int }
   deriving newtype (ToJSON, FromJSON)
 
 instance IsStatKey VectorElementStatKey where
-  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ _ = workerBaselineMemory
 
 vectorElementInputKeys :: LinearTransformContext a => VectorElementKey a -> [MultiplyKey a]
 vectorElementInputKeys key = map mkKey ks where
@@ -191,13 +215,12 @@ instance
       liftIO $ Log.info "Computing vector element" (key, inputs, outputPath)
       runVectorElementScript inputs (key, outputPath)
 
-instance LinearTransformContext a => ToFileStatKey (VectorElementKey a) where
-  type FileStatKeyOf (VectorElementKey a) = VectorElementKey a
-  fileStatKeyOf = Just
-
--- | One Int per element, as for 'MultiplyKey'.
-instance LinearTransformContext a => IsFileStatKey (VectorElementKey a) where
-  fileSizeEstimate _ _ = 1
+-- | An element is one Int, exactly as a product is, so it shares that group.
+-- Its /task/ statistics cannot be shared with a product's: runtime grows with
+-- the number of terms summed, while the file stays one Int.
+instance ToFileStatKey (VectorElementKey a) where
+  type FileStatKeyOf (VectorElementKey a) = IntFileStatKey
+  fileStatKeyOf _ = Just MkIntFileStatKey
 
 -- | The vector @x_i@ entering layer @i@.
 data VectorKey a = MkVectorKey
@@ -234,25 +257,33 @@ instance
  , ToFileStatKey (VectorKey a)
  ) => TaskKey (VectorKey a) where
   type StatKeyOf (VectorKey a) = VectorStatKey
-  toStatKey _ key = Just MkVectorStatKey
-    { size = layerInputVectorLength key.layerIndex key.ctx }
+  toStatKey _ key = Just MkVectorStatKey { size = key.length }
   tag _ = Just "Vector"
 
-instance LinearTransformContext a => ToFileStatKey (VectorKey a) where
-  type FileStatKeyOf (VectorKey a) = VectorKey a
-  fileStatKeyOf = Just
+-- | Here the task stat key does double duty: a vector's file size and the work
+-- of gathering it both depend on its length and nothing else, so one projection
+-- -- the very same one 'toStatKey' makes -- serves both, and there is no second
+-- type to declare. Reuse a task stat key only when that is true: an element's
+-- runtime and file size disagree, so 'VectorElementKey' cannot.
+instance ToFileStatKey (VectorKey a) where
+  type FileStatKeyOf (VectorKey a) = VectorStatKey
+  fileStatKeyOf key = Just MkVectorStatKey { size = key.length }
 
--- | A vector's file scales with its length.
-instance LinearTransformContext a => IsFileStatKey (VectorKey a) where
-  fileSizeEstimate key _ = fromIntegral key.length
+-- | A serialized @Vector Int@: one Int per element, after a length prefix.
+instance IsFileStatKey VectorStatKey where
+  fileSizeEstimate key _ = fromIntegral (8 * key.size + 8)
 
 -- | Vectors of equal size share statistics, whichever layer they belong to.
 newtype VectorStatKey = MkVectorStatKey { size :: Int }
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON)
 
+-- | The memory model reads the size of the element files the vector is
+-- gathered from, so that the second pass must match statistics recorded with
+-- the input summary measured in the first.
 instance IsStatKey VectorStatKey where
-  memoryEstimate _ _ = 1024 * 1024
+  type InputSummary VectorStatKey = TotalInputFileSize
+  memoryEstimate _ (MkTotalInputFileSize total) = workerBaselineMemory + fromIntegral total
 
 -- * A concrete problem: cyclic shift
 
@@ -338,12 +369,12 @@ instance Typeable a => Static (PathResolver LinearPathResolver (VectorElementKey
 instance (Typeable a, Static(LinearTransformContext a)) => Static (PathResolver LinearPathResolver (VectorKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
 
-instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (MultiplyKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
-instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (VectorElementKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
-instance (Typeable a, Static(LinearTransformContext a)) => Static (ToFileStatKey (VectorKey a)) where
-  closureDict = static (\Dict -> Dict) `cAp` closureDict @(LinearTransformContext a)
+instance Typeable a => Static (ToFileStatKey (MultiplyKey a)) where
+  closureDict = static Dict
+instance Typeable a => Static (ToFileStatKey (VectorElementKey a)) where
+  closureDict = static Dict
+instance Typeable a => Static (ToFileStatKey (VectorKey a)) where
+  closureDict = static Dict
 
 instance
   ( Typeable a
@@ -368,8 +399,14 @@ instance
 
 -- * The job
 
--- | Build the task map for @problem@, run it, write task stats under
--- @baseDir@ and check the result against 'getOutputVector'.
+-- | Build the task map for @problem@, run it twice under @baseDir@, and check
+-- each result against 'getOutputVector'.
+--
+-- The second pass is scheduled from the statistics the first one recorded, so
+-- that the whole loop -- record, aggregate, write, read back, decorate -- runs
+-- for real rather than only in unit tests. Each pass computes in its own
+-- directory, so the artifacts of both survive for inspection; the two share
+-- statistics because a stat key holds no paths.
 --
 -- The scheduler config is passed as a 'Job' action (rather than a value) so
 -- that it can be evaluated on the node that actually runs the job: on a
@@ -379,35 +416,76 @@ linearTransformJob getSchedulerConfig baseDir problem = do
   schedulerConfig <- getSchedulerConfig
   let
     relDir = "shift_" <> showOs problem.shift <> "_dim_" <> showOs problem.dim
-    resolver = MkLinearPathResolver
-      { outDir = baseDir </> relDir
-      , tempDir = schedulerConfig.localStoragePath </> relDir
+    problemDir = baseDir </> relDir
+    resolverFor pass = MkLinearPathResolver
+      { outDir = problemDir </> pass
+      , tempDir = schedulerConfig.localStoragePath </> relDir </> pass
       }
     outputVectorKey = MkVectorKey
       { layerIndex = problem.shift
       , length = problem.dim
       , ctx = problem
       }
+    taskStatsFile = problemDir </> "task_stats.json"
 
-  Log.info "Running linear transform test" (problem, resolver)
-  liftIO $ do
-    removePathForcibly resolver.outDir
-    createDirectoryIfMissing True resolver.outDir
-  taskMap <- Scheduler.mkEstimatedTaskMap mempty =<< mkTaskMap resolver () outputVectorKey
-  taskRecords <- Scheduler.runTasks schedulerConfig taskMap
+    runPass :: OsPath -> Scheduler.TaskAndFileStats -> Job [Scheduler.TaskRecord Scheduler.WrappedTask]
+    runPass pass stats = do
+      let resolver = resolverFor pass
+      Log.info "Running linear transform test" (problem, resolver)
+      liftIO $ do
+        removePathForcibly resolver.outDir
+        createDirectoryIfMissing True resolver.outDir
+      taskMap <- Scheduler.mkEstimatedTaskMap stats =<< mkTaskMap resolver () outputVectorKey
+      taskRecords <- Scheduler.runTasks schedulerConfig taskMap
+      checkOutputVector resolver
+      pure taskRecords
 
-  let
-    taskRecordsFile = resolver.outDir </> "task_records.json"
-    taskStatsFile   = resolver.outDir </> "task_stats.json"
-  Log.info "Writing task records to file" taskRecordsFile
-  encodeJsonFileAtomic taskRecordsFile taskRecords
-  writeTaskStats taskStatsFile (foldMap recordToTaskStats taskRecords)
+    checkOutputVector resolver = do
+      outputValue <- readValueM outputVectorKey (resolvePath resolver outputVectorKey)
+      Log.info "Computed output vector" outputValue
+      let expectedValue = getOutputVector problem
+      unless (expectedValue == outputValue) $
+        Log.throw $ AssertionFailed $
+          "Wrong output vector for problem: " <> show problem <>
+          ": expected: " <> show expectedValue <>
+          ": got: " <> show outputValue
 
-  outputValue <- readValueM outputVectorKey (resolvePath resolver outputVectorKey)
-  Log.info "Computed output vector" outputValue
-  let expectedValue = getOutputVector problem
-  unless (expectedValue == outputValue) $
-    Log.throw $ AssertionFailed $
-      "Wrong output vector for problem: " <> show problem <>
-      ": expected: " <> show expectedValue <>
-      ": got: " <> show outputValue
+  -- Nothing is known about these tasks yet, so every estimate is the task's
+  -- own model.
+  firstRecords <- runPass "from_model" mempty
+  Log.info "Writing task records to file" (problemDir </> "task_records.json")
+  encodeJsonFileAtomic (problemDir </> "task_records.json") firstRecords
+  writeTaskStats taskStatsFile (foldMap recordToTaskStats firstRecords)
+
+  stats <- Scheduler.readTaskStats [taskStatsFile]
+  secondRecords <- runPass "from_stats" stats
+  encodeJsonFileAtomic (problemDir </> "task_records_from_stats.json") secondRecords
+  assertScheduledFromStats stats secondRecords
+
+-- | Every task with an identity in statistics must have been scheduled from
+-- them, which is the point of having recorded them. A task without a stat key
+-- is not looked up at all, so it is not expected to match.
+assertScheduledFromStats
+  :: Scheduler.TaskAndFileStats
+  -> [Scheduler.TaskRecord Scheduler.WrappedTask]
+  -> Job ()
+assertScheduledFromStats stats records = unless (null unmeasured) $
+  Log.throw $ AssertionFailed $
+    "Tasks with a stat key were not scheduled from the recorded statistics: " <>
+    show unmeasured
+  where
+    unmeasured =
+      [ (Scheduler.taskTag record.task, record.taskEstimates)
+      | record <- records
+      , Just statKey <- [record.taskStatKey]
+      , not (Scheduler.isFromStats record.taskEstimates.runtime)
+        -- Memory statistics exist only where some earlier run recorded a memory
+        -- figure, so require them only where these statistics hold one. Asking
+        -- whether this run measured memory would be the wrong question: the two
+        -- passes need not allocate the same CPUs, and a task that runs on no
+        -- worker reports no memory.
+        || (recordsMemory statKey
+            && not (Scheduler.isFromStats record.taskEstimates.memory))
+      ]
+    recordsMemory statKey =
+      any (isJust . Scheduler.maxMemory) (Scheduler.lookupTaskStats statKey stats)
