@@ -8,6 +8,7 @@
 module Hyperion.Scheduler.Task.IsTask where
 
 import Data.Aeson                  (ToJSON)
+import Data.Map.Strict             (Map)
 import Data.Maybe                  (fromMaybe, isJust)
 import Data.Set                    (Set)
 import Data.Set                    qualified as Set
@@ -17,9 +18,11 @@ import Data.Typeable               (Typeable)
 import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
-import Hyperion.Scheduler.StatKey  (StatKey, TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Types    (Estimate (..), MemorySize, NumCPUs,
-                                    defaultRuntimeEstimate, schedulingEstimate)
+import Hyperion.Scheduler.StatKey  (EncodedSummary, StatKey,
+                                    TaskKeyFileInfo (..), unitSummary)
+import Hyperion.Scheduler.Types    (Estimate (..), FileSize, MemorySize,
+                                    NumCPUs, defaultRuntimeEstimate,
+                                    schedulingEstimate)
 import Hyperion.Scheduler.Util     (typeRepText)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
@@ -84,8 +87,8 @@ type KnownInputs = VirtualFilePath -> Maybe TaskKeyFileInfo
 
 -- | See 'taskSummary'.
 data TaskSummary = MkTaskSummary
-  { inputs    :: Set TaskKeyFileInfo
-  , outputs   :: Set TaskKeyFileInfo
+  { inputs      :: Set TaskKeyFileInfo
+  , outputs     :: Set TaskKeyFileInfo
     -- | The serialized stat key under which this task's resource usage is
     -- recorded and looked up. For a 'Hyperion.Scheduler.Task.Task.Task' this
     -- is built from the task's own stat key, which is also what 'estimates'
@@ -97,17 +100,36 @@ data TaskSummary = MkTaskSummary
     -- whose only measurable quantity would be scheduler bookkeeping latency.
     -- Setting it instead to the whole task encoded as its own stat key would
     -- put every task in a group of one, which no curve can be fitted to.
-  , statKey   :: Maybe StatKey
+  , statKey     :: Maybe StatKey
     -- | Estimated memory in bytes and runtime in seconds, with the provenance
     -- of each. Ordinary tasks give their own model (e.g.
     -- 'estimatesFromModel'); only
     -- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' ever
     -- reports a figure measured from statistics.
-  , estimates :: ResourceEstimates
+  , estimates   :: ResourceEstimates
+    -- | The input summary 'estimates' are computed from, encoded; 'Nothing' if
+    -- the task has no stat key.
+  , inputSummary :: Maybe EncodedSummary
+    -- | Whether statistics recorded with the given input summary can correct
+    -- 'estimates' (see 'Hyperion.Scheduler.StatKey.closeInputSummaries').
+  , closeToInputSummary :: EncodedSummary -> Bool
+    -- | The task's own model for the given input summary, 'Nothing' if it
+    -- does not decode (e.g. after the summary type changed) or the task has
+    -- no stat key. It lets statistics recorded with other inputs be compared
+    -- with the model without the typed stat key.
+  , model       :: EncodedSummary -> Maybe ResourceEstimates
+    -- | The producer input summary the sizes of the output files are computed
+    -- from, encoded; 'Nothing' if they have no file stat key.
+  , producerSummary :: Maybe EncodedSummary
+    -- | 'closeToInputSummary' for the size of an output file.
+  , closeToProducerSummary :: VirtualFilePath -> EncodedSummary -> Bool
+    -- | 'model' for the sizes of the output files, given the producer input
+    -- summary.
+  , outputModel :: EncodedSummary -> Maybe (Map VirtualFilePath FileSize)
   }
 
 -- | The summary of a task with no stat key: its own files and zero
--- estimates.
+-- estimates. The sizes of its output files ignore its inputs (summary '()').
 filesOnlySummary
   :: Set TaskKeyFileInfo  -- ^ its own inputs
   -> Set TaskKeyFileInfo  -- ^ outputs
@@ -118,6 +140,12 @@ filesOnlySummary ownInputs outputs knownInputs = MkTaskSummary
   , outputs     = outputs
   , statKey     = Nothing
   , estimates   = estimatesFromModel 0
+  , inputSummary = Nothing
+  , closeToInputSummary = const False
+  , model       = const Nothing
+  , producerSummary = Just unitSummary
+  , closeToProducerSummary = \_ _ -> False
+  , outputModel = const Nothing
   }
   where
     withKnown known = Set.map (\i -> fromMaybe i (known i.path)) ownInputs

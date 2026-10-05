@@ -14,9 +14,11 @@ import Control.Concurrent.STM                       (TVar, atomically, check,
                                                      writeTVar)
 import Control.Concurrent.Utils                     (Lock, mkExclusiveLock,
                                                      withLock)
+import Control.DeepSeq                              (force)
 import Control.Distributed.Process                  (getSelfPid)
 import Control.Distributed.Process.Async            (Async)
 import Control.Distributed.Process.Async            qualified as Async
+import Control.Exception                            (evaluate)
 import Control.Monad                                (foldM, forM_, forever,
                                                      unless, when)
 import Control.Monad.Catch                          (Handler (..), catches)
@@ -84,7 +86,8 @@ import Hyperion.Scheduler.Stats                     (TaskRecord (..),
                                                      taskEstimatesAt)
 import Hyperion.Scheduler.Task                      (EstimatedTaskMap,
                                                      IsTask (..), RunStage (..),
-                                                     TaskMap, estimatedTasks,
+                                                     TaskMap, TaskSummary (..),
+                                                     estimatedTasks,
                                                      originalTask,
                                                      taskInputPaths, taskInputs,
                                                      taskMemoryCapped,
@@ -95,7 +98,8 @@ import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
 import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
 import Hyperion.Scheduler.TPrioQueue                qualified as TPrioQueue
-import Hyperion.Scheduler.Types                     (FileSize (..),
+import Hyperion.Scheduler.Types                     (Estimate (..),
+                                                     FileSize (..),
                                                      MemorySize (..), Node (..),
                                                      NumCPUs,
                                                      schedulingEstimate)
@@ -403,6 +407,13 @@ runNodeLoop
       _ <- lift $ checkChangeActiveUsagesResponse <$>
         decrementActiveFileUsages fileService (taskInputPaths task) node.address
 
+      -- The summaries from the sizes the input files had when the task ran:
+      -- by now every input exists and its size has been measured.
+      inputSizes <- liftIO $ Shared.withRead fileSizeMapVar $ flip Map.restrictKeys (taskInputPaths task)
+      let measured = summaryWithInputSizes inputSizes task
+      (inputSummary, producerSummary) <- liftIO $ evaluate $
+        force (measured.inputSummary, measured.producerSummary)
+
       -- TODO: use a node-specific TChangeNotifier here?
       notifyChangeM taskQueueNotifier
       liftIO $ writeQueue taskRecordQueue MkTaskRecord
@@ -417,6 +428,8 @@ runNodeLoop
         -- that estimates can be checked against reality after the run.
         , taskEstimates = taskEstimatesAt numCpus task
         , taskStatKey = taskStatKey task
+        , taskInputSummary = inputSummary
+        , taskProducerSummary = producerSummary
         }
       -- NB: this should be the last operation, since the nodeLoop process is killed
       -- after monitorProgressAndDeps reads the last task from finishedTaskQueue!
@@ -686,6 +699,16 @@ taskFilesToCleanup config task = Set.filter (isNodeLocal config) $ taskInputPath
 -- File path -> Number of tasks having this file as input or output
 -- When this number goes to zero, we can delete this file
 type CleanupDependenciesMap = Map VirtualFilePath Int
+
+-- | The task's summary with its input files at the given sizes.
+summaryWithInputSizes :: IsTask a => Map VirtualFilePath FileSize -> a -> TaskSummary
+summaryWithInputSizes sizes task = taskSummary (Just known) task
+  where
+    infos = Map.fromList [ (i.path, i) | i <- Set.toList (taskInputs task) ]
+    known path = do
+      info <- Map.lookup path infos
+      size <- Map.lookup path sizes
+      pure info { fileSize = EstimatedByTask size }
 
 -- Nothing means "no more cleanups expected, exit"
 type CleanupQueue = ConcurrentQueue (Maybe VirtualFilePath)

@@ -35,7 +35,8 @@ import Data.Foldable.Extra                 (allM, traverse_)
 import Data.Functor                        (($>))
 import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
-import Data.Maybe                          (fromMaybe)
+import Data.Map.Strict                     qualified as Map
+import Data.Maybe                          (fromMaybe, isJust)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           (Text)
@@ -53,9 +54,10 @@ import Hyperion.Scheduler.StatKey          (FromInputFiles (..),
                                             IsFileStatKey (..), IsStatKey (..),
                                             TaskKeyFileInfo (..),
                                             ToFileStatKey (..),
-                                            ToTaskKeyFileInfo,
+                                            ToTaskKeyFileInfo, decodeSummary,
                                             encodeFileStatKey, encodeStatKey,
-                                            inputFileSummary, toTaskKeyFileInfo)
+                                            encodeSummary, inputFileSummary,
+                                            toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), KnownInputs,
                                             ResourceEstimates (..), RunStage,
@@ -449,6 +451,19 @@ summarizeTask knownInputs t = MkTaskSummary
       ]
   , statKey     = encodeStatKey <$> statKey
   , estimates   = maybe (estimatesFromModel 0) (`modelFor` currentInputSummary) statKey
+  , inputSummary = statKey $> encodeSummary currentInputSummary
+  , closeToInputSummary = \s -> fromMaybe False $
+      closeInputSummaries <$> statKey <*> pure currentInputSummary <*> decodeSummary s
+  , model       = \s -> modelFor <$> statKey <*> decodeSummary s
+  , producerSummary = if any (isJust . snd) outputs
+      then Just (encodeSummary currentProducerSummary)
+      else Nothing
+  , closeToProducerSummary = \path s -> fromMaybe False $ do
+      fileKey <- join (Map.lookup path outputKeys)
+      closeProducerSummaries fileKey currentProducerSummary <$> decodeSummary s
+  , outputModel = \s -> do
+      summary <- decodeSummary s
+      pure $ Map.fromList [ (path, outputSize summary fileKey) | (path, fileKey) <- outputs ]
   }
   where
     outsAndDeps = outAndDependencies t.config t.key
@@ -462,6 +477,7 @@ summarizeTask knownInputs t = MkTaskSummary
       , let own = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver) dep
       ]
     depInputs = [ (dep, inputFileSummary info) | (dep, info) <- deps ]
+    outputKeys = Map.fromList outputs
     statKey = toStatKey t.config t.key
     currentInputSummary = toInputSummary t.config t.key depInputs
     currentProducerSummary = toProducerInputSummary t.config t.key depInputs

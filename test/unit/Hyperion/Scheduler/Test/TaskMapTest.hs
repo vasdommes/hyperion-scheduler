@@ -31,7 +31,7 @@ import Hyperion.Scheduler.StatKey               (FileStatKey,
                                                  IsFileStatKey (..),
                                                  TaskKeyFileInfo (..),
                                                  ToFileStatKey (..),
-                                                 encodeFileStatKey)
+                                                 encodeFileStatKey, unitSummary)
 import Hyperion.Scheduler.Stats                 (FileStats (..),
                                                  TaskAndFileStats (..),
                                                  TaskStats (..), toTrials)
@@ -314,7 +314,8 @@ testInputSizes = do
       ]
     -- The size of q recorded in statistics.
     stats = MkTaskAndFileStats (MkTaskStats Map.empty) $ MkFileStats $
-      Map.singleton (fileStatKeyOfPath q) (toTrials (NonEmpty.singleton 70))
+      Map.singleton (fileStatKeyOfPath q) $
+        Map.singleton unitSummary (toTrials (NonEmpty.singleton 70))
     estimated = estimatedTasks $ runDisk (Map.fromList [(r, 3), (q, 1000)]) (mkEstimatedTaskMap stats taskMap)
     inputSizes t = [ (i.path, i.fileSize) | i <- Set.toList (taskInputs t) ]
     isConsumer = (== Just "C") . taskTag

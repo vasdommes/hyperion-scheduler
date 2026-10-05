@@ -14,14 +14,18 @@ import Data.Aeson                     (ToJSON (..))
 import Data.Binary                    (Binary (..))
 import Data.BinaryHash                (hashBase64SafeByteString)
 import Data.ByteString                (ByteString)
+import Data.Map.Strict                qualified as Map
 import Data.Set                       qualified as Set
 import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Stats       (TaskAndFileStats, approxRuntime,
-                                       lookupMaxFileSize, lookupTaskStats,
-                                       maxMemory)
+import Hyperion.Scheduler.Stats       (TaskAndFileStats, Trials (..),
+                                       approxRuntime, fileSizeCorrection,
+                                       lookupFileStats, lookupTaskStats,
+                                       maxMemory, memoryCorrection,
+                                       runtimeCorrection)
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), ResourceEstimates (..),
                                        TaskSummary (..))
-import Hyperion.Scheduler.Types       (overrideWithMeasured)
+import Hyperion.Scheduler.Types       (correctWithStats, modelEstimate,
+                                       overrideWithMeasured)
 
 -- | A general container for an instance of IsTask and
 -- CanRemoteRunTask. We include a ByteString hash for quick
@@ -91,32 +95,68 @@ wrapTask t = MkWrappedTask
 -- from TaskAndFileStats. Input files keep their sizes: those come from the
 -- tasks producing them, already decorated, or from the disk.
 --
--- Lookup is an exact match on the stat key, so a task whose key has changed
--- (a new estimate-relevant config value, say) misses and keeps its analytic
--- estimate; a task with no stat key is never looked up at all. A miss shows
--- in the resulting 'Estimate's.
+-- For each figure, best first:
 --
--- Memory and runtime are replaced independently: memory statistics are absent
--- whenever no run recorded a memory figure, while runtime statistics are
--- always recorded, so a task can end up running on a measured runtime and its
--- own memory estimate.
+-- 1. Statistics recorded for the same stat key and input summary: the
+--    measured figure ('MeasuredFromStats').
+-- 2. Statistics recorded for the same stat key and close input summaries
+--    ('closeToInputSummary'): the task's own model, corrected by how far the
+--    measurements were from the model's predictions for their inputs
+--    ('CorrectedByStats'). See 'memoryCorrection', 'runtimeCorrection' and
+--    'fileSizeCorrection'.
+-- 3. Otherwise the task's own model.
+--
+-- A miss shows in the resulting 'Estimate's. Memory and runtime are replaced
+-- independently: memory statistics are absent whenever no run recorded a
+-- memory figure, while runtime statistics are always recorded.
 decorateSummaryWithStats :: TaskAndFileStats -> TaskSummary -> TaskSummary
 decorateSummaryWithStats stats summary = summary
   { outputs   = Set.map decorateFile summary.outputs
-  , estimates = MkResourceEstimates
-      { memory  = maybe id overrideWithMeasured measuredMemory summary.estimates.memory
-      , runtime = maybe id overrideWithMeasured measuredRuntime summary.estimates.runtime
-      }
+  , estimates = MkResourceEstimates { memory = memory, runtime = runtime }
   }
   where
-    recorded = flip lookupTaskStats stats =<< summary.statKey
-    measuredRuntime = recorded >>= approxRuntime Nothing
-    measuredMemory  = recorded >>= maxMemory
+    own = summary.estimates
+    recorded = maybe Map.empty (`lookupTaskStats` stats) summary.statKey
+    exact = summary.inputSummary >>= (`Map.lookup` recorded)
+    -- Each with the model's estimates for its inputs.
+    close =
+      [ (modelFor, resources)
+      | (s, resources) <- Map.toList recorded
+      , Just s /= summary.inputSummary
+      , summary.closeToInputSummary s
+      , Just modelFor <- [summary.model s]
+      ]
+    memory
+      | Just measured <- exact >>= maxMemory = overrideWithMeasured measured own.memory
+      | Just factor <- memoryCorrection
+          [ (modelEstimate modelFor.memory, resources) | (modelFor, resources) <- close ] =
+          correctWithStats factor (scale factor (modelEstimate own.memory)) own.memory
+      | otherwise = own.memory
+    runtime
+      | Just measured <- exact >>= approxRuntime Nothing = overrideWithMeasured measured own.runtime
+      | Just (factor, corrected) <- runtimeCorrection (modelEstimate own.runtime)
+          [ (modelEstimate modelFor.runtime, resources) | (modelFor, resources) <- close ] =
+          correctWithStats factor corrected own.runtime
+      | otherwise = own.runtime
 
     -- A file with no stat key is never looked up and keeps its estimate.
     decorateFile info = info { fileSize = fileSize } where
-      fileSize = maybe id overrideWithMeasured measured info.fileSize
-      measured = flip lookupMaxFileSize stats =<< info.fileStatKey
+      recordedSizes = maybe Map.empty (`lookupFileStats` stats) info.fileStatKey
+      fileSize
+        | Just trials <- summary.producerSummary >>= (`Map.lookup` recordedSizes) =
+            overrideWithMeasured trials.max info.fileSize
+        | Just factor <- fileSizeCorrection
+            [ (modelSize, trials)
+            | (s, trials) <- Map.toList recordedSizes
+            , Just s /= summary.producerSummary
+            , summary.closeToProducerSummary info.path s
+            , Just modelSize <- [Map.lookup info.path =<< summary.outputModel s]
+            ] =
+            correctWithStats factor (scale factor (modelEstimate info.fileSize)) info.fileSize
+        | otherwise = info.fileSize
+
+    scale :: Integral a => Double -> a -> a
+    scale factor x = ceiling (factor * fromIntegral x)
 
 -- | 'decorateSummaryWithStats' for a wrapped task.
 decorateTaskWithStats :: TaskAndFileStats -> WrappedTask -> WrappedTask

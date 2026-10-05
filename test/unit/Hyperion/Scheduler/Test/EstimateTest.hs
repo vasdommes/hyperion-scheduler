@@ -18,7 +18,6 @@ import Data.Aeson                          qualified as Aeson
 import Data.Binary                         (Binary)
 import Data.List.NonEmpty                  qualified as NonEmpty
 import Data.Map.Strict                     qualified as Map
-import Data.Maybe                          (isJust)
 import Data.Set                            qualified as Set
 import Data.Text                           qualified as Text
 import Data.Time                           (UTCTime (..), fromGregorian)
@@ -28,10 +27,11 @@ import Hyperion.OsString                   (fromString)
 import Hyperion.Scheduler.FilePath         (VirtualFilePath (..))
 import Hyperion.Scheduler.StatKey          (IsFileStatKey (..), IsStatKey (..),
                                             TaskKeyFileInfo (..),
-                                            encodeFileStatKey, encodeStatKey)
+                                            encodeFileStatKey, encodeStatKey,
+                                            unitSummary)
 import Hyperion.Scheduler.Stats            (TaskAndFileStats,
                                             TaskEstimates (..), TaskRecord (..),
-                                            Trials (..), lookupMaxFileSize,
+                                            Trials (..), lookupFileStats,
                                             recordToTaskStats, taskEstimatesAt,
                                             toTrials)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
@@ -44,9 +44,8 @@ import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats,
                                             wrapTask)
 import Hyperion.Scheduler.Types            (Estimate (..), FileSize,
                                             MemorySize (..), Node (..), NumCPUs,
-                                            defaultRuntimeEstimate,
-                                            isMeasuredFromStats, modelEstimate,
-                                            schedulingEstimate)
+                                            defaultRuntimeEstimate, isFromStats,
+                                            modelEstimate, schedulingEstimate)
 
 -- * A minimal task with a stat key
 
@@ -74,14 +73,20 @@ instance Binary EstTask
 
 instance IsTask EstTask where
   taskSummary _ t = MkTaskSummary
-    { inputs    = Set.empty
-    , outputs   = Set.singleton MkTaskKeyFileInfo
+    { inputs      = Set.empty
+    , outputs     = Set.singleton MkTaskKeyFileInfo
       { fileStatKey = Just $ encodeFileStatKey (MkEstFileStatKey t.name)
       , path        = VirtualFilePath $ fromString ("/data/" <> t.name)
       , fileSize    = EstimatedByTask $ fileSizeEstimate (MkEstFileStatKey t.name) ()
       }
-    , statKey   = Just $ encodeStatKey (MkEstStatKey t.name)
-    , estimates = estimatesFromModel t.memory
+    , statKey     = Just $ encodeStatKey (MkEstStatKey t.name)
+    , estimates   = estimatesFromModel t.memory
+    , inputSummary = Just unitSummary
+    , closeToInputSummary = const False
+    , model       = const Nothing
+    , producerSummary = Just unitSummary
+    , closeToProducerSummary = \_ _ -> False
+    , outputModel = const Nothing
     }
   taskTag t = Just (Text.pack t.name)
   taskClosure _ = Nothing
@@ -130,6 +135,8 @@ estRecord name numCpus memory fileSize = MkTaskRecord
   , taskFileSizes = Map.singleton fileStatKey (NonEmpty.singleton fileSize)
   , taskEstimates = taskEstimatesAt numCpus task
   , taskStatKey   = taskStatKey task
+  , taskInputSummary = Just unitSummary
+  , taskProducerSummary = Just unitSummary
   }
   where
     task = MkEstTask { name = name, memory = 1024 * 1024 }
@@ -225,13 +232,13 @@ testWrapKeepsMeasuredEstimates = do
     task = wrapTask MkPreMeasuredTask
     estimates = taskResourceEstimates task
   expect "wrapping keeps a measured memory figure measured" $
-    isMeasuredFromStats estimates.memory
+    isFromStats estimates.memory
   expect "wrapping keeps the measured memory" $
     schedulingEstimate estimates.memory == 8 * 1024 * 1024
   expect "wrapping keeps the task's own memory model" $
     modelEstimate estimates.memory == 1024 * 1024
   expect "wrapping keeps a measured runtime measured" $
-    isMeasuredFromStats estimates.runtime
+    isFromStats estimates.runtime
 
 -- | A task that ran on no CPUs contributes no resource statistics: its runtime
 -- measured scheduler bookkeeping, and the sample could not be fitted anyway --
@@ -245,14 +252,14 @@ testZeroCpuRecordContributesNothing = do
     finite n = not (isNaN t) && not (isInfinite t)
       where t = realToFrac (schedulingEstimate estimates.runtime n) :: Double
   expect "a run on no CPUs leaves memory unmeasured" $
-    not (isMeasuredFromStats estimates.memory)
+    not (isFromStats estimates.memory)
   expect "a run on no CPUs leaves the runtime curve unmeasured" $
-    not (isMeasuredFromStats estimates.runtime)
+    not (isFromStats estimates.runtime)
   expect "the runtime estimate stays finite at every CPU count" $
     all finite [0, 1, 4]
   -- File sizes are a property of the file, so they are recorded regardless.
   expect "a run on no CPUs still records its file sizes" $
-    isJust (lookupMaxFileSize (encodeFileStatKey (MkEstFileStatKey "A")) stats)
+    not (Map.null (lookupFileStats (encodeFileStatKey (MkEstFileStatKey "A")) stats))
 
 -- | Merging is the only arithmetic these statistics do, and it had no test.
 -- Checked against the mean and biased variance computed directly from the same
@@ -299,6 +306,8 @@ testRecordRoundTrip = do
   let record = estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096
   expect "a measured estimate round-trips" $
     Aeson.eitherDecode (Aeson.encode measured) == Right measured
+  expect "a corrected estimate round-trips" $
+    Aeson.eitherDecode (Aeson.encode corrected) == Right corrected
   case Aeson.eitherDecode (Aeson.encode record) of
     Left err -> throwIO $ AssertionFailed $ "FAILED: record does not parse: " <> err
     Right (parsed :: TaskRecord Aeson.Value) -> do
@@ -312,8 +321,9 @@ testRecordRoundTrip = do
       expect "statistics can be rebuilt from a parsed record" $
         recordToTaskStats parsed == recordToTaskStats record
   where
-    measured :: Estimate MemorySize
+    measured, corrected :: Estimate MemorySize
     measured = MeasuredFromStats (8 * 1024 * 1024) (1024 * 1024)
+    corrected = CorrectedByStats 1.5 (3 * 512 * 1024) (1024 * 1024)
 
 -- | What a task record says about the estimates the task ran on.
 testTaskEstimatesAt :: IO ()
