@@ -119,6 +119,7 @@ test-suite hyperion-scheduler-unit-test
   main-is: Main.hs
   other-modules:
       Hyperion.Scheduler.Test.EstimateTest
+      Hyperion.Scheduler.Test.InputSummaryTest
       Hyperion.Scheduler.Test.TaskFilesTest
       Hyperion.Scheduler.Test.TaskMapTest
       Paths_hyperion_scheduler

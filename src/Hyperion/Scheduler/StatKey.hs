@@ -28,13 +28,97 @@ import GHC.Generics                    (Generic)
 import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
 import Hyperion.Scheduler.PathResolver (PathResolver (..))
 import Hyperion.Scheduler.Types        (Estimate (..), FileSize, MemorySize,
-                                        NumCPUs, defaultRuntimeEstimate)
+                                        NumCPUs, defaultRuntimeEstimate,
+                                        schedulingEstimate)
 import Hyperion.Scheduler.Util         (typeRepText)
 
 newtype StatKey = MkStatKey Aeson.Value
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, NFData)
   deriving anyclass (ToJSONKey, FromJSONKey)
+
+-- | What every task knows about one of its input files, whatever the key type.
+data InputFileSummary = MkInputFileSummary
+  { fileStatKey :: Maybe FileStatKey
+  , size        :: FileSize
+  }
+
+-- | A summary of a task's input files, built one file at a time without the
+-- dependency key types. The logic of a stock summary lives here, once.
+class Monoid s => FromInputFiles s where
+  fromInputFile :: InputFileSummary -> s
+
+-- | The estimates ignore the inputs.
+instance FromInputFiles () where
+  fromInputFile _ = ()
+
+-- | Two summaries of the same files.
+instance (FromInputFiles a, FromInputFiles b) => FromInputFiles (a, b) where
+  fromInputFile i = (fromInputFile i, fromInputFile i)
+
+-- | The size of the largest input file, 0 if there are none.
+newtype MaxInputFileSize = MkMaxInputFileSize FileSize
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
+
+instance Semigroup MaxInputFileSize where
+  MkMaxInputFileSize x <> MkMaxInputFileSize y = MkMaxInputFileSize (max x y)
+
+instance Monoid MaxInputFileSize where
+  mempty = MkMaxInputFileSize 0
+
+instance FromInputFiles MaxInputFileSize where
+  fromInputFile i = MkMaxInputFileSize i.size
+
+-- | The total size of the input files.
+newtype TotalInputFileSize = MkTotalInputFileSize FileSize
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
+
+instance Semigroup TotalInputFileSize where
+  MkTotalInputFileSize x <> MkTotalInputFileSize y = MkTotalInputFileSize (x + y)
+
+instance Monoid TotalInputFileSize where
+  mempty = MkTotalInputFileSize 0
+
+instance FromInputFiles TotalInputFileSize where
+  fromInputFile i = MkTotalInputFileSize i.size
+
+-- | The sizes of the input files, sorted (a multiset).
+newtype InputFileSizes = MkInputFileSizes [FileSize]
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
+
+instance Semigroup InputFileSizes where
+  MkInputFileSizes x <> MkInputFileSizes y = MkInputFileSizes (mergeSorted x y)
+
+instance Monoid InputFileSizes where
+  mempty = MkInputFileSizes []
+
+instance FromInputFiles InputFileSizes where
+  fromInputFile i = MkInputFileSizes [i.size]
+
+-- | The file stat keys and sizes of the input files, sorted.
+newtype KeyedInputFileSizes = MkKeyedInputFileSizes [(Maybe FileStatKey, FileSize)]
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
+
+instance Semigroup KeyedInputFileSizes where
+  MkKeyedInputFileSizes x <> MkKeyedInputFileSizes y =
+    MkKeyedInputFileSizes (mergeSorted x y)
+
+instance Monoid KeyedInputFileSizes where
+  mempty = MkKeyedInputFileSizes []
+
+instance FromInputFiles KeyedInputFileSizes where
+  fromInputFile i = MkKeyedInputFileSizes [(i.fileStatKey, i.size)]
+
+mergeSorted :: Ord a => [a] -> [a] -> [a]
+mergeSorted xs [] = xs
+mergeSorted [] ys = ys
+mergeSorted (x : xs) (y : ys)
+  | x <= y    = x : mergeSorted xs (y : ys)
+  | otherwise = y : mergeSorted (x : xs) ys
 
 -- | A stat key is the identity under which a task's resource usage is
 -- recorded, and the /only/ input to that task's estimates. If an estimate
@@ -221,4 +305,14 @@ toTaskKeyFileInfo resolver key = MkTaskKeyFileInfo
   { path        = VirtualFilePath $ resolvePath resolver key
   , fileStatKey = toFileStatKey key
   , fileSize    = EstimatedByTask $ toFileSize key
+  }
+
+-- | What a summary sees of an input file: its file stat key and the size to
+-- schedule with. Not the path, which can change when the computation did not,
+-- and not the provenance of the size, which depends on whether statistics
+-- exist.
+inputFileSummary :: TaskKeyFileInfo -> InputFileSummary
+inputFileSummary info = MkInputFileSummary
+  { fileStatKey = info.fileStatKey
+  , size        = schedulingEstimate info.fileSize
   }
