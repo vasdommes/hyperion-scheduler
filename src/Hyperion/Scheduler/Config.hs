@@ -12,3 +12,11 @@ data Config = MkConfig
   , isLocalPath          :: OsPath -> Bool
   , reportInterval       :: NominalDiffTime
   }
+
+-- | Paths the scheduler knows to be absent without the filesystem, for
+-- 'Hyperion.Scheduler.TaskFiles.runMemoizedTaskFilesWith' when building a task
+-- map. A node-local path never exists: the file service knows nothing of local
+-- files from before the run, so it could not hand one to a consumer, and the
+-- filesystem would only show the building node's local storage.
+schedulerAbsentPaths :: Config -> OsPath -> Bool
+schedulerAbsentPaths MkConfig { isLocalPath = isLocal } = isLocal

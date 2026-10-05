@@ -24,7 +24,8 @@ import Data.Void       (Void, absurd)
 import Hyperion        (Dict (..), Static (..))
 import Hyperion.OsPath (OsPath)
 
--- Resolver r returns output file path produced by Task a.
+-- | Resolver r returns output file path produced by Task a. A task file is a
+-- regular file, never a directory (see 'Hyperion.Scheduler.TaskFiles').
 class PathResolver r a where
   resolvePath :: r -> a -> OsPath
 
