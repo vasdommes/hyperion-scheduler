@@ -38,7 +38,6 @@ import Data.Kind                           (Constraint, Type)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           (Text)
-import Data.Time                           (NominalDiffTime)
 import Data.Typeable                       (cast, typeOf)
 import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
@@ -47,12 +46,11 @@ import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
 import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
-import Hyperion.Scheduler.StatKey          (ToFileStatKey (..), ToStatKey (..),
-                                            ToTaskKeyFileInfo, mkStatKeyViaJSON,
+import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
+                                            ToTaskKeyFileInfo, encodeStatKey,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
-                                            defaultRuntimeEstimate,
                                             defaultTaskTag,
                                             defaultTaskTagForType)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
@@ -60,7 +58,7 @@ import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
 import Hyperion.Scheduler.TaskFiles        (MonadTaskFiles, doesTaskFileExist)
-import Hyperion.Scheduler.Types            (MemorySize, NumCPUs)
+import Hyperion.Scheduler.Types            (NumCPUs)
 import Type.Reflection                     (Typeable)
 
 type FetchesPath k = Fetches k OsPath
@@ -197,6 +195,7 @@ class ( All Eq (DepKeys k)
       , Typeable k
       , Binary (TaskConfig k)
       , ToJSON (TaskConfig k)
+      , IsStatKey (StatKeyOf k)
       ) => TaskKey k where
 
   type OutKey k :: Type
@@ -216,12 +215,24 @@ class ( All Eq (DepKeys k)
   default taskKind :: (ComputeValue k, ValueSerializableM Process k, OutKey k ~ k) => TaskKind k
   taskKind = ComputeValueTask
 
-  -- | Estimated memory in bytes.
-  memoryEstimate     :: TaskConfig k -> k -> MemorySize
-  memoryEstimate _ _ = 0
-  -- | Estimated runtime in seconds, as a function of NumCPUs
-  runtimeEstimate    :: TaskConfig k -> k -> NumCPUs -> NominalDiffTime
-  runtimeEstimate cfg t = defaultRuntimeEstimate (memoryEstimate cfg t)
+  -- | StatKeyOf k is used for two things:
+  -- 1. as a key for TaskStats (resource usage stats);
+  -- 2. as the only input to 'memoryEstimate'/'runtimeEstimate' functions (see 'IsStatKey').
+  --
+  -- Defaults to 'Void', i.e. no statistics: the task is neither recorded nor
+  -- looked up, and both its estimates are zero. That is correct for tasks that
+  -- compute nothing (NoOpTask), and tolerable for small ones:
+  -- a task with runtimeEstimate=0 gets 'minThreads' and lower priority.
+  --
+  -- Stat key should include a /reduced/ projection of the key over the key itself:
+  -- the fields that do not affect resource usage should be dropped or coarsened.
+  type StatKeyOf k :: Type
+  type StatKeyOf k = Void
+
+  -- | Project this key (and the estimate-relevant part of its config) onto its stat key.
+  toStatKey :: TaskConfig k -> k -> Maybe (StatKeyOf k)
+  toStatKey _ _ = Nothing
+
   -- | Maximum possible threads for the task.
   -- TODO: get rid of RunStage?
   maxThreads :: RunStage -> TaskConfig k -> k -> NumCPUs
@@ -398,8 +409,12 @@ instance
   , Typeable (TaskConfig k)
   , Typeable (PathResolverForAll r (DepKeys k))
   ) => IsTask (Task r k) where
-  taskMemoryEstimate t   = memoryEstimate t.config t.key
-  taskRuntimeEstimate t  = runtimeEstimate t.config t.key
+  -- Estimates always come from the stat key, so that the value used for
+  -- scheduling is the same function that is validated against recorded
+  -- statistics for that key.
+  taskMemoryEstimate t   = maybe 0         memoryEstimate  (toStatKey t.config t.key)
+  taskRuntimeEstimate t  = maybe (const 0) runtimeEstimate (toStatKey t.config t.key)
+  taskStatKey t          = encodeStatKey <$> toStatKey t.config t.key
   taskMaxThreads stage t = maxThreads stage t.config t.key
   taskMinThreads stage t = minThreads stage t.config t.key
   taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
@@ -422,12 +437,6 @@ instance
   taskPlaceholderKey t = case taskKind @k of
     PlaceholderTask -> cast t.key
     _               -> Nothing
-
-instance {-# OVERLAPPABLE #-} TaskKey k => ToStatKey k where
-  toStatKey = mkStatKeyViaJSON
-
-instance {-# OVERLAPPABLE #-} ToStatKey k => ToStatKey (Task r k) where
-  toStatKey t = toStatKey t.key
 
 taskLink
   :: forall r c k m. (MonadTaskFiles m, HasConfig c (TaskConfig k), TaskKey k, PathResolver r (OutKey k))
@@ -472,6 +481,9 @@ type instance DepKeys (ListTaskKey k) = '[k]
 instance (Ord k, TaskKey k, ToFileStatKey k) => TaskKey (ListTaskKey k) where
   type OutKey (ListTaskKey k) = Void
 
+  -- A pure grouping node: it performs no computation, so it is never scheduled
+  -- by estimate and has nothing to record. That is the default 'StatKeyOf'
+  -- ('Void') and the default 'toStatKey' ('Nothing'), so neither is declared.
   taskKind = NoOpTask $ \t -> traverse_ getPath t.keys
   tag t = t.tag
 

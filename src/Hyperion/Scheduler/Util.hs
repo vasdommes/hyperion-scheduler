@@ -12,7 +12,9 @@
 module Hyperion.Scheduler.Util where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Text              qualified as Text
 import Data.Time.Clock        (NominalDiffTime)
+import Data.Typeable          (Proxy (..), Typeable, typeRep)
 import GHC.Clock              (getMonotonicTimeNSec)
 
 -- | Measure real time using monotonic clock.
@@ -27,3 +29,7 @@ measureRealTime ma = do
     diffNano = end - start
     diffTime = (fromIntegral diffNano) / 1e9
   return (diffTime, a)
+
+-- | typeRepText @MyType = "MyType"
+typeRepText :: forall a. Typeable a => Text.Text
+typeRepText = Text.pack $ show $ typeRep $ Proxy @a
