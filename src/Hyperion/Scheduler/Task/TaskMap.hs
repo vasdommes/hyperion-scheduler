@@ -20,15 +20,17 @@ import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
-import Hyperion.Scheduler.Stats            (TaskAndFileStats)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage (..),
                                             taskHasClosure, taskInputPaths,
                                             taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
-import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
+import Hyperion.Scheduler.Task.WrappedTask (WrappedTask)
 
 type TaskMap a = Map a (Set a)
 
+-- | The tasks needed to create the key's files. Statistics are not applied
+-- yet: call 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap' on
+-- the final map.
 mkTaskMap :: (Monad m, HasTaskChain m r c k) => r -> c -> k -> m (TaskMap WrappedTask)
 mkTaskMap resolver cfg = toTaskEdges (taskChain resolver cfg)
 
@@ -44,9 +46,6 @@ updateTaskMap updateTask taskMap = Map.map (Set.map asKey) updatedKeys
       Nothing -> dep'
       where
         dep' = updateTask dep
-
-decorateTaskMapWithStats :: TaskAndFileStats -> TaskMap WrappedTask -> TaskMap WrappedTask
-decorateTaskMapWithStats = updateTaskMap . decorateTaskWithStats
 
 newtype InvalidTaskMap = InvalidTaskMap OsString
   deriving (Show)

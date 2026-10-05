@@ -82,9 +82,11 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
 import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats                     (TaskRecord (..),
                                                      taskEstimatesAt)
-import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
-                                                     TaskMap, taskInputPaths,
-                                                     taskInputs,
+import Hyperion.Scheduler.Task                      (EstimatedTaskMap,
+                                                     IsTask (..), RunStage (..),
+                                                     TaskMap, estimatedTasks,
+                                                     originalTask,
+                                                     taskInputPaths, taskInputs,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
                                                      taskOutputs, taskStatKey,
@@ -546,9 +548,17 @@ type TaskRecords a = [TaskRecord a]
 runTasks
   :: IsTask a
   => Config
+  -> EstimatedTaskMap a
+  -> Job (TaskRecords a)
+runTasks config taskMap =
+  map (fmap originalTask) <$> runTaskMap config (estimatedTasks taskMap)
+
+runTaskMap
+  :: IsTask a
+  => Config
   -> TaskMap a
   -> Job (TaskRecords a)
-runTasks config taskMap = do
+runTaskMap config taskMap = do
   let
     taskGraph = TaskGraph.fromEdges taskMap
     cleanupDependencies = buildCleanupDependenciesMap config taskMap

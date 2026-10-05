@@ -37,6 +37,7 @@ library
       Hyperion.Scheduler.StatKey
       Hyperion.Scheduler.Stats
       Hyperion.Scheduler.Task
+      Hyperion.Scheduler.Task.EstimatedTaskMap
       Hyperion.Scheduler.Task.HasConfig
       Hyperion.Scheduler.Task.IsTask
       Hyperion.Scheduler.Task.Task
