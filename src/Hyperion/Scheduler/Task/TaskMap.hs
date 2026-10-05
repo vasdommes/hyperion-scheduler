@@ -21,7 +21,8 @@ import Data.Set                            qualified as Set
 import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
 import Hyperion.Scheduler.Stats            (TaskAndFileStats)
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), taskInputPaths,
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage (..),
+                                            taskHasClosure, taskInputPaths,
                                             taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
@@ -53,6 +54,10 @@ instance Exception InvalidTaskMap
 -- - Each input path produced by some task in the map can be found in output
 --   paths of dependencies (input paths produced by no task in the map are
 --   assumed to already exist on disk -- see 'assertCorrectDependencyPaths')
+-- - Every task with work to run remotely asks for at least one CPU
+--   (see 'assertComputeTasksHaveCpus')
+-- - No task declares maxThreads < minThreads
+--   (see 'assertMinMaxThreads')
 validateTaskMap :: (IsTask a, MonadThrow m) => TaskMap a -> m ()
 validateTaskMap taskMap = do
   assertAllTasksAreInKeys
@@ -60,12 +65,16 @@ validateTaskMap taskMap = do
   assertNoCycles
   assertNoDuplicatePaths
   assertCorrectDependencyPaths
+  assertComputeTasksHaveCpus
+  assertMinMaxThreads
   where
     assert cond msg = case cond of
       True  -> pure ()
       False -> throwM $ InvalidTaskMap msg
 
     taskLabel t = (taskTag t, taskOutputPaths t)
+
+    stages = [InitialRun, InProgressRun]
 
     assertAllTasksAreInKeys = do
       let
@@ -93,6 +102,33 @@ validateTaskMap taskMap = do
         assert (Set.notMember path existingPaths) $
           "Duplicate path: " <> showOs path
         pure $ Set.insert path existingPaths
+
+    -- Any task that has to be run remotely needs to require at least 1 CPU.
+    -- Otherwise, scheduler can (and probably will) assign 0 CPUs and throw an error, see
+    -- 'Hyperion.Scheduler.RunTasks.RemoteRunTask.remoteRunTask'
+    assertComputeTasksHaveCpus = assert (null starvable) $
+      "Tasks have work to run remotely but declare minThreads <= 0, so the \
+      \allocator may give them no CPUs and they would then fail for want of a \
+      \worker: " <> showOs (map taskLabel starvable)
+      where
+        starvable =
+          [ t
+          | t <- Map.keys taskMap
+          , taskHasClosure t
+          , any (\stage -> taskMinThreads stage t <= 0) stages
+          ]
+
+    -- maxThreads >= minThreads
+    assertMinMaxThreads = assert (null inverted) $
+      "Tasks declare a maxThreads below their minThreads, which no allocation \
+      \can satisfy (task, stage, minThreads, maxThreads): " <> showOs inverted
+      where
+        inverted =
+          [ (taskLabel t, stage, taskMinThreads stage t, taskMaxThreads stage t)
+          | t <- Map.keys taskMap
+          , stage <- stages
+          , taskMaxThreads stage t < taskMinThreads stage t
+          ]
 
     -- Each input path for a task either:
     -- 1. Is produced by some task in the TaskMap

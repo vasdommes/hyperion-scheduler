@@ -32,6 +32,7 @@ import Hyperion.Scheduler.Task.Task    (DepKeys, TaskKey (..), TaskKind (..),
                                         dependencies, listTaskKey, outKeys)
 import Hyperion.Scheduler.Task.TaskMap (TaskMap, placeholdersOfType,
                                         replaceTasks, validateTaskMap)
+import Hyperion.Scheduler.Types        (NumCPUs)
 
 -- * A minimal IsTask for building TaskMaps by hand
 
@@ -40,6 +41,11 @@ data TestTask = MkTestTask
   , inputs        :: Set OsPath
   , outputs       :: Set OsPath
   , isPlaceholder :: Bool
+  , computes      :: Bool
+    -- ^ Whether the task has something to run remotely. The closure itself is
+    -- never forced: these tests only ask whether one exists.
+  , minThreads    :: NumCPUs
+  , maxThreads    :: NumCPUs
   } deriving (Eq, Ord, Show, Generic, ToJSON)
 
 mkFileInfo :: OsPath -> TaskKeyFileInfo
@@ -53,7 +59,11 @@ instance IsTask TestTask where
   taskInputs t        = Set.map mkFileInfo t.inputs
   taskOutputs t       = Set.map mkFileInfo t.outputs
   taskTag t           = Just (Text.pack t.name)
-  taskClosure   _     = Nothing
+  taskClosure t
+    | t.computes = Just $ error "TestTask closure is never run"
+    | otherwise  = Nothing
+  taskMinThreads _ t  = t.minThreads
+  taskMaxThreads _ t  = t.maxThreads
   taskIsPlaceholder t = t.isPlaceholder
 
 testTask :: String -> [OsPath] -> [OsPath] -> TestTask
@@ -62,6 +72,9 @@ testTask name ins outs = MkTestTask
   , inputs        = Set.fromList ins
   , outputs       = Set.fromList outs
   , isPlaceholder = False
+  , computes      = False
+  , minThreads    = 1
+  , maxThreads    = 1
   }
 
 -- * A placeholder TaskKey, exercising the real 'TaskKind' machinery
@@ -83,6 +96,9 @@ expect :: String -> Bool -> IO ()
 expect label cond = do
   unless cond $ throwIO $ AssertionFailed $ "FAILED: " <> label
   putStrLn $ "ok: " <> label
+
+taskMapOf :: TestTask -> TaskMap TestTask
+taskMapOf t = Map.fromList [(t, Set.empty)]
 
 expectValid :: String -> TaskMap TestTask -> IO ()
 expectValid label taskMap = case validateTaskMap taskMap of
@@ -193,6 +209,32 @@ testPlaceholdersOfType = do
   expect "taskInputPaths of test task" $
     taskInputPaths a == Set.singleton (VirtualFilePath p1)
 
+-- | A task that has something to run remotely but allows itself no CPUs would
+-- throw when it ran, for want of a worker, so the map is rejected instead. The
+-- minimum is a floor rather than the allocation, so such a task need not fail
+-- every time -- which is why this is not left to a warning.
+testComputeTasksHaveCpus :: IO ()
+testComputeTasksHaveCpus = do
+  let computing = (testTask "A" [] [q]) { computes = True }
+  expectInvalid "a computing task that allows itself no CPUs is invalid" $
+    taskMapOf computing { minThreads = 0 }
+  expectValid "a computing task that asks for a CPU is valid" $
+    taskMapOf computing
+  -- A no-op has no closure and is expected to ask for no CPUs.
+  expectValid "a task with nothing to run may ask for no CPUs" $
+    taskMapOf (testTask "B" [] [r]) { minThreads = 0 }
+
+-- | A maximum below the minimum can be satisfied by no allocation, and the
+-- allocator resolves it by capping at the maximum -- handing the task fewer
+-- threads than it asked for, or none at all.
+testThreadRangesAreOrdered :: IO ()
+testThreadRangesAreOrdered = do
+  let computing = (testTask "A" [] [q]) { computes = True }
+  expectInvalid "maxThreads below minThreads is invalid" $
+    taskMapOf computing { minThreads = 2, maxThreads = 1 }
+  expectValid "maxThreads equal to minThreads is valid" $
+    taskMapOf computing { minThreads = 2, maxThreads = 2 }
+
 runTest :: IO ()
 runTest = do
   testPrunedInputIsValid
@@ -203,4 +245,6 @@ runTest = do
   testPlaceholderTaskKeySemantics
   testNoOpTaskKeySemantics
   testPlaceholdersOfType
+  testComputeTasksHaveCpus
+  testThreadRangesAreOrdered
   putStrLn "All TaskMap tests passed."
