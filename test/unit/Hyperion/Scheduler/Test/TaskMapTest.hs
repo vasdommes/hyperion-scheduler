@@ -24,9 +24,9 @@ import GHC.Generics                    (Generic)
 import Hyperion.OsPath                 (OsPath)
 import Hyperion.OsString               (fromString)
 import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
-import Hyperion.Scheduler.StatKey      (TaskKeyFileInfo (..),
-                                        ToFileStatKey (..),
-                                        mkFileStatKeyViaJSON)
+import Hyperion.Scheduler.StatKey      (IsFileStatKey (..),
+                                        TaskKeyFileInfo (..),
+                                        ToFileStatKey (..), encodeFileStatKey)
 import Hyperion.Scheduler.Task.IsTask  (IsTask (..), taskInputPaths)
 import Hyperion.Scheduler.Task.Task    (DepKeys, TaskKey (..), TaskKind (..),
                                         dependencies, listTaskKey, outKeys)
@@ -48,9 +48,15 @@ data TestTask = MkTestTask
   , maxThreads    :: NumCPUs
   } deriving (Eq, Ord, Show, Generic, ToJSON)
 
+-- | A file's identity in these fixtures is just its path.
+newtype PathFileStatKey = MkPathFileStatKey String
+  deriving newtype (ToJSON)
+
+instance IsFileStatKey PathFileStatKey
+
 mkFileInfo :: OsPath -> TaskKeyFileInfo
 mkFileInfo path = MkTaskKeyFileInfo
-  { fileStatKey = mkFileStatKeyViaJSON (show path)
+  { fileStatKey = Just $ encodeFileStatKey (MkPathFileStatKey (show path))
   , path        = VirtualFilePath path
   , fileSize    = 0
   }
@@ -84,8 +90,8 @@ newtype PKey = MkPKey String
 
 type instance DepKeys PKey = '[]
 
-instance ToFileStatKey PKey where
-  toFileStatKey = mkFileStatKeyViaJSON
+-- A placeholder has no outputs, so it declares no file stat key.
+instance ToFileStatKey PKey
 
 instance TaskKey PKey where
   taskKind = PlaceholderTask
