@@ -59,8 +59,8 @@ import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
+import Hyperion.Scheduler.TaskFiles        (MonadTaskFiles, doesTaskFileExist)
 import Hyperion.Scheduler.Types            (MemorySize, NumCPUs)
-import Hyperion.Util.MonadPathExists       (MonadPathExists (..))
 import Type.Reflection                     (Typeable)
 
 type FetchesPath k = Fetches k OsPath
@@ -239,14 +239,16 @@ class ( All Eq (DepKeys k)
   priority :: k -> Int
   priority = const 0
 
-  checkCreated :: (PathResolver r (OutKey k), MonadPathExists m) => TaskConfig k -> r -> k -> m Bool
+  checkCreated
+    :: (PathResolver r (OutKey k), MonadTaskFiles m)
+    => TaskConfig k -> r -> k -> m Bool
   -- NB: a 'NoOpTask' has no output files, so the 'allM' check would be
   -- vacuously True and the task (with its dependency edges!) would always be
   -- pruned from the graph -- hence the explicit False.
   checkCreated cfg resolver key = case taskKind @k of
     NoOpTask _ -> pure False
     _ ->
-      allM (doesPathExist . resolvePath resolver) $ outKeys cfg key
+      allM (doesTaskFileExist . resolvePath resolver) $ outKeys cfg key
 
 
 class ComputeValue k where
@@ -430,7 +432,9 @@ instance {-# OVERLAPPABLE #-} ToStatKey k => ToStatKey (Task r k) where
   toStatKey t = toStatKey t.key
 
 taskLink
-  :: forall r c k m. (MonadPathExists m, HasConfig c (TaskConfig k), TaskKey k, PathResolver r (OutKey k))
+  :: forall r c k m
+   . ( MonadTaskFiles m, HasConfig c (TaskConfig k), TaskKey k
+     , PathResolver r (OutKey k) )
   => r
   -> c
   -> TaskLink m k (Variant (DepKeys k)) (Task r k)
@@ -445,7 +449,7 @@ taskLink resolver cfg' = MkTaskLink
 instance {-# OVERLAPPABLE #-}
   ( Static (TaskKey k)
   , HasTaskChain m r c (Variant (DepKeys k))
-  , MonadPathExists m
+  , MonadTaskFiles m
   , HasConfig c (TaskConfig k)
   , Static (PathResolver r (OutKey k))
   , Static (PathResolverForAll r (DepKeys k))

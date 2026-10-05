@@ -357,7 +357,8 @@ linearTransformJob getSchedulerConfig baseDir problem = do
   liftIO $ do
     removePathForcibly resolver.outDir
     createDirectoryIfMissing True resolver.outDir
-  taskMap <- mkTaskMap resolver () outputVectorKey
+  taskMap <- Scheduler.runTaskFiles schedulerConfig $
+    mkTaskMap resolver () outputVectorKey
   taskRecords <- Scheduler.runTasks schedulerConfig taskMap
 
   let
