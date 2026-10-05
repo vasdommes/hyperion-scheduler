@@ -8,7 +8,7 @@
 module Hyperion.Scheduler.Task.IsTask where
 
 import Data.Aeson                  (ToJSON)
-import Data.Maybe                  (isJust)
+import Data.Maybe                  (fromMaybe, isJust)
 import Data.Set                    (Set)
 import Data.Set                    qualified as Set
 import Data.Text                   (Text)
@@ -39,9 +39,15 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 --  taskHash = hashBase64SafeByteString
 
   -- | The task's files, stat key and estimates, computed together because
-  -- they share expensive work. A
-  -- 'Hyperion.Scheduler.Task.WrappedTask.WrappedTask' computes it once.
-  taskSummary :: a -> TaskSummary
+  -- they share expensive work.
+  --
+  -- @Just knownInputs@ gives the infos (and so the sizes) of the input files
+  -- that are known: those produced by other tasks in the map, and those on
+  -- disk (see 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap').
+  -- An input missing from them keeps its own info. 'Nothing' gives the task's
+  -- summary as it is, e.g. the one a
+  -- 'Hyperion.Scheduler.Task.WrappedTask.WrappedTask' holds.
+  taskSummary :: Maybe KnownInputs -> a -> TaskSummary
 
   -- | Maximum possible threads for the task
   -- TODO: get rid of RunStage?
@@ -73,6 +79,9 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskPlaceholderKey :: Typeable k => a -> Maybe k
   taskPlaceholderKey _ = Nothing
 
+-- | Infos of input files, by path.
+type KnownInputs = VirtualFilePath -> Maybe TaskKeyFileInfo
+
 -- | See 'taskSummary'.
 data TaskSummary = MkTaskSummary
   { inputs    :: Set TaskKeyFileInfo
@@ -97,33 +106,37 @@ data TaskSummary = MkTaskSummary
   , estimates :: ResourceEstimates
   }
 
--- | The summary of a task with no stat key: its files and zero estimates.
+-- | The summary of a task with no stat key: its own files and zero
+-- estimates.
 filesOnlySummary
-  :: Set TaskKeyFileInfo  -- ^ inputs
+  :: Set TaskKeyFileInfo  -- ^ its own inputs
   -> Set TaskKeyFileInfo  -- ^ outputs
+  -> Maybe KnownInputs
   -> TaskSummary
-filesOnlySummary inputs outputs = MkTaskSummary
-  { inputs    = inputs
-  , outputs   = outputs
-  , statKey   = Nothing
-  , estimates = estimatesFromModel 0
+filesOnlySummary ownInputs outputs knownInputs = MkTaskSummary
+  { inputs      = maybe ownInputs withKnown knownInputs
+  , outputs     = outputs
+  , statKey     = Nothing
+  , estimates   = estimatesFromModel 0
   }
+  where
+    withKnown known = Set.map (\i -> fromMaybe i (known i.path)) ownInputs
 
 -- | Input files, with their sizes.
 taskInputs :: IsTask a => a -> Set TaskKeyFileInfo
-taskInputs = (.inputs) . taskSummary
+taskInputs = (.inputs) . taskSummary Nothing
 
 -- | Output files, with their size estimates.
 taskOutputs :: IsTask a => a -> Set TaskKeyFileInfo
-taskOutputs = (.outputs) . taskSummary
+taskOutputs = (.outputs) . taskSummary Nothing
 
 -- | See 'TaskSummary'.
 taskStatKey :: IsTask a => a -> Maybe StatKey
-taskStatKey = (.statKey) . taskSummary
+taskStatKey = (.statKey) . taskSummary Nothing
 
 -- | See 'TaskSummary'.
 taskResourceEstimates :: IsTask a => a -> ResourceEstimates
-taskResourceEstimates = (.estimates) . taskSummary
+taskResourceEstimates = (.estimates) . taskSummary Nothing
 
 -- | A task's memory and runtime estimates with their provenance.
 data ResourceEstimates = MkResourceEstimates

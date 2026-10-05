@@ -63,7 +63,7 @@ newtype ListTask k = MkListTask { keys :: [k] }
 instance (Eq k, Ord k, ToJSON k, Typeable k) => IsTask (ListTask k) where
   -- A pure grouping node: it performs no computation, so there is nothing to
   -- record or estimate.
-  taskSummary _      = filesOnlySummary Set.empty Set.empty
+  taskSummary known _ = filesOnlySummary Set.empty Set.empty known
   taskMaxThreads _ _ = 0
   taskMinThreads _ _ = 0
   taskTag _          = Nothing

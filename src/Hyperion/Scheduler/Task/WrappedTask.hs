@@ -65,7 +65,8 @@ instance ToJSON WrappedTask where
   toJSON (MkWrappedTask {task = t}) = toJSON t
 
 instance IsTask WrappedTask where
-  taskSummary t = t.summary
+  taskSummary Nothing t = t.summary
+  taskSummary knownInputs (MkWrappedTask { task = t }) = taskSummary knownInputs t
   taskMaxThreads stage (MkWrappedTask { task = t }) = taskMaxThreads stage t
   taskMinThreads stage (MkWrappedTask { task = t }) = taskMinThreads stage t
   taskDefaultPriority (MkWrappedTask { task = t }) = taskDefaultPriority t
@@ -83,10 +84,12 @@ wrapTask :: (IsTask a, Binary a) => a -> WrappedTask
 wrapTask t = MkWrappedTask
   { task    = t
   , hash    = hashBase64SafeByteString t
-  , summary = taskSummary t
+  , summary = taskSummary Nothing t
   }
 
--- | Update memory, runtime and file size estimates using statistics from TaskAndFileStats.
+-- | Update memory, runtime and output file size estimates using statistics
+-- from TaskAndFileStats. Input files keep their sizes: those come from the
+-- tasks producing them, already decorated, or from the disk.
 --
 -- Lookup is an exact match on the stat key, so a task whose key has changed
 -- (a new estimate-relevant config value, say) misses and keeps its analytic
@@ -99,8 +102,7 @@ wrapTask t = MkWrappedTask
 -- own memory estimate.
 decorateSummaryWithStats :: TaskAndFileStats -> TaskSummary -> TaskSummary
 decorateSummaryWithStats stats summary = summary
-  { inputs    = Set.map decorateFile summary.inputs
-  , outputs   = Set.map decorateFile summary.outputs
+  { outputs   = Set.map decorateFile summary.outputs
   , estimates = MkResourceEstimates
       { memory  = maybe id overrideWithMeasured measuredMemory summary.estimates.memory
       , runtime = maybe id overrideWithMeasured measuredRuntime summary.estimates.runtime

@@ -35,6 +35,7 @@ import Data.Foldable.Extra                 (allM, traverse_)
 import Data.Functor                        (($>))
 import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
+import Data.Maybe                          (fromMaybe)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           (Text)
@@ -44,14 +45,21 @@ import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
 import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
+import Hyperion.Scheduler.FilePath         (VirtualFilePath (..))
 import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
-import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
-                                            ToTaskKeyFileInfo, encodeStatKey,
-                                            toTaskKeyFileInfo)
+import Hyperion.Scheduler.StatKey          (FromInputFiles (..),
+                                            InputFileSummary,
+                                            IsFileStatKey (..), IsStatKey (..),
+                                            TaskKeyFileInfo (..),
+                                            ToFileStatKey (..),
+                                            ToTaskKeyFileInfo,
+                                            encodeFileStatKey, encodeStatKey,
+                                            inputFileSummary, toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
-                                            RunStage, Tag, TaskSummary (..),
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), KnownInputs,
+                                            ResourceEstimates (..), RunStage,
+                                            Tag, TaskSummary (..),
                                             defaultTaskTag,
                                             defaultTaskTagForType,
                                             estimatesFromModel)
@@ -183,6 +191,9 @@ data TaskKind k where
     => (forall f . (Applicative f, FetchesPaths (DepKeys k) f) => k -> f ())
     -> TaskKind k
 
+-- | A task's dependencies with their files' stat keys and sizes.
+type DepInputs k = [(Variant (DepKeys k), InputFileSummary)]
+
 class ( All Eq (DepKeys k)
       , All Ord (DepKeys k)
       , All ToFileStatKey (DepKeys k)
@@ -219,7 +230,8 @@ class ( All Eq (DepKeys k)
 
   -- | StatKeyOf k is used for two things:
   -- 1. as a key for TaskStats (resource usage stats);
-  -- 2. as the only input to 'memoryEstimate'/'runtimeEstimate' functions (see 'IsStatKey').
+  -- 2. with the 'InputSummary', as the input to 'memoryEstimate'/'runtimeEstimate'
+  --    (see 'IsStatKey').
   --
   -- Defaults to 'Void', i.e. no statistics: the task is neither recorded nor
   -- looked up, and both its estimates are zero. That is correct for tasks that
@@ -231,9 +243,31 @@ class ( All Eq (DepKeys k)
   type StatKeyOf k :: Type
   type StatKeyOf k = Void
 
-  -- | Project this key (and the estimate-relevant part of its config) onto its stat key.
+  -- | Project this key (and the estimate-relevant parts of its config) onto
+  -- its stat key.
   toStatKey :: TaskConfig k -> k -> Maybe (StatKeyOf k)
   toStatKey _ _ = Nothing
+
+  -- | Summarize the task's direct dependencies for its estimates. A pure
+  -- function of the dependency keys and the sizes of their files, so that it
+  -- can be computed from estimated sizes as well as from measured ones.
+  --
+  -- The default builds a stock summary one file at a time (see
+  -- 'FromInputFiles'). Override it for a summary that needs the typed
+  -- dependency keys.
+  toInputSummary :: TaskConfig k -> k -> DepInputs k -> InputSummary (StatKeyOf k)
+  default toInputSummary
+    :: FromInputFiles (InputSummary (StatKeyOf k))
+    => TaskConfig k -> k -> DepInputs k -> InputSummary (StatKeyOf k)
+  toInputSummary _ _ = summarizeInputFiles
+
+  -- | 'toInputSummary' for the size estimates of the output files.
+  toProducerInputSummary
+    :: TaskConfig k -> k -> DepInputs k -> ProducerInputSummary (FileStatKeyOf (OutKey k))
+  default toProducerInputSummary
+    :: FromInputFiles (ProducerInputSummary (FileStatKeyOf (OutKey k)))
+    => TaskConfig k -> k -> DepInputs k -> ProducerInputSummary (FileStatKeyOf (OutKey k))
+  toProducerInputSummary _ _ = summarizeInputFiles
 
   -- | Maximum possible threads for the task.
   -- TODO: get rid of RunStage?
@@ -393,26 +427,49 @@ computeAndWrite Dict numCpus task =
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
 
--- | A task's summary. It traverses the dependencies and projects the stat key
--- once, since both can be expensive.
+-- | A stock summary of the dependencies' files (see 'FromInputFiles').
+summarizeInputFiles :: FromInputFiles s => [(Variant ks, InputFileSummary)] -> s
+summarizeInputFiles = foldMap (fromInputFile . snd)
+
+-- | A task's summary, given the known infos of its input files (see
+-- 'taskSummary'). It traverses the dependencies and projects the
+-- stat keys once, since both can be expensive.
 summarizeTask
   :: forall r k . (TaskKey k, PathResolver r (OutKey k), All (FileInfo r) (DepKeys k))
-  => Task r k -> TaskSummary
-summarizeTask t = MkTaskSummary
-  { inputs    = Set.map (vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)) $
-      toVariants (tailF outsAndDeps)
-  , outputs   = Set.map (toTaskKeyFileInfo t.resolver) (headF outsAndDeps)
-  , statKey   = encodeStatKey <$> statKey
-  , estimates = case statKey of
-      Nothing  -> estimatesFromModel 0
-      Just key -> MkResourceEstimates
-        { memory  = EstimatedByTask (memoryEstimate key)
-        , runtime = EstimatedByTask (runtimeEstimate key)
-        }
+  => Maybe KnownInputs -> Task r k -> TaskSummary
+summarizeTask knownInputs t = MkTaskSummary
+  { inputs      = Set.fromList (map snd deps)
+  , outputs     = Set.fromList
+      [ MkTaskKeyFileInfo
+          { path        = path
+          , fileStatKey = encodeFileStatKey <$> fileKey
+          , fileSize    = EstimatedByTask (outputSize currentProducerSummary fileKey)
+          }
+      | (path, fileKey) <- outputs
+      ]
+  , statKey     = encodeStatKey <$> statKey
+  , estimates   = maybe (estimatesFromModel 0) (`modelFor` currentInputSummary) statKey
   }
   where
     outsAndDeps = outAndDependencies t.config t.key
+    outputs =
+      [ (VirtualFilePath (resolvePath t.resolver o), fileStatKeyOf o)
+      | o <- Set.toList (headF outsAndDeps)
+      ]
+    deps =
+      [ (dep, fromMaybe own (knownInputs >>= ($ own.path)))
+      | dep <- Set.toList (toVariants (tailF outsAndDeps))
+      , let own = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver) dep
+      ]
+    depInputs = [ (dep, inputFileSummary info) | (dep, info) <- deps ]
     statKey = toStatKey t.config t.key
+    currentInputSummary = toInputSummary t.config t.key depInputs
+    currentProducerSummary = toProducerInputSummary t.config t.key depInputs
+    modelFor key s = MkResourceEstimates
+      { memory  = EstimatedByTask (memoryEstimate key s)
+      , runtime = EstimatedByTask (runtimeEstimate key s)
+      }
+    outputSize s = maybe 0 (`fileSizeEstimate` s)
 
 instance
   ( Static(PathResolverForAll r (DepKeys k))

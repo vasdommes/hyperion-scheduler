@@ -121,17 +121,17 @@ mergeSorted (x : xs) (y : ys)
   | otherwise = y : mergeSorted (x : xs) ys
 
 -- | A stat key is the identity under which a task's resource usage is
--- recorded, and the /only/ input to that task's estimates. If an estimate
--- needs some piece of information, that information belongs in the stat key.
+-- recorded. The estimates are a model of the stat key and of an
+-- 'InputSummary', a reduced view of the task's input files.
 --
--- Two consequences are deliberate:
+-- A field belongs in the stat key only if it can be computed from this task
+-- without looking at other nodes of the task graph: no input sizes and no
+-- input keys. Those belong in the summary.
 --
---   * Scheduling and validation use the same function, so an estimate can
---     always be checked against the statistics recorded under its own key.
---   * A stat key should be a /reduced/ projection of a task key: fields that
---     do not affect resource usage (a numeric coupling, a file path) should be
---     dropped or coarsened, so that tasks differing only in those fields share
---     statistics.
+-- A stat key should be a /reduced/ projection of a task key: fields that do
+-- not affect resource usage (a numeric coupling, a file path) should be
+-- dropped or coarsened, so that tasks differing only in those fields share
+-- statistics.
 --
 -- A task's config ('Hyperion.Scheduler.Task.Task.TaskConfig') says /how/ to
 -- compute, so it may legitimately affect estimates. Project the parts that do
@@ -140,6 +140,11 @@ mergeSorted (x : xs) (y : ys)
 -- about the computation changed, which would split recorded history for no
 -- reason.
 class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
+  -- | What the estimates need to know about the task's input files. The
+  -- default '()' means that they ignore the inputs.
+  type InputSummary a
+  type InputSummary a = ()
+
   -- | Estimated memory in bytes: what a node must hold while this task runs,
   -- which is the resident set of the whole worker process and not only what
   -- the task itself allocates.
@@ -151,11 +156,11 @@ class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
   -- the task allocates anything. Recorded statistics measure the same thing
   -- (the worker's peak resident set, its own or its children's), so a model
   -- that omits the baseline predicts too little.
-  memoryEstimate :: a -> MemorySize
+  memoryEstimate :: a -> InputSummary a -> MemorySize
 
   -- | Estimated runtime in seconds, as a function of 'NumCPUs'.
-  runtimeEstimate :: a -> NumCPUs -> NominalDiffTime
-  runtimeEstimate = defaultRuntimeEstimate . memoryEstimate
+  runtimeEstimate :: a -> InputSummary a -> NumCPUs -> NominalDiffTime
+  runtimeEstimate k s = defaultRuntimeEstimate (memoryEstimate k s)
 
   -- | The tag written into stat files to identify this key's type. It is part
   -- of the on-disk format, so override it if you rename the type or move the
@@ -173,12 +178,17 @@ class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
 -- demanding round-trippability of it is cheap; a file stat key defaults to the
 -- output key itself, and those are not generally parseable.
 class (Typeable a, ToJSON a) => IsFileStatKey a where
+  -- | What the size estimate needs to know about the input files of the task
+  -- that produces this file.
+  type ProducerInputSummary a
+  type ProducerInputSummary a = ()
+
   -- | Estimated size of the file, in bytes.
   --
   -- Defaults to zero, i.e. unknown. That only under-counts node-local storage
   -- in 'canHandleTask' until a real size has been measured and recorded.
-  fileSizeEstimate :: a -> FileSize
-  fileSizeEstimate _ = 0
+  fileSizeEstimate :: a -> ProducerInputSummary a -> FileSize
+  fileSizeEstimate _ _ = 0
 
   -- | See 'statKeyTypeName'.
   fileStatKeyTypeName :: Text
@@ -186,7 +196,7 @@ class (Typeable a, ToJSON a) => IsFileStatKey a where
   fileStatKeyTypeName = typeRepText @a
 
 instance IsFileStatKey Void where
-  fileSizeEstimate = absurd
+  fileSizeEstimate v _ = absurd v
 
 -- | Tasks that are never scheduled by estimate -- placeholders, which are
 -- replaced before the map is run, and no-ops, which perform no computation --
@@ -197,7 +207,7 @@ instance IsFileStatKey Void where
 -- zero estimate is indistinguishable from a real one, and schedules the task
 -- as though it were free.
 instance IsStatKey Void where
-  memoryEstimate = absurd
+  memoryEstimate v _ = absurd v
 
 -- | Serialize a stat key together with its type tag. This is the form stored
 -- in stat files and used as the grouping key when statistics are merged.
@@ -239,12 +249,9 @@ newtype FileStatKey = MkFileStatKey Aeson.Value
   deriving anyclass (ToJSONKey, FromJSONKey)
 
 -- | Projects an output key onto the key under which its file's size is
--- recorded and estimated.
---
--- Both the recorded identity ('toFileStatKey') and the estimate
--- ('toFileSize') are derived from this single projection, so they cannot
--- drift apart -- the estimate can never read a field that the recorded
--- identity dropped, which would make the two incomparable.
+-- recorded and estimated. It is structural, i.e. a property of the key alone,
+-- so that one definition serves both a produced file and a file already on
+-- disk.
 --
 -- Defaults to 'Void', i.e. no file statistics: the file's size is neither
 -- recorded nor looked up, and is estimated as zero. This mirrors the default
@@ -268,17 +275,14 @@ class IsFileStatKey (FileStatKeyOf a) => ToFileStatKey a where
 toFileStatKey :: ToFileStatKey a => a -> Maybe FileStatKey
 toFileStatKey = fmap encodeFileStatKey . fileStatKeyOf
 
--- | How big the output file is expected to be. Zero when the key declares no
--- file stat key, i.e. when the size is simply unknown.
-toFileSize :: ToFileStatKey a => a -> FileSize
-toFileSize = maybe 0 fileSizeEstimate . fileStatKeyOf
-
 -- OutKey k = Void means no files.
 instance ToFileStatKey Void
 
 -- | A file is identified by its path: 'Eq' and 'Ord' compare nothing else.
 -- A set of a task's files is then built without forcing their stat keys and
--- sizes, which can be expensive.
+-- sizes, which can be expensive, and which
+-- 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap' may compute
+-- from other tasks' file infos.
 data TaskKeyFileInfo = MkTaskKeyFileInfo
   { path        :: VirtualFilePath
   , fileStatKey :: Maybe FileStatKey
@@ -287,6 +291,8 @@ data TaskKeyFileInfo = MkTaskKeyFileInfo
     -- does: 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats'
     -- replaces it with a recorded size, and what the key itself declared is
     -- then the only way to tell whether 'fileSizeEstimate' is any good.
+    --
+    -- For an input file already on disk, it is the size on disk.
   }
   deriving (Generic, Show)
 
@@ -298,13 +304,15 @@ instance Ord TaskKeyFileInfo where
 
 type ToTaskKeyFileInfo r a = (PathResolver r a, ToFileStatKey a)
 
+-- | The file of the given key, of unknown (zero) size: the size of a file
+-- depends on the inputs of the task producing it, or on the disk.
 toTaskKeyFileInfo
   :: ToTaskKeyFileInfo r a
   => r -> a -> TaskKeyFileInfo
 toTaskKeyFileInfo resolver key = MkTaskKeyFileInfo
   { path        = VirtualFilePath $ resolvePath resolver key
   , fileStatKey = toFileStatKey key
-  , fileSize    = EstimatedByTask $ toFileSize key
+  , fileSize    = EstimatedByTask 0
   }
 
 -- | What a summary sees of an input file: its file stat key and the size to

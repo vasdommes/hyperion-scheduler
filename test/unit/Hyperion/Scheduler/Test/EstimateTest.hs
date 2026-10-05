@@ -57,13 +57,13 @@ newtype EstStatKey = MkEstStatKey String
 -- | The task's own memory model. 'MkEstTask' overrides it, so that a test can
 -- make the model and the measurement disagree.
 instance IsStatKey EstStatKey where
-  memoryEstimate _ = 1024 * 1024
+  memoryEstimate _ _ = 1024 * 1024
 
 newtype EstFileStatKey = MkEstFileStatKey String
   deriving newtype (ToJSON)
 
 instance IsFileStatKey EstFileStatKey where
-  fileSizeEstimate _ = 100
+  fileSizeEstimate _ _ = 100
 
 data EstTask = MkEstTask
   { name   :: String
@@ -73,12 +73,12 @@ data EstTask = MkEstTask
 instance Binary EstTask
 
 instance IsTask EstTask where
-  taskSummary t = MkTaskSummary
+  taskSummary _ t = MkTaskSummary
     { inputs    = Set.empty
     , outputs   = Set.singleton MkTaskKeyFileInfo
       { fileStatKey = Just $ encodeFileStatKey (MkEstFileStatKey t.name)
       , path        = VirtualFilePath $ fromString ("/data/" <> t.name)
-      , fileSize    = EstimatedByTask $ fileSizeEstimate (MkEstFileStatKey t.name)
+      , fileSize    = EstimatedByTask $ fileSizeEstimate (MkEstFileStatKey t.name) ()
       }
     , statKey   = Just $ encodeStatKey (MkEstStatKey t.name)
     , estimates = estimatesFromModel t.memory
@@ -97,7 +97,7 @@ data PreMeasuredTask = MkPreMeasuredTask
 instance Binary PreMeasuredTask
 
 instance IsTask PreMeasuredTask where
-  taskSummary _ = (filesOnlySummary Set.empty Set.empty)
+  taskSummary knownInputs _ = (filesOnlySummary Set.empty Set.empty knownInputs)
     { estimates = MkResourceEstimates
       { memory  = MeasuredFromStats (8 * 1024 * 1024) (1024 * 1024)
       , runtime = MeasuredFromStats (const 10) (const 1)
