@@ -10,7 +10,7 @@ import Data.IntMap.Strict             qualified as IntMap
 import Data.List                      (intercalate)
 import Data.Text                      (Text)
 import Data.Text                      qualified as Text
-import Hyperion.Scheduler.Task.IsTask (IsTask (..))
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), taskMemoryEstimate)
 import Hyperion.Scheduler.Types       (MemorySize, NumCPUs)
 
 -- | Currently in-use resources on a node
