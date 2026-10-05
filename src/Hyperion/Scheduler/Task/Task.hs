@@ -51,7 +51,8 @@ import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
-                                            RunStage, Tag, defaultTaskTag,
+                                            RunStage, Tag, TaskSummary (..),
+                                            defaultTaskTag,
                                             defaultTaskTagForType,
                                             estimatesFromModel)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
@@ -392,6 +393,27 @@ computeAndWrite Dict numCpus task =
 class ToTaskKeyFileInfo r k => FileInfo r k
 instance ToTaskKeyFileInfo r k => FileInfo r k
 
+-- | A task's summary. It traverses the dependencies and projects the stat key
+-- once, since both can be expensive.
+summarizeTask
+  :: forall r k . (TaskKey k, PathResolver r (OutKey k), All (FileInfo r) (DepKeys k))
+  => Task r k -> TaskSummary
+summarizeTask t = MkTaskSummary
+  { inputs    = Set.map (vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)) $
+      toVariants (tailF outsAndDeps)
+  , outputs   = Set.map (toTaskKeyFileInfo t.resolver) (headF outsAndDeps)
+  , statKey   = encodeStatKey <$> statKey
+  , estimates = case statKey of
+      Nothing  -> estimatesFromModel 0
+      Just key -> MkResourceEstimates
+        { memory  = EstimatedByTask (memoryEstimate key)
+        , runtime = EstimatedByTask (runtimeEstimate key)
+        }
+  }
+  where
+    outsAndDeps = outAndDependencies t.config t.key
+    statKey = toStatKey t.config t.key
+
 instance
   ( Static(PathResolverForAll r (DepKeys k))
   , All (FileInfo r) (DepKeys k)
@@ -415,18 +437,9 @@ instance
   -- statistics for that key.
   -- A task with no stat key estimates zero memory, hence (via
   -- 'estimatesFromModel') zero runtime.
-  taskResourceEstimates t = case toStatKey t.config t.key of
-    Nothing      -> estimatesFromModel 0
-    Just statKey -> MkResourceEstimates
-      { memory = EstimatedByTask (memoryEstimate statKey)
-      , runtime = EstimatedByTask (runtimeEstimate statKey)
-      }
-  taskStatKey t          = encodeStatKey <$> toStatKey t.config t.key
+  taskSummary            = summarizeTask
   taskMaxThreads stage t = maxThreads stage t.config t.key
   taskMinThreads stage t = minThreads stage t.config t.key
-  taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
-    toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
-  taskOutputs t          = Set.map (toTaskKeyFileInfo t.resolver) $ outKeys t.config t.key
   taskDefaultPriority t  = priority t.key
   taskTag t              = tag t.key
   -- A closure-less task completes instantly without a worker round-trip

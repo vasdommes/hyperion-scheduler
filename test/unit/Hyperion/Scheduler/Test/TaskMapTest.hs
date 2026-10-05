@@ -27,7 +27,8 @@ import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
 import Hyperion.Scheduler.StatKey      (IsFileStatKey (..),
                                         TaskKeyFileInfo (..),
                                         ToFileStatKey (..), encodeFileStatKey)
-import Hyperion.Scheduler.Task.IsTask  (IsTask (..), taskInputPaths)
+import Hyperion.Scheduler.Task.IsTask  (IsTask (..), filesOnlySummary,
+                                        taskInputPaths)
 import Hyperion.Scheduler.Task.Task    (DepKeys, TaskKey (..), TaskKind (..),
                                         dependencies, listTaskKey, outKeys)
 import Hyperion.Scheduler.Task.TaskMap (TaskMap, placeholdersOfType,
@@ -62,8 +63,8 @@ mkFileInfo path = MkTaskKeyFileInfo
   }
 
 instance IsTask TestTask where
-  taskInputs t        = Set.map mkFileInfo t.inputs
-  taskOutputs t       = Set.map mkFileInfo t.outputs
+  taskSummary t =
+    filesOnlySummary (Set.map mkFileInfo t.inputs) (Set.map mkFileInfo t.outputs)
   taskTag t           = Just (Text.pack t.name)
   taskClosure t
     | t.computes = Just $ error "TestTask closure is never run"

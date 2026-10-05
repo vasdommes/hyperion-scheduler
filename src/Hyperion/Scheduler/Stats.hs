@@ -52,7 +52,8 @@ import Hyperion.OsPath                (OsPath, takeDirectory)
 import Hyperion.OsString              (fromString, toString)
 import Hyperion.Scheduler.StatKey     (FileStatKey, StatKey,
                                        TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), ResourceEstimates (..))
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), ResourceEstimates (..),
+                                       taskOutputs, taskResourceEstimates)
 import Hyperion.Scheduler.Types       (Estimate, FileSize (..), MemorySize (..),
                                        Node, NumCPUs)
 import Hyperion.Util                  (randomString)

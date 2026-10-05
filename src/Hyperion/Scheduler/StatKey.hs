@@ -192,16 +192,25 @@ toFileSize = maybe 0 fileSizeEstimate . fileStatKeyOf
 -- OutKey k = Void means no files.
 instance ToFileStatKey Void
 
+-- | A file is identified by its path: 'Eq' and 'Ord' compare nothing else.
+-- A set of a task's files is then built without forcing their stat keys and
+-- sizes, which can be expensive.
 data TaskKeyFileInfo = MkTaskKeyFileInfo
-  { fileStatKey :: Maybe FileStatKey
-  , path        :: VirtualFilePath
+  { path        :: VirtualFilePath
+  , fileStatKey :: Maybe FileStatKey
   , fileSize    :: Estimate FileSize
     -- ^ Carries its provenance for the same reason a task's memory estimate
     -- does: 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats'
     -- replaces it with a recorded size, and what the key itself declared is
     -- then the only way to tell whether 'fileSizeEstimate' is any good.
   }
-  deriving (Generic, Eq, Ord, Show)
+  deriving (Generic, Show)
+
+instance Eq TaskKeyFileInfo where
+  x == y = x.path == y.path
+
+instance Ord TaskKeyFileInfo where
+  compare x y = compare x.path y.path
 
 type ToTaskKeyFileInfo r a = (PathResolver r a, ToFileStatKey a)
 
@@ -209,7 +218,7 @@ toTaskKeyFileInfo
   :: ToTaskKeyFileInfo r a
   => r -> a -> TaskKeyFileInfo
 toTaskKeyFileInfo resolver key = MkTaskKeyFileInfo
-  { fileStatKey      = toFileStatKey key
-  , path             = VirtualFilePath $ resolvePath resolver key
-  , fileSize         = EstimatedByTask $ toFileSize key
+  { path        = VirtualFilePath $ resolvePath resolver key
+  , fileStatKey = toFileStatKey key
+  , fileSize    = EstimatedByTask $ toFileSize key
   }

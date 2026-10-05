@@ -32,11 +32,18 @@ type TaskMap a = Map a (Set a)
 mkTaskMap :: (Monad m, HasTaskChain m r c k) => r -> c -> k -> m (TaskMap WrappedTask)
 mkTaskMap resolver cfg = toTaskEdges (taskChain resolver cfg)
 
--- Update all tasks (keys and values) in a TaskMap
+-- | Update all tasks (keys and values) in a TaskMap. A dependency in the
+-- values becomes the updated task from the keys, so that each task is one
+-- object: a 'WrappedTask' computes its fields lazily, once per object.
 updateTaskMap :: Ord b => (a -> b) -> TaskMap a -> TaskMap b
-updateTaskMap updateTask = updateKeys . updateValues where
-  updateKeys = Map.mapKeys updateTask
-  updateValues = Map.map $ Set.map updateTask
+updateTaskMap updateTask taskMap = Map.map (Set.map asKey) updatedKeys
+  where
+    updatedKeys = Map.mapKeys updateTask taskMap
+    asKey dep = case Map.lookupIndex dep' updatedKeys of
+      Just i  -> fst (Map.elemAt i updatedKeys)
+      Nothing -> dep'
+      where
+        dep' = updateTask dep
 
 decorateTaskMapWithStats :: TaskAndFileStats -> TaskMap WrappedTask -> TaskMap WrappedTask
 decorateTaskMapWithStats = updateTaskMap . decorateTaskWithStats

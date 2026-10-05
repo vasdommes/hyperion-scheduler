@@ -84,8 +84,10 @@ import Hyperion.Scheduler.Stats                     (TaskRecord (..),
                                                      taskEstimatesAt)
 import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
                                                      TaskMap, taskInputPaths,
+                                                     taskInputs,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
+                                                     taskOutputs, taskStatKey,
                                                      validateTaskMap)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph

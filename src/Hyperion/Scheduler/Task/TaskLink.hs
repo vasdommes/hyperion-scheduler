@@ -24,7 +24,7 @@ import Data.Tree                           (Tree)
 import Data.Tree                           qualified as Tree
 import Data.Typeable                       (Typeable)
 import Data.Void                           (Void)
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..))
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), filesOnlySummary)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, wrapTask)
 
 data TaskLink m k d t = MkTaskLink
@@ -61,15 +61,13 @@ newtype ListTask k = MkListTask { keys :: [k] }
   deriving newtype (Binary, ToJSON, Eq, Ord)
 
 instance (Eq k, Ord k, ToJSON k, Typeable k) => IsTask (ListTask k) where
-  taskMaxThreads _ _ = 0
-  taskMinThreads _ _ = 0
-  taskInputs _       = Set.empty
-  taskOutputs _      = Set.empty
-  taskTag _          = Nothing
-  taskClosure _      = Nothing
   -- A pure grouping node: it performs no computation, so there is nothing to
   -- record or estimate.
-  taskStatKey _      = Nothing
+  taskSummary _      = filesOnlySummary Set.empty Set.empty
+  taskMaxThreads _ _ = 0
+  taskMinThreads _ _ = 0
+  taskTag _          = Nothing
+  taskClosure _      = Nothing
 
 listTaskLink :: (Ord k, Applicative m) => TaskLink m [k] k (ListTask k)
 listTaskLink = MkTaskLink

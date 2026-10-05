@@ -19,8 +19,9 @@ import Data.Time.Clock                (NominalDiffTime)
 import Hyperion.Scheduler.Config      (Config)
 import Hyperion.Scheduler.FilePath    (VirtualFilePath, isNodeLocal)
 import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..),
-                                       taskMemoryCapped, taskRuntimeEstimate)
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..), taskInputs,
+                                       taskMemoryCapped, taskOutputs,
+                                       taskRuntimeEstimate)
 import Hyperion.Scheduler.Types       (FileSize, Node (..), NumCPUs,
                                        schedulingEstimate)
 

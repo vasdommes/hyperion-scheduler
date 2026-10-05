@@ -32,18 +32,17 @@ data RunStage = InitialRun | InProgressRun
 type Tag = Text
 
 -- Everything Scheduler needs
--- HasTaskHash + IsTask + CanRemoteRunTask + 'taskStatKey'
+-- HasTaskHash + IsTask + CanRemoteRunTask + 'taskSummary'
 class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 --  taskHash :: a -> ByteString
 --  default taskHash :: Binary a => a -> ByteString
 --  taskHash = hashBase64SafeByteString
 
-  -- | Estimated memory in bytes and runtime in seconds, with the provenance of
-  -- each. Ordinary tasks return 'estimatesFromModel', i.e. their own model; only
-  -- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' ever reports a
-  -- figure measured from statistics.
-  taskResourceEstimates :: a -> ResourceEstimates
-  taskResourceEstimates _ = estimatesFromModel 0
+  -- | The task's files, stat key and estimates, computed together because
+  -- they share expensive work. A
+  -- 'Hyperion.Scheduler.Task.WrappedTask.WrappedTask' computes it once.
+  taskSummary :: a -> TaskSummary
+
   -- | Maximum possible threads for the task
   -- TODO: get rid of RunStage?
   taskMaxThreads :: RunStage -> a -> NumCPUs
@@ -51,16 +50,11 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   -- | Minimum possible threads for the task
   taskMinThreads :: RunStage -> a -> NumCPUs
   taskMinThreads _ _ = 1
-  -- | A label indicating the type of task. If Nothing, the task
-  -- will be ommitted from progress reports.
-  -- List of input files
-  taskInputs     :: a -> Set TaskKeyFileInfo
-  -- List of output files
-  taskOutputs    :: a -> Set TaskKeyFileInfo
-
   taskDefaultPriority   :: a -> Int
   taskDefaultPriority = const 0
 
+  -- | A label indicating the type of task. If Nothing, the task
+  -- will be ommitted from progress reports.
   taskTag :: a -> Maybe Tag
   taskTag = defaultTaskTag
 
@@ -79,23 +73,57 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskPlaceholderKey :: Typeable k => a -> Maybe k
   taskPlaceholderKey _ = Nothing
 
-  -- | The serialized stat key under which this task's resource usage is
-  -- recorded and looked up. For a 'Hyperion.Scheduler.Task.Task.Task' this is
-  -- built from the task's own stat key, which is also what
-  -- 'taskMemoryEstimate' and 'taskRuntimeEstimate' are computed from.
-  --
-  -- 'Nothing' means the task has no identity in statistics: it is neither
-  -- recorded nor looked up, and its estimates are zero. That is the right
-  -- answer for tasks performing no computation (no-ops, placeholders), whose
-  -- only measurable quantity would be scheduler bookkeeping latency.
-  --
-  -- Defaults to 'Nothing', matching the default 'StatKeyOf' of 'Void' at the
-  -- 'Hyperion.Scheduler.Task.Task.TaskKey' level: no statistics unless a task
-  -- says otherwise. Defaulting instead to the whole task encoded as its own
-  -- stat key would put every task in a group of one, which no curve can be
-  -- fitted to.
-  taskStatKey :: a -> Maybe StatKey
-  taskStatKey _ = Nothing
+-- | See 'taskSummary'.
+data TaskSummary = MkTaskSummary
+  { inputs    :: Set TaskKeyFileInfo
+  , outputs   :: Set TaskKeyFileInfo
+    -- | The serialized stat key under which this task's resource usage is
+    -- recorded and looked up. For a 'Hyperion.Scheduler.Task.Task.Task' this
+    -- is built from the task's own stat key, which is also what 'estimates'
+    -- are computed from.
+    --
+    -- 'Nothing' means the task has no identity in statistics: it is neither
+    -- recorded nor looked up, and its estimates are zero. That is the right
+    -- answer for tasks performing no computation (no-ops, placeholders),
+    -- whose only measurable quantity would be scheduler bookkeeping latency.
+    -- Setting it instead to the whole task encoded as its own stat key would
+    -- put every task in a group of one, which no curve can be fitted to.
+  , statKey   :: Maybe StatKey
+    -- | Estimated memory in bytes and runtime in seconds, with the provenance
+    -- of each. Ordinary tasks give their own model (e.g.
+    -- 'estimatesFromModel'); only
+    -- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' ever
+    -- reports a figure measured from statistics.
+  , estimates :: ResourceEstimates
+  }
+
+-- | The summary of a task with no stat key: its files and zero estimates.
+filesOnlySummary
+  :: Set TaskKeyFileInfo  -- ^ inputs
+  -> Set TaskKeyFileInfo  -- ^ outputs
+  -> TaskSummary
+filesOnlySummary inputs outputs = MkTaskSummary
+  { inputs    = inputs
+  , outputs   = outputs
+  , statKey   = Nothing
+  , estimates = estimatesFromModel 0
+  }
+
+-- | Input files, with their sizes.
+taskInputs :: IsTask a => a -> Set TaskKeyFileInfo
+taskInputs = (.inputs) . taskSummary
+
+-- | Output files, with their size estimates.
+taskOutputs :: IsTask a => a -> Set TaskKeyFileInfo
+taskOutputs = (.outputs) . taskSummary
+
+-- | See 'TaskSummary'.
+taskStatKey :: IsTask a => a -> Maybe StatKey
+taskStatKey = (.statKey) . taskSummary
+
+-- | See 'TaskSummary'.
+taskResourceEstimates :: IsTask a => a -> ResourceEstimates
+taskResourceEstimates = (.estimates) . taskSummary
 
 -- | A task's memory and runtime estimates with their provenance.
 data ResourceEstimates = MkResourceEstimates

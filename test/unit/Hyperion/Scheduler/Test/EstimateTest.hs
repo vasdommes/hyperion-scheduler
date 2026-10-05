@@ -35,8 +35,11 @@ import Hyperion.Scheduler.Stats            (TaskAndFileStats,
                                             recordToTaskStats, taskEstimatesAt,
                                             toTrials)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
+                                            TaskSummary (..),
                                             estimatesFromModel,
-                                            taskRuntimeEstimate)
+                                            filesOnlySummary, taskOutputs,
+                                            taskResourceEstimates,
+                                            taskRuntimeEstimate, taskStatKey)
 import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats,
                                             wrapTask)
 import Hyperion.Scheduler.Types            (Estimate (..), FileSize,
@@ -70,16 +73,18 @@ data EstTask = MkEstTask
 instance Binary EstTask
 
 instance IsTask EstTask where
-  taskResourceEstimates t = estimatesFromModel t.memory
-  taskInputs _ = Set.empty
-  taskOutputs t = Set.singleton MkTaskKeyFileInfo
-    { fileStatKey = Just $ encodeFileStatKey (MkEstFileStatKey t.name)
-    , path        = VirtualFilePath $ fromString ("/data/" <> t.name)
-    , fileSize    = EstimatedByTask $ fileSizeEstimate (MkEstFileStatKey t.name)
+  taskSummary t = MkTaskSummary
+    { inputs    = Set.empty
+    , outputs   = Set.singleton MkTaskKeyFileInfo
+      { fileStatKey = Just $ encodeFileStatKey (MkEstFileStatKey t.name)
+      , path        = VirtualFilePath $ fromString ("/data/" <> t.name)
+      , fileSize    = EstimatedByTask $ fileSizeEstimate (MkEstFileStatKey t.name)
+      }
+    , statKey   = Just $ encodeStatKey (MkEstStatKey t.name)
+    , estimates = estimatesFromModel t.memory
     }
   taskTag t = Just (Text.pack t.name)
   taskClosure _ = Nothing
-  taskStatKey t = Just $ encodeStatKey (MkEstStatKey t.name)
 
 estTask :: String -> MemorySize -> WrappedTask
 estTask name memory = wrapTask MkEstTask { name = name, memory = memory }
@@ -92,14 +97,14 @@ data PreMeasuredTask = MkPreMeasuredTask
 instance Binary PreMeasuredTask
 
 instance IsTask PreMeasuredTask where
-  taskInputs _ = Set.empty
-  taskOutputs _ = Set.empty
+  taskSummary _ = (filesOnlySummary Set.empty Set.empty)
+    { estimates = MkResourceEstimates
+      { memory  = MeasuredFromStats (8 * 1024 * 1024) (1024 * 1024)
+      , runtime = MeasuredFromStats (const 10) (const 1)
+      }
+    }
   taskTag _ = Just "PreMeasured"
   taskClosure _ = Nothing
-  taskResourceEstimates _ = MkResourceEstimates
-    { memory  = MeasuredFromStats (8 * 1024 * 1024) (1024 * 1024)
-    , runtime = MeasuredFromStats (const 10) (const 1)
-    }
 
 -- * Statistics built from records
 
