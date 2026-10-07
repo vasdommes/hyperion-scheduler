@@ -5,6 +5,11 @@ DAG of tasks with memory, CPU and disk-space estimates, it distributes them over
 the nodes of a job, moves intermediate files between node-local storage, and
 cleans them up when they are no longer needed.
 
+## Design notes
+
+- [Stat keys and input summaries](docs/stat-key-inputs-design.md): how tasks
+  are estimated, and how recorded statistics correct the estimates.
+
 ## Building
 
 ```sh

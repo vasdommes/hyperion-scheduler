@@ -14,6 +14,9 @@
 {-# LANGUAGE UndecidableInstances    #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
+-- | Stat keys, input summaries and file infos: what a task's estimates are
+-- computed from and its statistics recorded under. See
+-- @docs/stat-key-inputs-design.md@ for the design.
 module Hyperion.Scheduler.StatKey where
 
 import Control.DeepSeq                 (NFData)
