@@ -121,6 +121,7 @@ test-suite hyperion-scheduler-unit-test
   other-modules:
       Hyperion.Scheduler.Test.Counted
       Hyperion.Scheduler.Test.EstimateTest
+      Hyperion.Scheduler.Test.InputSummaryTest
       Hyperion.Scheduler.Test.TaskFilesTest
       Hyperion.Scheduler.Test.TaskMapTest
       Paths_hyperion_scheduler
