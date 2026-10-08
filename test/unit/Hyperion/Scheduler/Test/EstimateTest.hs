@@ -46,6 +46,7 @@ import Hyperion.Scheduler.Task.IsTask        (InputInfos, IsTask (..),
                                               TaskShape (..),
                                               estimatesFromModel,
                                               filesOnlyShape, taskStatKey)
+import Hyperion.Scheduler.Task.TaskMap       (TaskMap, underestimatedMemoryTags)
 import Hyperion.Scheduler.Task.WrappedTask   (WrappedTask, wrapTask)
 import Hyperion.Scheduler.Types              (Estimate (..), FileSize,
                                               MemorySize (..), Node (..),
@@ -245,6 +246,19 @@ testApplyStatsIsIdempotent = do
   expect "applying statistics twice keeps the measured memory" $
     schedulingEstimate estimates.memory == 8 * 1024 * 1024
 
+-- | A task whose measured memory dwarfs its own model is reported.
+testUnderestimatedMemoryIsReported :: IO ()
+testUnderestimatedMemoryIsReported = do
+  let
+    stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
+    overOptimistic = estimated stats (estTask "A" (1024 * 1024))
+    accurate = estimated stats (estTask "A" (7 * 1024 * 1024))
+  expect "a model 8x below the measurement is reported" $
+    underestimatedMemoryTags 2 (taskMapOf [overOptimistic])
+      == Set.singleton (Just "A")
+  expect "a model close to the measurement is not reported" $
+    Set.null (underestimatedMemoryTags 2 (taskMapOf [accurate]))
+
 -- | Estimating must not relabel a measurement as the task's own prediction.
 -- No task in this repository measures its own figures -- only
 -- 'applyStats' does -- so this guards the class contract rather
@@ -397,6 +411,9 @@ testFilesOnlyProducerSummary = do
     producerSummaryOf (Just (encodeFileStatKey (MkEstFileStatKey "A")))
       == Just unitSummary
 
+taskMapOf :: [EstimatedTask WrappedTask] -> TaskMap (EstimatedTask WrappedTask)
+taskMapOf tasks = Map.fromList [(t, Set.empty) | t <- tasks]
+
 -- | Stat key types are told apart by this name, so that types of the same
 -- name in different modules do not share statistics.
 data TaggedKey = MkTaggedKey
@@ -413,6 +430,7 @@ runTest = do
   testRuntimeMeasuredWithoutMemory
   testNoMatchKeepsTaskEstimates
   testApplyStatsIsIdempotent
+  testUnderestimatedMemoryIsReported
   testEstimateKeepsMeasuredEstimates
   testZeroCpuRecordContributesNothing
   testTrialsSummary

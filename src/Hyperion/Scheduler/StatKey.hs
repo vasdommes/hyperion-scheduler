@@ -208,7 +208,8 @@ class (Typeable a, ToJSON a, FromJSON a, IsSummary (InputSummary a))
   -- | Estimated memory in bytes: the resident set of the whole worker process
   -- while this task runs, not only what the task allocates. Each concurrent
   -- task is its own worker, so include the executable's own footprint (tens
-  -- of megabytes); statistics measure the same thing.
+  -- of megabytes); statistics measure the same thing, and a model without it
+  -- is reported as under-predicting.
   memoryEstimate :: a -> InputSummary a -> MemorySize
 
   -- | Estimated runtime in seconds, as a function of 'NumCPUs'.

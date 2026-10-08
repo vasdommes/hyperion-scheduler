@@ -96,6 +96,8 @@ data TaskShape = MkTaskShape
     -- whose only measurable quantity would be scheduler bookkeeping latency.
     -- Setting it instead to the whole task encoded as its own stat key would
     -- put every task in a group of one, which no curve can be fitted to.
+    -- 'Hyperion.Scheduler.Task.TaskMap.taskInstrumentationGaps' reports tasks
+    -- that compute but leave this at 'Nothing'.
   , statKey      :: Maybe StatKey
     -- | The task's own model of its input summary, 'Nothing' if the task has
     -- no stat key. Tasks with equal stat keys must have equal models: a model

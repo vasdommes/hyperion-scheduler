@@ -67,6 +67,7 @@ import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
 import Hyperion.Scheduler.RunTasks.ProgressMap      qualified as ProgressMap
 import Hyperion.Scheduler.RunTasks.RemoteRunTask    (RemoteRunTaskResult (..),
                                                      remoteRunTask)
+import Hyperion.Scheduler.RunTasks.Report           (reportBeforeRun)
 import Hyperion.Scheduler.RunTasks.Shared           (Shared (..), newShared,
                                                      readShared)
 import Hyperion.Scheduler.RunTasks.Shared           qualified as Shared
@@ -574,6 +575,7 @@ runTaskMap config taskMap = do
     cleanupDependencies = buildCleanupDependenciesMap config taskMap
   either Log.throw pure $ validateNodeLocalInputs config taskMap
   nodes <- getJobNodes config
+  reportBeforeRun config nodes taskMap
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let
         getTaskPriority = taskPriority $ mkTaskPriorityHelper nodes taskGraph

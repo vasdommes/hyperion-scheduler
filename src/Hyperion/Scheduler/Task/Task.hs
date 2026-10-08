@@ -235,6 +235,8 @@ class ( All Eq (DepKeys k)
   -- looked up, and both its estimates are zero. That is correct for tasks that
   -- compute nothing (NoOpTask), and tolerable for small ones:
   -- a task with runtimeEstimate=0 gets 'minThreads' and lower priority.
+  -- 'Hyperion.Scheduler.Task.TaskMap.taskInstrumentationGaps' reports tasks
+  -- that compute but declare no stat key, so you'll see them in the logs.
   --
   -- A stat key should be a /reduced/ projection of the key: drop or coarsen
   -- the fields that do not affect resource usage.

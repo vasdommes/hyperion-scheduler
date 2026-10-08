@@ -30,6 +30,7 @@ library
       Hyperion.Scheduler.RunTasks.NodeStatus
       Hyperion.Scheduler.RunTasks.ProgressMap
       Hyperion.Scheduler.RunTasks.RemoteRunTask
+      Hyperion.Scheduler.RunTasks.Report
       Hyperion.Scheduler.RunTasks.Shared
       Hyperion.Scheduler.RunTasks.TaskDistribution
       Hyperion.Scheduler.RunTasks.TaskPriority
