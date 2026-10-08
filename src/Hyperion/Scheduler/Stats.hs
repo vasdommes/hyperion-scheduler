@@ -15,15 +15,20 @@ module Hyperion.Scheduler.Stats
   , TaskRecord (..)
   , ScheduledEstimates (..)
   , TaskStats (..)
+  , TaskResourceMap
   , FileStats (..)
   , Trials (..)
   , toTrials
   , taskEstimatesAt
   , recordToStats
+  , outputFileSizes
   , approxRuntime
   , maxMemory
+  , memoryCorrection
+  , runtimeCorrection
+  , fileSizeCorrection
   , lookupTaskStats
-  , lookupMaxFileSize
+  , lookupFileStats
   , readTaskStats
   , readTaskRecords
   , writeTaskStats
@@ -42,7 +47,8 @@ import Data.List.NonEmpty             qualified as NonEmpty
 import Data.Map.Monoidal              (MonoidalMap (..))
 import Data.Map.Strict                (Map)
 import Data.Map.Strict                qualified as Map
-import Data.Maybe                     (mapMaybe)
+import Data.Maybe                     (fromMaybe, mapMaybe)
+import Data.Set                       (Set)
 import Data.Set                       qualified as Set
 import Data.Time                      (UTCTime)
 import Data.Time.Clock                (NominalDiffTime)
@@ -50,7 +56,9 @@ import GHC.Generics                   (Generic, Generically (..))
 import Hyperion.Log                   qualified as Log
 import Hyperion.OsPath                (OsPath, takeDirectory)
 import Hyperion.OsString              (fromString, toString)
-import Hyperion.Scheduler.StatKey     (FileStatKey, SizedTaskFile (..), StatKey)
+import Hyperion.Scheduler.FilePath    (VirtualFilePath)
+import Hyperion.Scheduler.StatKey     (EncodedSummary, FileStatKey,
+                                       SizedTaskFile (..), StatKey, unitSummary)
 import Hyperion.Scheduler.Task.IsTask (ResourceEstimates (..),
                                        TaskEstimation (..))
 import Hyperion.Scheduler.Types       (Estimate, FileSize (..), MemorySize (..),
@@ -66,19 +74,26 @@ import System.File.OsPath             (readFile)
 
 -- | A record of task and information about when and how it ran
 data TaskRecord a = MkTaskRecord
-  { task          :: a
-  , taskStart     :: UTCTime
-  , taskRuntime   :: NominalDiffTime
-  , taskMemory    :: Maybe MemorySize
-  , taskNode      :: Node
-  , taskNumCPUs   :: NumCPUs
-  , taskFileSizes :: Map FileStatKey (NonEmpty FileSize)
-  , taskEstimates :: ScheduledEstimates
-  , taskStatKey   :: Maybe StatKey
+  { task                :: a
+  , taskStart           :: UTCTime
+  , taskRuntime         :: NominalDiffTime
+  , taskMemory          :: Maybe MemorySize
+  , taskNode            :: Node
+  , taskNumCPUs         :: NumCPUs
+  , taskFileSizes       :: Map FileStatKey (NonEmpty FileSize)
+  , taskEstimates       :: ScheduledEstimates
+  , taskStatKey         :: Maybe StatKey
     -- ^ Recorded rather than recomputed from 'task': a stat key is a reduced
     -- projection of the task, and the projection needs a typed key and its
     -- config, neither of which survives serialization. Without it a record read
     -- back from a file could not be grouped with its comparable siblings.
+  , taskInputSummary    :: Maybe EncodedSummary
+    -- ^ The input summary, from the sizes of the input files when the task
+    -- ran. 'Nothing' if the task has no stat key.
+  , taskProducerSummary :: Maybe EncodedSummary
+    -- ^ The producer summary, from the sizes of the input files when the task
+    -- ran: what the sizes of the output files are estimated from. 'Nothing'
+    -- if no output file has a file stat key.
   } deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON, Functor)
 
 -- | What the scheduler predicted for a task, recorded next to what the task
@@ -256,11 +271,66 @@ fitRuntime p points = runtime
 approxRuntime :: Maybe Double -> TaskResourceMap -> Maybe (NumCPUs -> NominalDiffTime)
 approxRuntime p = fmap (fitRuntime p) . nonEmptyRuntimeEntries
 
--- | A map from StatKey to TaskResourceMap which describes the resource usage of the task.
-newtype TaskStats = MkTaskStats (Map StatKey TaskResourceMap)
+-- | The correction of a memory model by statistics recorded with other input
+-- summaries: the largest ratio of the measured memory to the model's
+-- prediction for the same inputs. 'Nothing' without such a ratio.
+memoryCorrection :: [(MemorySize, TaskResourceMap)] -> Maybe Double
+memoryCorrection observations = largestRatio
+  [ (fromIntegral measured, fromIntegral model)
+  | (model, resources) <- observations
+  , Just measured <- [maxMemory resources]
+  ]
+
+-- | 'memoryCorrection' for runtime. At each CPU count, the corrected runtime
+-- is the given model's times the mean ratio of the measured runtime to the
+-- model's prediction for the same inputs; these are then fitted over CPU
+-- counts like measured runtimes. Returns the mean ratio and the curve.
+runtimeCorrection
+  :: (NumCPUs -> NominalDiffTime)
+  -> [(NumCPUs -> NominalDiffTime, TaskResourceMap)]
+  -> Maybe (Double, NumCPUs -> NominalDiffTime)
+runtimeCorrection currentModel observations = do
+  ratios <- nonEmpty $ Map.toList $ Map.map mean $ Map.fromListWith (<>)
+    [ (n, [trials.mean / realToFrac (model n)])
+    | (model, resources) <- observations
+    , Just entries <- [nonEmptyRuntimeEntries resources]
+    , (n, trials) <- NonEmpty.toList entries
+    , model n > 0
+    ]
+  speedups <- nonEmpty
+    [ (n, 1 / corrected)
+    | (n, ratio) <- NonEmpty.toList ratios
+    , let corrected = realToFrac (currentModel n) * ratio
+    , corrected > 0
+    ]
+  let speedup = fitSpeedup Nothing speedups
+  pure
+    ( mean (map snd (NonEmpty.toList ratios))
+    , \n -> realToFrac (1 / speedup n)
+    )
+  where
+    mean xs = sum xs / fromIntegral (length xs)
+
+-- | 'memoryCorrection' for a file size: the largest ratio of a recorded size
+-- to the model's prediction for the same producer inputs.
+fileSizeCorrection :: [(FileSize, Trials FileSize)] -> Maybe Double
+fileSizeCorrection observations = largestRatio
+  [ (fromIntegral trials.max, fromIntegral model)
+  | (model, trials) <- observations
+  ]
+
+-- | The largest ratio of a measurement to a positive prediction, if any.
+largestRatio :: [(Double, Double)] -> Maybe Double
+largestRatio pairs = fmap maximum $ nonEmpty
+  [ measured / predicted | (measured, predicted) <- pairs, predicted > 0 ]
+
+-- | The resource usage of tasks, by stat key and input summary.
+newtype TaskStats =
+  MkTaskStats (Map StatKey (Map EncodedSummary TaskResourceMap))
   deriving stock (Eq, Ord, Show)
   deriving newtype (FromJSON, ToJSON, NFData)
-  deriving (Semigroup, Monoid) via (MonoidalMap StatKey TaskResourceMap)
+  deriving (Semigroup, Monoid)
+    via (MonoidalMap StatKey (MonoidalMap EncodedSummary TaskResourceMap))
 
 
 -- | Needs nothing of the task itself beyond what the record already states, so
@@ -279,31 +349,56 @@ recordToStats record = MkTaskAndFileStats taskStats fileStats where
   -- infinity for every CPU count.
   taskStats = MkTaskStats $ case record.taskStatKey of
     Just statKey | record.taskNumCPUs > 0 ->
-      Map.singleton statKey (taskResourceMapSingleton record)
+      Map.singleton statKey $ Map.singleton
+        (summaryOf record.taskInputSummary) (taskResourceMapSingleton record)
     _ -> Map.empty
-  fileStats = MkFileStats $ Map.map toTrials record.taskFileSizes
+  fileStats = MkFileStats $ Map.map
+    (Map.singleton (summaryOf record.taskProducerSummary) . toTrials)
+    record.taskFileSizes
+  -- Records from tasks whose files have no stat key have no summary either.
+  summaryOf = fromMaybe unitSummary
+
+-- | The measured sizes of a task's output files, by file stat key, as a
+-- 'TaskRecord' holds them. Outputs only: their sizes are recorded with the
+-- producer summary. Files with no file stat key are not recorded.
+outputFileSizes
+  :: Set SizedTaskFile
+  -> Map VirtualFilePath FileSize
+  -> Map FileStatKey (NonEmpty FileSize)
+outputFileSizes outputs sizes = Map.fromListWith (<>)
+  [ (statKey, NonEmpty.singleton size)
+  | info <- Set.toList outputs
+  , Just statKey <- [info.fileStatKey]
+  , Just size <- [Map.lookup info.path sizes]
+  ]
 
 -- | Sizes are exact: 'Trials' keeps its extremes in the measured type, so a
 -- byte count never passes through a 'Double'.
-newtype FileStats = MkFileStats (Map FileStatKey (Trials FileSize))
+newtype FileStats =
+  MkFileStats (Map FileStatKey (Map EncodedSummary (Trials FileSize)))
   deriving stock (Eq, Ord, Show)
   deriving newtype (FromJSON, ToJSON, NFData)
-  deriving (Semigroup, Monoid) via (MonoidalMap FileStatKey (Trials FileSize))
+  deriving (Semigroup, Monoid)
+    via (MonoidalMap FileStatKey (MonoidalMap EncodedSummary (Trials FileSize)))
 
 data TaskAndFileStats = MkTaskAndFileStats TaskStats FileStats
   deriving (Eq, Ord, Show, Generic, FromJSON, ToJSON, NFData)
   deriving (Semigroup, Monoid) via Generically TaskAndFileStats
 
-lookupMaxFileSize :: FileStatKey -> TaskAndFileStats -> Maybe FileSize
-lookupMaxFileSize key (MkTaskAndFileStats _ (MkFileStats fileSizes)) =
-  (.max) <$> Map.lookup key fileSizes
+-- | The recorded sizes of files with the given stat key, by the producer
+-- input summary.
+lookupFileStats
+  :: FileStatKey -> TaskAndFileStats -> Map EncodedSummary (Trials FileSize)
+lookupFileStats key (MkTaskAndFileStats _ (MkFileStats fileSizes)) =
+  Map.findWithDefault Map.empty key fileSizes
 
--- | Statistics are grouped by stat key, so lookup is an exact match: a key
--- that differs (for instance because an estimate-relevant config field
--- changed) simply misses, and the caller falls back to the analytic estimate.
-lookupTaskStats :: StatKey -> TaskAndFileStats -> Maybe TaskResourceMap
+-- | The recorded resource usage of tasks with the given stat key, by input
+-- summary. A key that differs (for instance because an estimate-relevant
+-- config field changed) has none.
+lookupTaskStats
+  :: StatKey -> TaskAndFileStats -> Map EncodedSummary TaskResourceMap
 lookupTaskStats statKey (MkTaskAndFileStats (MkTaskStats statsMap) _) =
-  Map.lookup statKey statsMap
+  Map.findWithDefault Map.empty statKey statsMap
 
 -- TODO: rename to writeTaskAndFileStats?
 writeTaskStats :: MonadIO m => OsPath -> TaskAndFileStats -> m ()

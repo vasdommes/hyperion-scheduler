@@ -38,12 +38,13 @@ import Hyperion.Scheduler.StatKey               (FileStatKey,
                                                  SizedTaskFile (..),
                                                  TaskFile (..),
                                                  ToFileStatKey (..),
-                                                 encodeFileStatKey, withSize)
+                                                 encodeFileStatKey, unitSummary,
+                                                 withSize)
 import Hyperion.Scheduler.Stats                 (FileStats (..),
                                                  TaskAndFileStats (..),
                                                  TaskStats (..), toTrials)
 import Hyperion.Scheduler.Task.EstimatedTask    (EstimatedTask, estimateTask,
-                                                 taskInputs,
+                                                 prepareStats, taskInputs,
                                                  taskResourceEstimates)
 import Hyperion.Scheduler.Task.EstimatedTaskMap (estimatedTasks,
                                                  mkEstimatedTaskMap)
@@ -358,7 +359,8 @@ testInputSizes = do
       ]
     -- The size of q recorded in statistics.
     stats = MkTaskAndFileStats (MkTaskStats Map.empty) $ MkFileStats $
-      Map.singleton (fileStatKeyOfPath q) (toTrials (NonEmpty.singleton 70))
+      Map.singleton (fileStatKeyOfPath q) $
+        Map.singleton unitSummary (toTrials (NonEmpty.singleton 70))
     inputSizes t = [ (i.path, i.fileSize) | i <- Set.toList (taskInputs t) ]
     isConsumer = (== Just "C") . taskTag
     expected =
@@ -421,9 +423,9 @@ shapeBuilds :: IORef Int
 shapeBuilds = unsafePerformIO newCounter
 {-# NOINLINE shapeBuilds #-}
 
--- | Every way the scheduler reads a task's shape reuses one shape:
--- 'WrappedTask' caches it before estimation, and 'EstimatedTask' during the
--- run.
+-- | Every way the scheduler reads a task's shape, from estimation to the
+-- summaries recorded after the run, reuses one shape: 'WrappedTask' caches it
+-- before estimation, and 'EstimatedTask' during the run.
 testShapeIsCached :: IO ()
 testShapeIsCached = do
   let
@@ -433,6 +435,8 @@ testShapeIsCached = do
         && separately taskInputPaths t == Set.empty
         && separately taskOutputPaths t == Set.singleton (VirtualFilePath q)
         && schedulingEstimate (separately taskResourceEstimates t).memory == 0
+        && isNothing (separately recordedSummary t)
+    recordedSummary t = ((taskShape t).estimate noInputs).inputSummary
   -- Bound at run time: a constant task would be floated out and shared, and
   -- its shape built before the counter is reset.
   [wrappedName, estimatedName] <- evaluate ["W", "E"]
@@ -445,7 +449,8 @@ testShapeIsCached = do
   expect "a wrapped task's shape is built once" $ wrappedBuilds == 1
   resetCounter shapeBuilds
   expect "an estimated task can be read" $
-    readAll (estimateTask mempty noInputs (MkCountedTask estimatedName))
+    readAll $ estimateTask (prepareStats mempty []) noInputs $
+      MkCountedTask estimatedName
   estimatedBuilds <- readIORef shapeBuilds
   expect "an estimated task's shape is built once" $ estimatedBuilds == 1
 

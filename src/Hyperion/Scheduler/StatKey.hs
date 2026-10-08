@@ -116,6 +116,79 @@ instance Ord a => Semigroup (Sorted a) where
 instance Ord a => Monoid (Sorted a) where
   mempty = MkSorted []
 
+-- | A summary of a task's input files, see 'InputSummary'.
+class (Ord s, ToJSON s, FromJSON s) => IsSummary s where
+  -- | How far apart two summaries are, 'Nothing' if they cannot be compared.
+  -- Statistics recorded with one summary correct the estimates for another
+  -- only when the two are close (see 'closeInputSummaries').
+  --
+  -- The default makes a summary categorical: comparable only to itself. By
+  -- default, summaries at a distance of at most 1 are close
+  -- ('nearSummaries'); the size summaries count doublings, so 1 is a factor
+  -- of 2.
+  summaryDistance :: s -> s -> Maybe Double
+  summaryDistance x y = if x == y then Just 0 else Nothing
+
+-- | At a distance between 0 and 1, by 'summaryDistance': for sizes, within a
+-- factor of 2 of each other.
+nearSummaries :: IsSummary s => s -> s -> Bool
+nearSummaries x y = maybe False (\d -> 0 <= d && d <= 1) (summaryDistance x y)
+
+-- | The distance of two sizes: the log2 of their ratio, i.e. how many doublings
+-- apart they are. One byte is added to each, so that empty files are
+-- comparable.
+sizeDistance :: FileSize -> FileSize -> Double
+sizeDistance x y = abs $ logBase 2 $ (fromIntegral x + 1) / (fromIntegral y + 1)
+
+-- | Equal lists of keys (or of nothing), compared by their sizes.
+sizesDistance :: Eq k => [(k, FileSize)] -> [(k, FileSize)] -> Maybe Double
+sizesDistance xs ys
+  | map fst xs == map fst ys =
+      Just $ maximum $ 0 : zipWith sizeDistance (map snd xs) (map snd ys)
+  | otherwise = Nothing
+
+instance IsSummary ()
+
+instance (IsSummary a, IsSummary b) => IsSummary (a, b) where
+  summaryDistance (a, b) (a', b') =
+    max <$> summaryDistance a a' <*> summaryDistance b b'
+
+instance IsSummary MaxInputFileSize where
+  summaryDistance (MkMaxInputFileSize x) (MkMaxInputFileSize y) =
+    Just (sizeDistance x y)
+
+instance IsSummary TotalInputFileSize where
+  summaryDistance (MkTotalInputFileSize x) (MkTotalInputFileSize y) =
+    Just (sizeDistance x y)
+
+-- | Comparable when they have as many files.
+instance IsSummary InputFileSizes where
+  summaryDistance (MkInputFileSizes xs) (MkInputFileSizes ys) =
+    sizesDistance (map ((),) xs) (map ((),) ys)
+
+-- | Comparable when they have the same file stat keys.
+instance IsSummary KeyedInputFileSizes where
+  summaryDistance (MkKeyedInputFileSizes xs) (MkKeyedInputFileSizes ys) =
+    sizesDistance xs ys
+
+-- | A summary, serialized like a 'StatKey'.
+newtype EncodedSummary = MkEncodedSummary Aeson.Value
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON, NFData)
+  deriving anyclass (ToJSONKey, FromJSONKey)
+
+encodeSummary :: ToJSON s => s -> EncodedSummary
+encodeSummary = MkEncodedSummary . toJSON
+
+-- | The summary of estimates that ignore the inputs.
+unitSummary :: EncodedSummary
+unitSummary = encodeSummary ()
+
+-- | 'Nothing' if the value does not parse, e.g. after the summary type
+-- changed.
+decodeSummary :: FromJSON s => EncodedSummary -> Maybe s
+decodeSummary (MkEncodedSummary value) = Aeson.parseMaybe Aeson.parseJSON value
+
 -- | A stat key is the identity under which a task's resource usage is
 -- recorded. The estimates are a model of the stat key and of an
 -- 'InputSummary', a reduced view of the task's input files.
@@ -125,7 +198,8 @@ instance Ord a => Monoid (Sorted a) where
 -- fields that do not affect resource usage, so that tasks differing only in
 -- those share statistics. Project only the estimate-relevant parts of the
 -- config (a version or variant tag), never a filesystem path.
-class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
+class (Typeable a, ToJSON a, FromJSON a, IsSummary (InputSummary a))
+  => IsStatKey a where
   -- | What the estimates need to know about the task's input files. The
   -- default '()' means that they ignore the inputs.
   type InputSummary a
@@ -141,6 +215,12 @@ class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
   runtimeEstimate :: a -> InputSummary a -> NumCPUs -> NominalDiffTime
   runtimeEstimate k s = defaultRuntimeEstimate (memoryEstimate k s)
 
+  -- | Whether statistics recorded with the second summary can correct the
+  -- estimates for the first. Override it when the model's ratio to the
+  -- measurements stays valid over a different range.
+  closeInputSummaries :: a -> InputSummary a -> InputSummary a -> Bool
+  closeInputSummaries _ = nearSummaries
+
   -- | The tag written into stat files to identify this key's type: by default
   -- its name with its module, so that types of the same name do not share
   -- statistics. It is part of the on-disk format, so override it if you
@@ -154,7 +234,8 @@ class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
 -- takes no config: a file's size is a property of what was computed.
 -- 'FromJSON' is required only by 'decodeFileStatKey': a file stat key may be
 -- the output key itself, which need not be parseable.
-class (Typeable a, ToJSON a) => IsFileStatKey a where
+class (Typeable a, ToJSON a, IsSummary (ProducerSummary a))
+  => IsFileStatKey a where
   -- | What the size estimate needs to know about the input files of the task
   -- that produces this file.
   type ProducerSummary a
@@ -166,6 +247,10 @@ class (Typeable a, ToJSON a) => IsFileStatKey a where
   -- in 'canHandleTask' until a real size has been measured and recorded.
   fileSizeEstimate :: a -> ProducerSummary a -> FileSize
   fileSizeEstimate _ _ = 0
+
+  -- | 'closeInputSummaries' for 'fileSizeEstimate'.
+  closeProducerSummaries :: a -> ProducerSummary a -> ProducerSummary a -> Bool
+  closeProducerSummaries _ = nearSummaries
 
   -- | See 'statKeyTypeName'.
   fileStatKeyTypeName :: Text

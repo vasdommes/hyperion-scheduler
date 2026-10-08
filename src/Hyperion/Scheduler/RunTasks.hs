@@ -14,9 +14,11 @@ import Control.Concurrent.STM                       (TVar, atomically, check,
                                                      writeTVar)
 import Control.Concurrent.Utils                     (Lock, mkExclusiveLock,
                                                      withLock)
+import Control.DeepSeq                              (force)
 import Control.Distributed.Process                  (getSelfPid)
 import Control.Distributed.Process.Async            (Async)
 import Control.Distributed.Process.Async            qualified as Async
+import Control.Exception                            (evaluate)
 import Control.Monad                                (foldM, forM_, forever,
                                                      unless, when)
 import Control.Monad.Catch                          (Handler (..), catches)
@@ -29,8 +31,7 @@ import Data.List.NonEmpty                           qualified as NonEmpty
 import Data.Map.Strict                              (Map, (!?))
 import Data.Map.Strict                              qualified as Map
 import Data.Maybe                                   (catMaybes, fromMaybe,
-                                                     isNothing, listToMaybe,
-                                                     mapMaybe)
+                                                     isNothing, listToMaybe)
 import Data.Set                                     (Set)
 import Data.Set                                     qualified as Set
 import Data.Time.Clock                              (addUTCTime, diffUTCTime,
@@ -79,13 +80,17 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
                                                      newChangeNotifierIO,
                                                      notifyChangeM,
                                                      runWithRetry)
-import Hyperion.Scheduler.StatKey                   (SizedTaskFile (..))
+import Hyperion.Scheduler.StatKey                   (SizedTaskFile (..),
+                                                     TaskFile (..))
 import Hyperion.Scheduler.Stats                     (TaskRecord (..),
+                                                     outputFileSizes,
                                                      taskEstimatesAt)
 import Hyperion.Scheduler.Task                      (EstimatedTask,
                                                      EstimatedTaskMap,
                                                      IsTask (..), RunStage (..),
-                                                     TaskMap, estimatedTasks,
+                                                     TaskEstimation (..),
+                                                     TaskMap, TaskShape (..),
+                                                     estimatedTasks,
                                                      originalTask,
                                                      taskEstimation,
                                                      taskInputPaths, taskInputs,
@@ -97,7 +102,8 @@ import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
 import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
 import Hyperion.Scheduler.TPrioQueue                qualified as TPrioQueue
-import Hyperion.Scheduler.Types                     (FileSize (..),
+import Hyperion.Scheduler.Types                     (Estimate (..),
+                                                     FileSize (..),
                                                      MemorySize (..), Node (..),
                                                      NumCPUs,
                                                      schedulingEstimate)
@@ -380,19 +386,6 @@ runNodeLoop
       res <- remoteRunTask firstWorker numCpus task
       end <- liftIO getCurrentTime
       let
-        -- TODO: currently afterReturnRemoteRunTaskResult measures file sizes only for taskOutputs
-        -- Files whose key declares no file stat key are absent here, and so
-        -- are dropped by toTaskFileSizeItem: nothing is recorded for them.
-        pathToFileStatKey = Map.fromList
-          [ (info.path, statKey)
-          | info <- Set.toList $ Set.union (taskInputs task) (taskOutputs task)
-          , Just statKey <- [info.fileStatKey]
-          ]
-        -- (VirtualFilePath, FileSize) -> Maybe (FileStatKey, NonEmpty FileSize)
-        toTaskFileSizeItem (path, size) = do
-          statKey <- Map.lookup path pathToFileStatKey
-          pure (statKey, NonEmpty.singleton size)
-
         outputPathsMap = Map.fromSet (toClusterFilePath config node.address) $ taskOutputPaths task
         onDuplicate key _ _ = error $ "Output file path is used by more than one task: " ++ show key
       -- Add to Sheduler's FilePathResolveMap the files created by this task. This should happen before adding the task to finishedTaskQueue.
@@ -409,6 +402,14 @@ runNodeLoop
       _ <- lift $ checkChangeActiveUsagesResponse <$>
         decrementActiveFileUsages fileService (taskInputPaths task) node.address
 
+      -- The summaries from the sizes the input files had when the task ran:
+      -- by now every input exists and its size has been measured.
+      inputSizes <- liftIO $ Shared.withRead fileSizeMapVar $
+        flip Map.restrictKeys (taskInputPaths task)
+      let measured = estimationWithInputSizes inputSizes task
+      (inputSummary, producerSummary) <- liftIO $ evaluate $
+        force (measured.inputSummary, measured.producerSummary)
+
       -- TODO: use a node-specific TChangeNotifier here?
       notifyChangeM taskQueueNotifier
       liftIO $ writeQueue taskRecordQueue MkTaskRecord
@@ -418,12 +419,14 @@ runNodeLoop
         , taskMemory  = res.remoteTaskMemory
         , taskNode    = node
         , taskNumCPUs = numCpus
-        , taskFileSizes = Map.fromListWith (<>) $
-            mapMaybe toTaskFileSizeItem $ Map.toList res.remoteTaskFileSizes
+        , taskFileSizes =
+            outputFileSizes (taskOutputs task) res.remoteTaskFileSizes
         -- What the task was scheduled on, recorded next to what it used, so
         -- that estimates can be checked against reality after the run.
         , taskEstimates = taskEstimatesAt numCpus (taskEstimation task)
         , taskStatKey = taskStatKey task
+        , taskInputSummary = inputSummary
+        , taskProducerSummary = producerSummary
         }
       -- NB: this should be the last operation, since the nodeLoop process is killed
       -- after monitorProgressAndDeps reads the last task from finishedTaskQueue!
@@ -696,6 +699,23 @@ taskFilesToCleanup config task = Set.filter (isNodeLocal config) $ taskInputPath
 -- File path -> Number of tasks having this file as input or output
 -- When this number goes to zero, we can delete this file
 type CleanupDependenciesMap = Map VirtualFilePath Int
+
+-- | The task's estimation with its input files at the given sizes. It reuses
+-- the task's shape: only the input summaries and the models are computed
+-- again.
+estimationWithInputSizes
+  :: IsTask a
+  => Map VirtualFilePath FileSize -> EstimatedTask a -> TaskEstimation
+estimationWithInputSizes sizes task = (taskShape task).estimate known
+  where
+    infos = Map.fromList [ (i.path, i) | i <- Set.toList (taskInputs task) ]
+    -- 'fileSizeMapVar' starts with every task's files, so every input has a
+    -- size.
+    known file =
+      case (Map.lookup file.path infos, Map.lookup file.path sizes) of
+        (Just info, Just size) -> info { fileSize = EstimatedByTask size }
+        _ -> error $
+          "estimationWithInputSizes: no size for input " <> show file.path
 
 -- Nothing means "no more cleanups expected, exit"
 type CleanupQueue = ConcurrentQueue (Maybe VirtualFilePath)

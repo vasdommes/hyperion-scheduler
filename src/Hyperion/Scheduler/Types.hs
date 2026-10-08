@@ -99,30 +99,44 @@ defaultRuntimeEstimate mem numCpus
 -- estimate.
 data Estimate a
   = EstimatedByTask a
-    -- ^ The task's own model, used as-is: no statistics matched its stat key.
+    -- ^ The task's own model, used as-is: no statistics could be used.
   | MeasuredFromStats a a
-    -- ^ The figure recovered from statistics, then the task's own prediction.
+    -- ^ The figure recorded for the same stat key and input summary, then the
+    -- task's own prediction.
+  | CorrectedByStats Double a a
+    -- ^ The correction factor, the corrected figure, then the task's own
+    -- prediction. The factor comes from statistics recorded for the same stat
+    -- key and close input summaries.
   deriving (Eq, Ord, Show, Generic, Functor)
 
 -- | The figure the scheduler schedules on.
 schedulingEstimate :: Estimate a -> a
-schedulingEstimate (EstimatedByTask x)     = x
-schedulingEstimate (MeasuredFromStats x _) = x
+schedulingEstimate (EstimatedByTask x)      = x
+schedulingEstimate (MeasuredFromStats x _)  = x
+schedulingEstimate (CorrectedByStats _ x _) = x
 
 -- | What the task's own model predicted, whether or not it was scheduled on.
 modelEstimate :: Estimate a -> a
-modelEstimate (EstimatedByTask x)     = x
-modelEstimate (MeasuredFromStats _ x) = x
+modelEstimate (EstimatedByTask x)      = x
+modelEstimate (MeasuredFromStats _ x)  = x
+modelEstimate (CorrectedByStats _ _ x) = x
 
-isMeasuredFromStats :: Estimate a -> Bool
-isMeasuredFromStats (EstimatedByTask _)     = False
-isMeasuredFromStats (MeasuredFromStats _ _) = True
+-- | Whether statistics were used, measured or as a correction.
+isFromStats :: Estimate a -> Bool
+isFromStats (EstimatedByTask _) = False
+isFromStats _                   = True
 
 -- | Replace the figure with one measured from statistics, keeping the task's
 -- own prediction. Idempotent, so overriding an already overridden estimate
 -- cannot mistake an earlier measurement for the task's model.
 overrideWithMeasured :: a -> Estimate a -> Estimate a
 overrideWithMeasured measured e = MeasuredFromStats measured (modelEstimate e)
+
+-- | Replace the figure with the task's own prediction corrected by the given
+-- factor. Idempotent, like 'overrideWithMeasured'.
+correctWithStats :: Double -> a -> Estimate a -> Estimate a
+correctWithStats factor corrected e =
+  CorrectedByStats factor corrected (modelEstimate e)
 
 -- | A flat object with the same keys for every constructor, so that recorded
 -- estimates are easy to compare with the measurements next to them. For
@@ -134,19 +148,26 @@ instance FromJSON a => FromJSON (Estimate a) where
     case source :: Text of
       "EstimatedByTask"   -> pure $ EstimatedByTask scheduling
       "MeasuredFromStats" -> MeasuredFromStats scheduling <$> o .: "model"
+      "CorrectedByStats"  -> do
+        correction <- o .: "correction"
+        CorrectedByStats correction scheduling <$> o .: "model"
       _                   -> fail $ "Unknown estimate source: " <> show source
 
 instance ToJSON a => ToJSON (Estimate a) where
-  toJSON e = Aeson.object
+  toJSON e = Aeson.object $
     [ "scheduling" .= schedulingEstimate e
     , "model"      .= modelEstimate e
     , "source"     .= sourceName
-    ]
+    ] <> correction
     where
       sourceName :: Text
       sourceName = case e of
-        EstimatedByTask _     -> "EstimatedByTask"
-        MeasuredFromStats _ _ -> "MeasuredFromStats"
+        EstimatedByTask _      -> "EstimatedByTask"
+        MeasuredFromStats _ _  -> "MeasuredFromStats"
+        CorrectedByStats _ _ _ -> "CorrectedByStats"
+      correction = case e of
+        CorrectedByStats factor _ _ -> [ "correction" .= factor ]
+        _                           -> []
 
 -- Helper function for FileSize and MemorySize
 prettyShowBytes :: KilobyteSize -> Bytes -> String

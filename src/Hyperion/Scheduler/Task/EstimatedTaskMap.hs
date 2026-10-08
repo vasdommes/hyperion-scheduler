@@ -24,7 +24,7 @@ import Hyperion.Scheduler.StatKey            (SizedTaskFile (..), TaskFile (..),
                                               withSize)
 import Hyperion.Scheduler.Stats              (TaskAndFileStats)
 import Hyperion.Scheduler.Task.EstimatedTask (EstimatedTask, estimateTask,
-                                              taskEstimation)
+                                              prepareStats, taskEstimation)
 import Hyperion.Scheduler.Task.IsTask        (IsTask (..), TaskEstimation (..),
                                               TaskShape (..), taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskMap       (InvalidTaskMap (..), TaskMap,
@@ -73,9 +73,10 @@ mkEstimatedTaskMap stats taskMap = do
     estimate (!estimated, !known) t =
       (Map.insert t t' estimated, Map.union known outputs)
       where
-        t' = estimateTask stats (knownIn known) t
+        t' = estimateTask prepared (knownIn known) t
         outputs = Map.fromList
           [ (o.path, o) | o <- Set.toList (taskEstimation t').outputs ]
+    prepared = prepareStats stats [ taskShape t | t <- Map.keys taskMap ]
     knownIn known file = case Map.lookup file.path known of
       Just info -> info
       Nothing   ->

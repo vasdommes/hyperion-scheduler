@@ -18,7 +18,6 @@ import Data.Aeson                            qualified as Aeson
 import Data.Binary                           (Binary)
 import Data.List.NonEmpty                    qualified as NonEmpty
 import Data.Map.Strict                       qualified as Map
-import Data.Maybe                            (isJust)
 import Data.Set                              qualified as Set
 import Data.Text                             qualified as Text
 import Data.Time                             (UTCTime (..), fromGregorian)
@@ -30,15 +29,15 @@ import Hyperion.Scheduler.StatKey            (IsFileStatKey (..),
                                               IsStatKey (..),
                                               SizedTaskFile (..), TaskFile (..),
                                               encodeFileStatKey, encodeStatKey,
-                                              withSize)
+                                              unitSummary, withSize)
 import Hyperion.Scheduler.Stats              (ScheduledEstimates (..),
                                               TaskAndFileStats, TaskRecord (..),
-                                              Trials (..), lookupMaxFileSize,
-                                              recordToStats, taskEstimatesAt,
-                                              toTrials)
+                                              Trials (..), lookupFileStats,
+                                              outputFileSizes, recordToStats,
+                                              taskEstimatesAt, toTrials)
 import Hyperion.Scheduler.Task.EstimatedTask (EstimatedTask, applyStats,
-                                              estimateTask, taskEstimation,
-                                              taskOutputs,
+                                              estimateTask, prepareStats,
+                                              taskEstimation, taskOutputs,
                                               taskResourceEstimates,
                                               taskRuntimeEstimate)
 import Hyperion.Scheduler.Task.IsTask        (InputInfos, IsTask (..),
@@ -51,8 +50,8 @@ import Hyperion.Scheduler.Task.WrappedTask   (WrappedTask, wrapTask)
 import Hyperion.Scheduler.Types              (Estimate (..), FileSize,
                                               MemorySize (..), Node (..),
                                               NumCPUs, defaultRuntimeEstimate,
-                                              isMeasuredFromStats,
-                                              modelEstimate, schedulingEstimate)
+                                              isFromStats, modelEstimate,
+                                              schedulingEstimate)
 import Hyperion.Scheduler.Util               (qualifiedTypeRepText)
 
 -- * A minimal task with a stat key
@@ -81,15 +80,19 @@ instance Binary EstTask
 
 instance IsTask EstTask where
   taskShape t = MkTaskShape
-    { inputFiles  = Set.empty
-    , outputFiles = Set.singleton output
-    , statKey     = Just $ encodeStatKey (MkEstStatKey t.name)
-    , estimate    = \_ -> MkTaskEstimation
-        { inputs    = Set.empty
-        , outputs   = Set.singleton $ withSize
+    { inputFiles   = Set.empty
+    , outputFiles  = Set.singleton output
+    , statKey      = Just $ encodeStatKey (MkEstStatKey t.name)
+    , model        = Nothing
+    , outputModels = Map.empty
+    , estimate     = \_ -> MkTaskEstimation
+        { inputs          = Set.empty
+        , outputs         = Set.singleton $ withSize
             (EstimatedByTask (fileSizeEstimate (MkEstFileStatKey t.name) ()))
             output
-        , estimates = estimatesFromModel t.memory
+        , estimates       = estimatesFromModel t.memory
+        , inputSummary    = Just unitSummary
+        , producerSummary = Just unitSummary
         }
     }
     where
@@ -106,7 +109,7 @@ estTask name memory = wrapTask MkEstTask { name = name, memory = memory }
 -- | The task estimated with the given statistics. None of these tasks has
 -- inputs.
 estimated :: IsTask a => TaskAndFileStats -> a -> EstimatedTask a
-estimated stats = estimateTask stats noInputs
+estimated stats t = estimateTask (prepareStats stats [taskShape t]) noInputs t
 
 noInputs :: InputInfos
 noInputs file = error $ "Unexpected input: " <> show file.path
@@ -155,6 +158,8 @@ estRecord name numCpus memory fileSize = MkTaskRecord
   , taskEstimates =
       taskEstimatesAt numCpus (taskEstimation (estimated mempty task))
   , taskStatKey   = taskStatKey task
+  , taskInputSummary = Just unitSummary
+  , taskProducerSummary = Just unitSummary
   }
   where
     task = MkEstTask { name = name, memory = 1024 * 1024 }
@@ -233,7 +238,7 @@ testApplyStatsIsIdempotent = do
     ownMemory = 1024 * 1024
     stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
     shape = taskShape (estTask "A" ownMemory)
-    apply = applyStats stats shape
+    apply = applyStats (prepareStats stats [shape]) shape
     estimates = (apply $ apply $ shape.estimate noInputs).estimates
   expect "applying statistics twice keeps the task's own memory model" $
     modelEstimate estimates.memory == ownMemory
@@ -250,13 +255,13 @@ testEstimateKeepsMeasuredEstimates = do
     task = estimated mempty (wrapTask MkPreMeasuredTask)
     estimates = taskResourceEstimates task
   expect "estimating keeps a measured memory figure measured" $
-    isMeasuredFromStats estimates.memory
+    isFromStats estimates.memory
   expect "estimating keeps the measured memory" $
     schedulingEstimate estimates.memory == 8 * 1024 * 1024
   expect "estimating keeps the task's own memory model" $
     modelEstimate estimates.memory == 1024 * 1024
   expect "wrapping keeps a measured runtime measured" $
-    isMeasuredFromStats estimates.runtime
+    isFromStats estimates.runtime
 
 -- | A task that ran on no CPUs contributes no resource statistics: its runtime
 -- measured scheduler bookkeeping, and the sample could not be fitted anyway --
@@ -271,14 +276,14 @@ testZeroCpuRecordContributesNothing = do
     finite n = not (isNaN t) && not (isInfinite t)
       where t = realToFrac (schedulingEstimate estimates.runtime n) :: Double
   expect "a run on no CPUs leaves memory unmeasured" $
-    not (isMeasuredFromStats estimates.memory)
+    not (isFromStats estimates.memory)
   expect "a run on no CPUs leaves the runtime curve unmeasured" $
-    not (isMeasuredFromStats estimates.runtime)
+    not (isFromStats estimates.runtime)
   expect "the runtime estimate stays finite at every CPU count" $
     all finite [0, 1, 4]
   -- File sizes are a property of the file, so they are recorded regardless.
   expect "a run on no CPUs still records its file sizes" $
-    isJust (lookupMaxFileSize fileStatKey stats)
+    not (Map.null (lookupFileStats fileStatKey stats))
 
 -- | Merging is the only arithmetic these statistics do, and it had no test.
 -- Checked against the mean and biased variance computed directly from the same
@@ -327,6 +332,8 @@ testRecordRoundTrip = do
   let record = estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096
   expect "a measured estimate round-trips" $
     Aeson.eitherDecode (Aeson.encode measured) == Right measured
+  expect "a corrected estimate round-trips" $
+    Aeson.eitherDecode (Aeson.encode corrected) == Right corrected
   case Aeson.eitherDecode (Aeson.encode record) of
     Left err ->
       throwIO $ AssertionFailed $ "FAILED: record does not parse: " <> err
@@ -340,8 +347,9 @@ testRecordRoundTrip = do
       expect "statistics can be rebuilt from a parsed record" $
         recordToStats parsed == recordToStats record
   where
-    measured :: Estimate MemorySize
+    measured, corrected :: Estimate MemorySize
     measured = MeasuredFromStats (8 * 1024 * 1024) (1024 * 1024)
+    corrected = CorrectedByStats 1.5 (3 * 512 * 1024) (1024 * 1024)
 
 -- | What a task record says about the estimates the task ran on.
 testTaskEstimatesAt :: IO ()
@@ -357,6 +365,37 @@ testTaskEstimatesAt = do
     schedulingEstimate estimates.memory == ownMemory
   expect "file size estimates are keyed as the recorded sizes are" $
     Map.lookup fileStatKey estimates.fileSizes == Just (EstimatedByTask 100)
+
+-- | Only output files with a file stat key are recorded: their sizes go with
+-- the producer summary, which says nothing about the task's inputs.
+testOutputFileSizes :: IO ()
+testOutputFileSizes = do
+  let
+    path = VirtualFilePath . fromString
+    keyA = encodeFileStatKey (MkEstFileStatKey "A")
+    output name key = MkSizedTaskFile
+      { path = path name, fileStatKey = key, fileSize = EstimatedByTask 0 }
+    outputs =
+      Set.fromList [output "/out/a" (Just keyA), output "/out/b" Nothing]
+    sizes = Map.fromList
+      [(path "/out/a", 10), (path "/out/b", 20), (path "/in/c", 30)]
+  expect "only outputs with a file stat key are recorded" $
+    outputFileSizes outputs sizes == Map.singleton keyA (NonEmpty.singleton 10)
+
+-- | A files-only task has a producer summary only when one of its output files
+-- has a file stat key, as for a 'Hyperion.Scheduler.Task.Task.Task'.
+testFilesOnlyProducerSummary :: IO ()
+testFilesOnlyProducerSummary = do
+  let
+    producerSummaryOf key = (shape.estimate noInputs).producerSummary
+      where shape = filesOnlyShape Set.empty (Set.singleton (output key))
+    output key = MkTaskFile
+      { path = VirtualFilePath (fromString "/out"), fileStatKey = key }
+  expect "outputs with no file stat key have no producer summary" $
+    producerSummaryOf Nothing == Nothing
+  expect "an output with a file stat key has the unit producer summary" $
+    producerSummaryOf (Just (encodeFileStatKey (MkEstFileStatKey "A")))
+      == Just unitSummary
 
 -- | Stat key types are told apart by this name, so that types of the same
 -- name in different modules do not share statistics.
@@ -381,4 +420,6 @@ runTest = do
   testFileSizeKeepsOwnEstimate
   testRecordRoundTrip
   testTaskEstimatesAt
+  testOutputFileSizes
+  testFilesOnlyProducerSummary
   putStrLn "All estimate tests passed."

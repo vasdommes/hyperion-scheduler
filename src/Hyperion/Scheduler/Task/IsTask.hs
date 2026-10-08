@@ -8,6 +8,8 @@
 module Hyperion.Scheduler.Task.IsTask where
 
 import Data.Aeson                  (ToJSON)
+import Data.Map.Strict             (Map)
+import Data.Map.Strict             qualified as Map
 import Data.Maybe                  (isJust)
 import Data.Set                    (Set)
 import Data.Set                    qualified as Set
@@ -16,10 +18,10 @@ import Data.Time.Clock             (NominalDiffTime)
 import Data.Typeable               (Typeable)
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
-import Hyperion.Scheduler.StatKey  (SizedTaskFile (..), StatKey, TaskFile (..),
-                                    withSize)
-import Hyperion.Scheduler.Types    (Estimate (..), MemorySize, NumCPUs,
-                                    defaultRuntimeEstimate)
+import Hyperion.Scheduler.StatKey  (EncodedSummary, SizedTaskFile (..), StatKey,
+                                    TaskFile (..), unitSummary, withSize)
+import Hyperion.Scheduler.Types    (Estimate (..), FileSize, MemorySize,
+                                    NumCPUs, defaultRuntimeEstimate)
 import Hyperion.Scheduler.Util     (typeRepText)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
@@ -81,8 +83,8 @@ type InputInfos = TaskFile -> SizedTaskFile
 
 -- | See 'taskShape'.
 data TaskShape = MkTaskShape
-  { inputFiles  :: Set TaskFile
-  , outputFiles :: Set TaskFile
+  { inputFiles   :: Set TaskFile
+  , outputFiles  :: Set TaskFile
     -- | The serialized stat key under which this task's resource usage is
     -- recorded and looked up. For a 'Hyperion.Scheduler.Task.Task.Task' this
     -- is built from the task's own stat key, which is also what the estimates
@@ -94,40 +96,79 @@ data TaskShape = MkTaskShape
     -- whose only measurable quantity would be scheduler bookkeeping latency.
     -- Setting it instead to the whole task encoded as its own stat key would
     -- put every task in a group of one, which no curve can be fitted to.
-  , statKey     :: Maybe StatKey
+  , statKey      :: Maybe StatKey
+    -- | The task's own model of its input summary, 'Nothing' if the task has
+    -- no stat key. Tasks with equal stat keys must have equal models: a model
+    -- is evaluated once per stat key and shared.
+    -- 'Hyperion.Scheduler.Task.Task.taskShapeOf' meets this by construction,
+    -- since the estimates see only the stat key and the summary.
+  , model        :: Maybe (Model ResourceEstimates)
+    -- | The models of the output files' sizes, of the producer summary, for
+    -- the files with a file stat key. Files with equal file stat keys must
+    -- have equal models.
+  , outputModels :: Map VirtualFilePath (Model FileSize)
     -- | The estimation for the given infos of the input files: those produced
     -- by other tasks in the map and those on disk (see
-    -- 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap').
-  , estimate    :: InputInfos -> TaskEstimation
+    -- 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap'), or the
+    -- measured ones after the task ran.
+  , estimate     :: InputInfos -> TaskEstimation
+  }
+
+-- | A model of a summary type that is hidden, so that statistics recorded with
+-- other summaries can be compared with it without the typed stat key.
+-- Decoding is a separate step, so that a decoded summary can be reused.
+data Model r = forall s . MkModel
+  { decode     :: EncodedSummary -> Maybe s
+    -- ^ 'Nothing' if the summary does not decode, e.g. after the summary type
+    -- changed.
+  , estimateAt :: s -> r
+  , isClose    :: s -> s -> Bool
+    -- ^ Whether statistics recorded with the second summary can correct the
+    -- estimates for the first (see
+    -- 'Hyperion.Scheduler.StatKey.closeInputSummaries').
   }
 
 -- | What a task's estimates are, given the sizes of its input files. See
 -- 'estimate'.
 data TaskEstimation = MkTaskEstimation
-  { inputs    :: Set SizedTaskFile
-  , outputs   :: Set SizedTaskFile
+  { inputs          :: Set SizedTaskFile
+  , outputs         :: Set SizedTaskFile
     -- | Estimated memory in bytes and runtime in seconds, with the provenance
     -- of each. Ordinary tasks give their own model (e.g.
     -- 'estimatesFromModel'); only
     -- 'Hyperion.Scheduler.Task.EstimatedTask.applyStats'
     -- ever reports a figure measured from statistics.
-  , estimates :: ResourceEstimates
+  , estimates       :: ResourceEstimates
+    -- | The input summary 'estimates' are computed from, encoded; 'Nothing' if
+    -- the task has no stat key.
+  , inputSummary    :: Maybe EncodedSummary
+    -- | The producer summary the sizes of the output files are computed from,
+    -- encoded; 'Nothing' if no output file has a file stat key.
+  , producerSummary :: Maybe EncodedSummary
   }
 
 -- | The shape of a task with no stat key: its files and zero estimates. The
--- sizes of its output files are unknown (zero).
+-- sizes of its output files are unknown (zero) and ignore its inputs (summary
+-- '()').
 filesOnlyShape
   :: Set TaskFile  -- ^ inputs
   -> Set TaskFile  -- ^ outputs
   -> TaskShape
 filesOnlyShape inputs outputs = MkTaskShape
-  { inputFiles  = inputs
-  , outputFiles = outputs
-  , statKey     = Nothing
-  , estimate    = \known -> MkTaskEstimation
-      { inputs    = Set.map known inputs
-      , outputs   = Set.map (withSize (EstimatedByTask 0)) outputs
-      , estimates = estimatesFromModel 0
+  { inputFiles   = inputs
+  , outputFiles  = outputs
+  , statKey      = Nothing
+  , model        = Nothing
+  , outputModels = Map.empty
+  , estimate     = \known -> MkTaskEstimation
+      { inputs          = Set.map known inputs
+      , outputs         = Set.map (withSize (EstimatedByTask 0)) outputs
+      , estimates       = estimatesFromModel 0
+      , inputSummary    = Nothing
+      , producerSummary =
+          if any (isJust . (.fileStatKey)) outputs
+          then Just unitSummary
+          else Nothing
       }
   }
 

@@ -32,9 +32,11 @@ import Data.Binary                         (Binary (..))
 import Data.Binary                         qualified as Binary
 import Data.Data                           (Proxy (..))
 import Data.Foldable.Extra                 (allM, traverse_)
-import Data.Functor                        (($>))
+import Data.Functor                        (($>), (<&>))
 import Data.Functor.Compose                (Compose (..))
 import Data.Kind                           (Constraint, Type)
+import Data.Map.Strict                     qualified as Map
+import Data.Maybe                          (isJust)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Text                           (Text)
@@ -48,12 +50,14 @@ import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
 import Hyperion.Scheduler.StatKey          (FromInputFiles (..), InputFile,
                                             IsFileStatKey (..), IsStatKey (..),
-                                            ToFileStatKey (..), ToTaskFile,
-                                            encodeStatKey, toInputFile,
-                                            toTaskFile, withSize)
+                                            TaskFile (..), ToFileStatKey (..),
+                                            ToTaskFile, decodeSummary,
+                                            encodeStatKey, encodeSummary,
+                                            toInputFile, toTaskFile, withSize)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
-                                            RunStage, Tag, TaskEstimation (..),
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), Model (..),
+                                            ResourceEstimates (..), RunStage,
+                                            Tag, TaskEstimation (..),
                                             TaskShape (..), defaultTaskTag,
                                             defaultTaskTagForType,
                                             estimatesFromModel)
@@ -439,10 +443,23 @@ taskShapeOf
    . (TaskKey k, PathResolver r (OutKey k), All (ToTaskFile r) (DepKeys k))
   => Task r k -> TaskShape
 taskShapeOf t = MkTaskShape
-  { inputFiles  = Set.fromList (map snd ownDeps)
-  , outputFiles = Set.fromList (map fst outputs)
-  , statKey     = encodeStatKey <$> statKey
-  , estimate    = estimate
+  { inputFiles   = Set.fromList (map snd ownDeps)
+  , outputFiles  = Set.fromList (map fst outputs)
+  , statKey      = encodeStatKey <$> statKey
+  , model        = statKey <&> \key -> MkModel
+      { decode     = decodeSummary
+      , estimateAt = modelFor key
+      , isClose    = closeInputSummaries key
+      }
+  , outputModels = Map.fromList
+      [ (file.path, MkModel
+          { decode     = decodeSummary
+          , estimateAt = fileSizeEstimate fileKey
+          , isClose    = closeProducerSummaries fileKey
+          })
+      | (file, Just fileKey) <- outputs
+      ]
+  , estimate     = estimate
   }
   where
     outsAndDeps = outAndDependencies t.config t.key
@@ -462,13 +479,17 @@ taskShapeOf t = MkTaskShape
     outputSize s = maybe 0 (`fileSizeEstimate` s)
 
     estimate inputInfos = MkTaskEstimation
-      { inputs    = Set.fromList (map snd deps)
-      , outputs   = Set.fromList
+      { inputs          = Set.fromList (map snd deps)
+      , outputs         = Set.fromList
           [ withSize (EstimatedByTask (outputSize producerSummary fileKey)) file
           | (file, fileKey) <- outputs
           ]
-      , estimates =
+      , estimates       =
           maybe (estimatesFromModel 0) (`modelFor` inputSummary) statKey
+      , inputSummary    = statKey $> encodeSummary inputSummary
+      , producerSummary = if any (isJust . snd) outputs
+          then Just (encodeSummary producerSummary)
+          else Nothing
       }
       where
         deps = [ (dep, inputInfos file) | (dep, file) <- ownDeps ]
