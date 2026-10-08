@@ -4,6 +4,7 @@
 {-# LANGUAGE NoFieldSelectors      #-}
 {-# LANGUAGE OverloadedRecordDot   #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeFamilies          #-}
 
 -- | Pure unit tests for estimates that depend on the sizes of a task's input
@@ -43,8 +44,11 @@ import Hyperion.Scheduler.StatKey            (EncodedSummary (..),
                                               TotalInputFileSize (..),
                                               encodeFileStatKey, encodeStatKey,
                                               encodeSummary, nearSummaries)
-import Hyperion.Scheduler.Stats              (ScheduledEstimates (..),
+import Hyperion.Scheduler.Stats              (Accuracy (..),
+                                              ScheduledEstimates (..),
                                               TaskAndFileStats, TaskRecord (..),
+                                              Trials (..), modelAccuracyOf,
+                                              modelFileSizeAccuracyOf,
                                               recordToStats)
 import Hyperion.Scheduler.Task.EstimatedTask (applyStats, prepareStats)
 import Hyperion.Scheduler.Task.IsTask        (InputInfos, Model (..),
@@ -305,6 +309,23 @@ testCorrectionRules = do
     far.estimates.memory == EstimatedByTask 2000
       && outputSize far == [EstimatedByTask 501]
 
+-- | The model can be judged against recorded runs offline: the records carry
+-- the stat key and the summaries it is evaluated at.
+testModelAccuracyOf :: IO ()
+testModelAccuracyOf = do
+  let
+    records = [sumRun]
+    accuracy = Map.lookup (encodeStatKey MkSumStatKey)
+      (modelAccuracyOf @SumStatKey records)
+    fileAccuracy = Map.lookup (encodeFileStatKey MkSumStatKey)
+      (modelFileSizeAccuracyOf @SumStatKey records)
+  expect "memory is scored against the model at the recorded summary" $
+    fmap (.mean) (accuracy >>= (.memory)) == Just 1.5
+  expect "runtime is scored against the model at the recorded summary" $
+    fmap (.mean) (accuracy >>= (.runtime)) == Just 2
+  expect "output sizes are scored against the model at the recorded summary" $
+    fmap (.mean) fileAccuracy == Just 2
+
 -- | The two leaves of a 'SumKey' at the given sizes.
 leafSizes :: FileSize -> FileSize -> InputInfos
 leafSizes a b file = Map.fromList
@@ -377,6 +398,7 @@ runTest = do
   testEstimate
   testCloseness
   testCorrectionRules
+  testModelAccuracyOf
   testShapeIsBuiltOnce
   testRecordedSummariesShared
   putStrLn "All InputSummary tests passed."

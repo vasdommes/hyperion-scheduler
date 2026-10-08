@@ -12,13 +12,13 @@
 module Hyperion.Scheduler.Task.TaskMap where
 
 import Control.Exception                     (Exception)
-import Control.Monad                         (foldM, foldM_, unless)
+import Control.Monad                         (foldM, foldM_, unless, void)
 import Control.Monad.Catch                   (MonadThrow, throwM)
 import Data.Graph                            (SCC (..), stronglyConnComp)
 import Data.List.NonEmpty                    qualified as NonEmpty
 import Data.Map.Strict                       (Map)
 import Data.Map.Strict                       qualified as Map
-import Data.Maybe                            (isNothing)
+import Data.Maybe                            (isJust, isNothing)
 import Data.Set                              (Set)
 import Data.Set                              qualified as Set
 import Data.Text                             (Text)
@@ -36,8 +36,8 @@ import Hyperion.Scheduler.Task.IsTask        (IsTask (..),
                                               taskOutputPaths, taskStatKey)
 import Hyperion.Scheduler.Task.TaskLink      (HasTaskChain (..), toTaskEdges)
 import Hyperion.Scheduler.Task.WrappedTask   (WrappedTask)
-import Hyperion.Scheduler.Types              (isFromStats, modelEstimate,
-                                              schedulingEstimate)
+import Hyperion.Scheduler.Types              (Estimate (..), isFromStats,
+                                              modelEstimate, schedulingEstimate)
 
 type TaskMap a = Map a (Set a)
 
@@ -276,6 +276,35 @@ taskInstrumentationGaps taskMap = Map.fromListWith Set.union
         outputs = taskOutputs t
         files = Set.toList outputs
         declaredSize file = modelEstimate file.fileSize
+
+-- | How many tasks are estimated from recorded statistics, out of those with a
+-- stat key (a task without one can never match).
+data StatsCoverage = MkStatsCoverage
+  { measured    :: Int
+    -- ^ Tasks with a figure recorded for the same stat key and input summary.
+  , corrected   :: Int
+    -- ^ The other tasks with a figure corrected by statistics recorded for
+    -- close input summaries.
+  , withStatKey :: Int
+  }
+  deriving (Eq, Show)
+
+statsCoverage :: IsTask a => TaskMap (EstimatedTask a) -> StatsCoverage
+statsCoverage taskMap = MkStatsCoverage
+  { measured    = length (filter (any isMeasured . figures) withKey)
+  , corrected   = length (filter isCorrected withKey)
+  , withStatKey = length withKey
+  }
+  where
+    withKey = filter (isJust . taskStatKey) (Map.keys taskMap)
+    -- Memory and runtime are looked up independently.
+    figures t = [void estimates.memory, void estimates.runtime]
+      where estimates = taskResourceEstimates t
+    isMeasured = \case
+      MeasuredFromStats _ _ -> True
+      _                     -> False
+    isCorrected t =
+      not (any isMeasured (figures t)) && any isFromStats (figures t)
 
 -- | Tags of tasks whose recorded memory exceeded their own estimate by more
 -- than the given factor, i.e. whose model is optimistic. These are the tasks

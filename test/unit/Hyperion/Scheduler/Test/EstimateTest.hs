@@ -30,11 +30,14 @@ import Hyperion.Scheduler.StatKey            (IsFileStatKey (..),
                                               SizedTaskFile (..), TaskFile (..),
                                               encodeFileStatKey, encodeStatKey,
                                               unitSummary, withSize)
-import Hyperion.Scheduler.Stats              (ScheduledEstimates (..),
+import Hyperion.Scheduler.Stats              (Accuracy (..),
+                                              ScheduledEstimates (..),
                                               TaskAndFileStats, TaskRecord (..),
-                                              Trials (..), lookupFileStats,
-                                              outputFileSizes, recordToStats,
-                                              taskEstimatesAt, toTrials)
+                                              Trials (..), accuracyBy,
+                                              fileSizeAccuracyBy,
+                                              lookupFileStats, outputFileSizes,
+                                              recordToStats, taskEstimatesAt,
+                                              toTrials)
 import Hyperion.Scheduler.Task.EstimatedTask (EstimatedTask, applyStats,
                                               estimateTask, prepareStats,
                                               taskEstimation, taskOutputs,
@@ -46,7 +49,9 @@ import Hyperion.Scheduler.Task.IsTask        (InputInfos, IsTask (..),
                                               TaskShape (..),
                                               estimatesFromModel,
                                               filesOnlyShape, taskStatKey)
-import Hyperion.Scheduler.Task.TaskMap       (TaskMap, underestimatedMemoryTags)
+import Hyperion.Scheduler.Task.TaskMap       (StatsCoverage (..), TaskMap,
+                                              statsCoverage,
+                                              underestimatedMemoryTags)
 import Hyperion.Scheduler.Task.WrappedTask   (WrappedTask, wrapTask)
 import Hyperion.Scheduler.Types              (Estimate (..), FileSize,
                                               MemorySize (..), Node (..),
@@ -214,6 +219,9 @@ testRuntimeMeasuredWithoutMemory = do
     case estimates.runtime of
       MeasuredFromStats _ _ -> True
       _                     -> False
+  expect "a runtime-only match counts towards stats coverage" $
+    statsCoverage (taskMapOf [task])
+      == MkStatsCoverage { measured = 1, corrected = 0, withStatKey = 1 }
 
 -- | A stat key that matches nothing leaves both estimates alone.
 testNoMatchKeepsTaskEstimates :: IO ()
@@ -230,6 +238,9 @@ testNoMatchKeepsTaskEstimates = do
     case estimates.runtime of
       EstimatedByTask _ -> True
       _                 -> False
+  expect "an unmatched task does not count towards stats coverage" $
+    statsCoverage (taskMapOf [task])
+      == MkStatsCoverage { measured = 0, corrected = 0, withStatKey = 1 }
 
 -- | Applying statistics twice must not mistake the first measurement for the
 -- task's own prediction.
@@ -337,8 +348,46 @@ testFileSizeKeepsOwnEstimate = do
         modelEstimate output.fileSize == 100
     _ -> throwIO $ AssertionFailed "FAILED: expected exactly one output file"
 
+-- | File sizes score like memory and runtime do: measured over predicted, and
+-- against either estimate.
+testFileSizeAccuracy :: IO ()
+testFileSizeAccuracy = do
+  let
+    records = [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
+    fileStatKey = encodeFileStatKey (MkEstFileStatKey "A")
+    ratioOf accuracies = (.mean) <$> Map.lookup fileStatKey accuracies
+    modelRatio = ratioOf (fileSizeAccuracyBy modelEstimate records)
+    scheduledRatio = ratioOf (fileSizeAccuracyBy schedulingEstimate records)
+  -- Scheduled without statistics, the record predicts the declared 100 bytes
+  -- either way.
+  expect "a file 41x bigger than declared scores 40.96" $
+    modelRatio == Just 40.96
+  expect "with no statistics, both file size accuracies agree" $
+    scheduledRatio == modelRatio
+
+-- | Accuracy is measured over predicted, so a model that predicts too little
+-- scores above one. The records here were scheduled on the tasks' own models,
+-- so both accuracies agree.
+testAccuracyRatios :: IO ()
+testAccuracyRatios = do
+  let
+    modelAccuracy = accuracyBy (.taskStatKey) modelEstimate
+    estimateAccuracy = accuracyBy (.taskStatKey) schedulingEstimate
+    -- The model predicts 1 MiB (see 'estRecord'); the run measured 8 MiB.
+    records = [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
+    statKey = encodeStatKey (MkEstStatKey "A")
+    memoryRatio accuracies = do
+      accuracy <- Map.lookup statKey accuracies
+      (.mean) <$> accuracy.memory
+  expect "a model predicting an eighth of the memory scores 8" $
+    memoryRatio (modelAccuracy records) == Just 8
+  expect "with no statistics, scheduling accuracy equals model accuracy" $
+    estimateAccuracy records == modelAccuracy records
+  expect "a record with no memory figure is not scored for memory" $
+    memoryRatio (modelAccuracy [estRecord "A" 4 Nothing 4096]) == Nothing
+
 -- | A task record must survive the round trip through JSON: that is what turns
--- the records from a log into data that can be grouped later. Only
+-- the records from a log into data that can be grouped and scored later. Only
 -- the task itself comes back opaque, as a 'Aeson.Value' -- a 'WrappedTask' can
 -- have no 'FromJSON'.
 testRecordRoundTrip :: IO ()
@@ -411,6 +460,34 @@ testFilesOnlyProducerSummary = do
     producerSummaryOf (Just (encodeFileStatKey (MkEstFileStatKey "A")))
       == Just unitSummary
 
+-- | A task whose memory was corrected by statistics with close inputs, as
+-- 'applyStats' leaves it when no recorded summary matches exactly.
+data CorrectedTask = MkCorrectedTask
+  deriving (Eq, Ord, Show, Generic, ToJSON)
+
+instance Binary CorrectedTask
+
+instance IsTask CorrectedTask where
+  taskShape _ = shape
+    { statKey   = Just $ encodeStatKey (MkEstStatKey "C")
+    , estimate = \known -> (shape.estimate known)
+      { estimates = MkResourceEstimates
+        { memory  = CorrectedByStats 1.5 (3 * 1024 * 1024) (2 * 1024 * 1024)
+        , runtime = EstimatedByTask (const 1)
+        }
+      }
+    }
+    where shape = filesOnlyShape Set.empty Set.empty
+  taskTag _ = Just "Corrected"
+  taskClosure _ = Nothing
+
+-- | A corrected estimate counts as from statistics, but not as measured.
+testCoverageCountsCorrections :: IO ()
+testCoverageCountsCorrections =
+  expect "a corrected task counts as corrected, not measured" $
+    statsCoverage (taskMapOf [estimated mempty (wrapTask MkCorrectedTask)])
+      == MkStatsCoverage { measured = 0, corrected = 1, withStatKey = 1 }
+
 taskMapOf :: [EstimatedTask WrappedTask] -> TaskMap (EstimatedTask WrappedTask)
 taskMapOf tasks = Map.fromList [(t, Set.empty) | t <- tasks]
 
@@ -436,8 +513,11 @@ runTest = do
   testTrialsSummary
   testQualifiedTypeName
   testFileSizeKeepsOwnEstimate
+  testFileSizeAccuracy
+  testAccuracyRatios
   testRecordRoundTrip
   testTaskEstimatesAt
   testOutputFileSizes
   testFilesOnlyProducerSummary
+  testCoverageCountsCorrections
   putStrLn "All estimate tests passed."

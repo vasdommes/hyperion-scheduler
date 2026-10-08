@@ -67,7 +67,8 @@ import Hyperion.Scheduler.RunTasks.ProgressMap      (ProgressMap)
 import Hyperion.Scheduler.RunTasks.ProgressMap      qualified as ProgressMap
 import Hyperion.Scheduler.RunTasks.RemoteRunTask    (RemoteRunTaskResult (..),
                                                      remoteRunTask)
-import Hyperion.Scheduler.RunTasks.Report           (reportBeforeRun)
+import Hyperion.Scheduler.RunTasks.Report           (reportAfterRun,
+                                                     reportBeforeRun)
 import Hyperion.Scheduler.RunTasks.Shared           (Shared (..), newShared,
                                                      readShared)
 import Hyperion.Scheduler.RunTasks.Shared           qualified as Shared
@@ -682,8 +683,9 @@ runTaskMap config taskMap = do
       -- Finishing with AsyncFailed or AsyncLinkFailed will trigger throwOnAsyncFailed.
       mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
       _ <- lift $ Async.wait cleanupLoopHandle
-      flushQueue taskRecordQueue
-
+      records <- flushQueue taskRecordQueue
+      reportAfterRun records
+      pure records
 
 -- Files that can be removed (if there are no other dependencies)
 -- when the task finished
