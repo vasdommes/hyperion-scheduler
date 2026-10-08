@@ -14,7 +14,6 @@ import Data.Aeson                     (ToJSON (..))
 import Data.Binary                    (Binary (..))
 import Data.BinaryHash                (hashBase64SafeByteString)
 import Data.ByteString                (ByteString)
-import Data.Maybe                     (fromMaybe)
 import Data.Set                       (Set)
 import Data.Set                       qualified as Set
 import Data.Time                      (NominalDiffTime)
@@ -22,8 +21,9 @@ import Hyperion.Scheduler.StatKey     (StatKey, TaskKeyFileInfo (..))
 import Hyperion.Scheduler.Stats       (TaskAndFileStats, approxRuntime,
                                        lookupMaxFileSize, lookupTaskStats,
                                        maxMemory)
-import Hyperion.Scheduler.Task.IsTask (IsTask (..))
-import Hyperion.Scheduler.Types       (MemorySize (..), NumCPUs)
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), ResourceEstimates (..))
+import Hyperion.Scheduler.Types       (Estimate, MemorySize (..), NumCPUs,
+                                       overrideWithMeasured)
 
 -- | A general container for an instance of IsTask and
 -- CanRemoteRunTask. We include a ByteString hash for quick
@@ -42,11 +42,12 @@ data WrappedTask = forall a . IsTask a => MkWrappedTask
   -- nothing on the runtime path has to rebuild it. 'Nothing' for tasks with
   -- no identity in statistics -- see 'taskStatKey'.
   , statKey         :: Maybe StatKey
-  -- Memory and runtime estimates can come from task or be overriden by stats
-  , memoryEstimate  :: MemorySize
-  , runtimeEstimate :: NumCPUs -> NominalDiffTime
+  -- Memory and runtime estimates can come from task or be overriden by stats.
+  -- Each remembers which it was, so that a task record can state what the
+  -- task's own model predicted alongside what actually happened.
+  , memoryEstimate  :: Estimate MemorySize
+  , runtimeEstimate :: Estimate (NumCPUs -> NominalDiffTime)
   }
-
 
 instance Eq WrappedTask where
   x == y = x.hash == y.hash
@@ -71,8 +72,6 @@ instance ToJSON WrappedTask where
   toJSON (MkWrappedTask {task = t}) = toJSON t
 
 instance IsTask WrappedTask where
-  taskMemoryEstimate t = t.memoryEstimate
-  taskRuntimeEstimate t = t.runtimeEstimate
   taskMaxThreads stage (MkWrappedTask { task = t }) = taskMaxThreads stage t
   taskMinThreads stage (MkWrappedTask { task = t }) = taskMinThreads stage t
   taskInputs t = t.inputs
@@ -83,8 +82,18 @@ instance IsTask WrappedTask where
   taskIsPlaceholder (MkWrappedTask { task = t }) = taskIsPlaceholder t
   taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
   taskStatKey t = t.statKey
+  taskResourceEstimates t = MkResourceEstimates
+    { memory  = t.memoryEstimate
+    , runtime = t.runtimeEstimate
+    }
 
 -- | A smart constructor for a WrappedTask.
+--
+-- The estimates are taken whole from the task, rather than rebuilt from
+-- 'taskMemoryEstimate' as 'EstimatedByTask': for a task using the default
+-- 'taskResourceEstimates' the two are the same thing, but a task already
+-- carrying measurements keeps them, instead of having a measured figure
+-- relabelled as its own prediction.
 wrapTask :: (IsTask a, Binary a) => a -> WrappedTask
 wrapTask t = MkWrappedTask
   { task = t
@@ -92,33 +101,41 @@ wrapTask t = MkWrappedTask
   , inputs = taskInputs t
   , outputs = taskOutputs t
   , statKey = taskStatKey t
-  , memoryEstimate = taskMemoryEstimate t
-  , runtimeEstimate = taskRuntimeEstimate t
+  , memoryEstimate = estimates.memory
+  , runtimeEstimate = estimates.runtime
   }
+  where
+    estimates = taskResourceEstimates t
 
 -- | Update memory, runtime and file size estimates using statistics from TaskAndFileStats.
 --
 -- Lookup is an exact match on the stat key, so a task whose key has changed
 -- (a new estimate-relevant config value, say) misses and keeps its analytic
--- estimate; a task with no stat key is never looked up at all.
--- TODO: the miss is currently silent; surfacing it would need either a monadic
--- context here or a 'Debug.trace' as in 'taskMemoryCapped'.
+-- estimate; a task with no stat key is never looked up at all. A miss shows
+-- in the resulting 'Estimate's.
+--
+-- Memory and runtime are replaced independently: memory statistics are absent
+-- whenever no run recorded a memory figure, while runtime statistics are
+-- always recorded, so a task can end up running on a measured runtime and its
+-- own memory estimate.
 decorateTaskWithStats :: TaskAndFileStats -> WrappedTask -> WrappedTask
 decorateTaskWithStats stats task = task
-  { memoryEstimate = memory
-  , runtimeEstimate = runtime
+  { memoryEstimate =
+      maybe id overrideWithMeasured measuredMemory task.memoryEstimate
+  , runtimeEstimate =
+      maybe id overrideWithMeasured measuredRuntime task.runtimeEstimate
   , inputs = inputs
   , outputs = outputs
   }
   where
     maybeTaskResourceMap = flip lookupTaskStats stats =<< task.statKey
-    runtime = fromMaybe (taskRuntimeEstimate task) (maybeTaskResourceMap >>= approxRuntime Nothing)
-    memory  = fromMaybe (taskMemoryEstimate task)  (maybeTaskResourceMap >>= maxMemory)
+    measuredRuntime = maybeTaskResourceMap >>= approxRuntime Nothing
+    measuredMemory  = maybeTaskResourceMap >>= maxMemory
 
     -- A file with no stat key is never looked up and keeps its estimate.
-    updateFileSize fileInfo = fileInfo { fileSize = fileSize} where
-      fileSize = fromMaybe fileInfo.fileSize $
-        flip lookupMaxFileSize stats =<< fileInfo.fileStatKey
+    updateFileSize fileInfo = fileInfo { fileSize = fileSize } where
+      fileSize = maybe id overrideWithMeasured measured fileInfo.fileSize
+      measured = flip lookupMaxFileSize stats =<< fileInfo.fileStatKey
     inputs = Set.map updateFileSize $ taskInputs task
     outputs = Set.map updateFileSize $ taskOutputs task
 

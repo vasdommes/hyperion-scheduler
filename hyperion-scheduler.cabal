@@ -134,4 +134,5 @@ test-suite hyperion-scheduler-unit-test
     , hyperion
     , hyperion-scheduler
     , text
+    , time
   default-language: GHC2021

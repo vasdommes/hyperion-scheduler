@@ -17,7 +17,8 @@ import Data.Graph                     qualified as Graph
 import Data.IntMap.Strict             (IntMap)
 import Data.IntMap.Strict             qualified as IntMap
 import Data.Time.Clock                (NominalDiffTime)
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..))
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..),
+                                       taskMemoryEstimate, taskRuntimeEstimate)
 import Hyperion.Scheduler.TaskGraph   (TaskGraph, taskToVertex, vertexToTask)
 import Hyperion.Scheduler.TaskGraph   qualified as TaskGraph
 import Hyperion.Scheduler.Types       (MemorySize (..), Node (..))

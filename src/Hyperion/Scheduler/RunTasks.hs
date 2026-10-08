@@ -80,7 +80,8 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
                                                      notifyChangeM,
                                                      runWithRetry)
 import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Stats                     (TaskRecord (..))
+import Hyperion.Scheduler.Stats                     (TaskRecord (..),
+                                                     taskEstimatesAt)
 import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
                                                      TaskMap, taskInputPaths,
                                                      taskMemoryCapped,
@@ -92,7 +93,8 @@ import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
 import Hyperion.Scheduler.TPrioQueue                qualified as TPrioQueue
 import Hyperion.Scheduler.Types                     (FileSize (..),
                                                      MemorySize (..), Node (..),
-                                                     NumCPUs)
+                                                     NumCPUs,
+                                                     schedulingEstimate)
 import Hyperion.Scheduler.WorkerPool                (TWorker (workerId),
                                                      WorkerPool,
                                                      toReusableWorker,
@@ -408,6 +410,10 @@ runNodeLoop
         , taskNumCPUs = numCpus
         , taskFileSizes = Map.fromListWith (<>) $
             mapMaybe toTaskFileSizeItem $ Map.toList res.remoteTaskFileSizes
+        -- What the task was scheduled on, recorded next to what it used, so
+        -- that estimates can be checked against reality after the run.
+        , taskEstimates = taskEstimatesAt numCpus task
+        , taskStatKey = taskStatKey task
         }
       -- NB: this should be the last operation, since the nodeLoop process is killed
       -- after monitorProgressAndDeps reads the last task from finishedTaskQueue!
@@ -559,7 +565,10 @@ runTasks config taskMap = do
           distributeTasksToNodesWithScores 0.75 config nodes (TaskGraph.independentKeys taskGraph) getTaskPriority
 
         toFileInfos t = Set.toList $ Set.union (taskInputs t) (taskOutputs t)
-        toFileSizeMap t = Map.fromList $ map (\fileInfo -> (fileInfo.path, fileInfo.fileSize)) $ toFileInfos t
+        toFileSizeMap t = Map.fromList
+          [ (fileInfo.path, schedulingEstimate fileInfo.fileSize)
+          | fileInfo <- toFileInfos t
+          ]
         fileSizeEstimates = Map.unions $ map toFileSizeMap $ Set.toList $ TaskGraph.keys taskGraph
 
       -- TODO for debug
@@ -649,6 +658,7 @@ runTasks config taskMap = do
       mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
       _ <- lift $ Async.wait cleanupLoopHandle
       flushQueue taskRecordQueue
+
 
 
 -- Files that can be removed (if there are no other dependencies)

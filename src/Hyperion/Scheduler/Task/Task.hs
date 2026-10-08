@@ -50,15 +50,16 @@ import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
                                             ToTaskKeyFileInfo, encodeStatKey,
                                             toTaskKeyFileInfo)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage, Tag,
-                                            defaultTaskTag,
-                                            defaultTaskTagForType)
+import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
+                                            RunStage, Tag, defaultTaskTag,
+                                            defaultTaskTagForType,
+                                            estimatesFromModel)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
 import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
 import Hyperion.Scheduler.TaskFiles        (MonadTaskFiles, doesTaskFileExist)
-import Hyperion.Scheduler.Types            (NumCPUs)
+import Hyperion.Scheduler.Types            (Estimate (..), NumCPUs)
 import Type.Reflection                     (Typeable)
 
 type FetchesPath k = Fetches k OsPath
@@ -416,9 +417,14 @@ instance
   -- Estimates always come from the stat key, so that the value used for
   -- scheduling is the same function that is validated against recorded
   -- statistics for that key.
-  taskMemoryEstimate t   = maybe 0 memoryEstimate (toStatKey t.config t.key)
-  taskRuntimeEstimate t  =
-    maybe (const 0) runtimeEstimate (toStatKey t.config t.key)
+  -- A task with no stat key estimates zero memory, hence (via
+  -- 'estimatesFromModel') zero runtime.
+  taskResourceEstimates t = case toStatKey t.config t.key of
+    Nothing      -> estimatesFromModel 0
+    Just statKey -> MkResourceEstimates
+      { memory = EstimatedByTask (memoryEstimate statKey)
+      , runtime = EstimatedByTask (runtimeEstimate statKey)
+      }
   taskStatKey t          = encodeStatKey <$> toStatKey t.config t.key
   taskMaxThreads stage t = maxThreads stage t.config t.key
   taskMinThreads stage t = minThreads stage t.config t.key

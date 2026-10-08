@@ -27,8 +27,8 @@ import Data.Void                       (Void, absurd)
 import GHC.Generics                    (Generic)
 import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
 import Hyperion.Scheduler.PathResolver (PathResolver (..))
-import Hyperion.Scheduler.Types        (FileSize, MemorySize, NumCPUs,
-                                        defaultRuntimeEstimate)
+import Hyperion.Scheduler.Types        (Estimate (..), FileSize, MemorySize,
+                                        NumCPUs, defaultRuntimeEstimate)
 import Hyperion.Scheduler.Util         (qualifiedTypeRepText)
 
 newtype StatKey = MkStatKey Aeson.Value
@@ -159,7 +159,11 @@ instance ToFileStatKey Void
 data TaskKeyFileInfo = MkTaskKeyFileInfo
   { fileStatKey :: Maybe FileStatKey
   , path        :: VirtualFilePath
-  , fileSize    :: FileSize
+  , fileSize    :: Estimate FileSize
+    -- ^ Carries its provenance for the same reason a task's memory estimate
+    -- does: 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats'
+    -- replaces it with a recorded size, and what the key itself declared is
+    -- then the only way to tell whether 'fileSizeEstimate' is any good.
   }
   deriving (Generic, Eq, Ord, Show)
 
@@ -171,5 +175,5 @@ toTaskKeyFileInfo
 toTaskKeyFileInfo resolver key = MkTaskKeyFileInfo
   { fileStatKey      = toFileStatKey key
   , path             = VirtualFilePath $ resolvePath resolver key
-  , fileSize         = toFileSize key
+  , fileSize         = EstimatedByTask $ toFileSize key
   }

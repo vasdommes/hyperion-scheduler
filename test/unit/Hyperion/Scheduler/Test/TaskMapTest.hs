@@ -32,7 +32,7 @@ import Hyperion.Scheduler.Task.Task    (DepKeys, TaskKey (..), TaskKind (..),
                                         dependencies, listTaskKey, outKeys)
 import Hyperion.Scheduler.Task.TaskMap (TaskMap, placeholdersOfType,
                                         replaceTasks, validateTaskMap)
-import Hyperion.Scheduler.Types        (NumCPUs)
+import Hyperion.Scheduler.Types        (Estimate (..), NumCPUs)
 
 -- * A minimal IsTask for building TaskMaps by hand
 
@@ -58,7 +58,7 @@ mkFileInfo :: OsPath -> TaskKeyFileInfo
 mkFileInfo path = MkTaskKeyFileInfo
   { fileStatKey = Just $ encodeFileStatKey (MkPathFileStatKey (show path))
   , path        = VirtualFilePath path
-  , fileSize    = 0
+  , fileSize    = EstimatedByTask 0
   }
 
 instance IsTask TestTask where

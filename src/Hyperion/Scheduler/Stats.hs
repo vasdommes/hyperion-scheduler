@@ -13,16 +13,19 @@
 module Hyperion.Scheduler.Stats
   ( TaskAndFileStats (..)
   , TaskRecord (..)
+  , ScheduledEstimates (..)
   , TaskStats (..)
   , FileStats (..)
   , Trials (..)
   , toTrials
+  , taskEstimatesAt
   , recordToStats
   , approxRuntime
   , maxMemory
   , lookupTaskStats
   , lookupMaxFileSize
   , readTaskStats
+  , readTaskRecords
   , writeTaskStats
   , encodeJsonFileAtomic
   ) where
@@ -40,16 +43,18 @@ import Data.Map.Monoidal              (MonoidalMap (..))
 import Data.Map.Strict                (Map)
 import Data.Map.Strict                qualified as Map
 import Data.Maybe                     (mapMaybe)
+import Data.Set                       qualified as Set
 import Data.Time                      (UTCTime)
 import Data.Time.Clock                (NominalDiffTime)
 import GHC.Generics                   (Generic, Generically (..))
 import Hyperion.Log                   qualified as Log
 import Hyperion.OsPath                (OsPath, takeDirectory)
 import Hyperion.OsString              (fromString, toString)
-import Hyperion.Scheduler.StatKey     (FileStatKey, StatKey)
-import Hyperion.Scheduler.Task.IsTask (IsTask (..))
-import Hyperion.Scheduler.Types       (FileSize (..), MemorySize (..), Node,
-                                       NumCPUs)
+import Hyperion.Scheduler.StatKey     (FileStatKey, StatKey,
+                                       TaskKeyFileInfo (..))
+import Hyperion.Scheduler.Task.IsTask (IsTask (..), ResourceEstimates (..))
+import Hyperion.Scheduler.Types       (Estimate, FileSize (..), MemorySize (..),
+                                       Node, NumCPUs)
 import Hyperion.Util                  (randomString)
 import Prelude                        hiding (readFile, (^))
 import Prelude qualified
@@ -68,7 +73,48 @@ data TaskRecord a = MkTaskRecord
   , taskNode      :: Node
   , taskNumCPUs   :: NumCPUs
   , taskFileSizes :: Map FileStatKey (NonEmpty FileSize)
-  } deriving (Eq, Ord, Show, Generic, ToJSON, Functor)
+  , taskEstimates :: ScheduledEstimates
+  , taskStatKey   :: Maybe StatKey
+    -- ^ Recorded rather than recomputed from 'task': a stat key is a reduced
+    -- projection of the task, and the projection needs a typed key and its
+    -- config, neither of which survives serialization. Without it a record read
+    -- back from a file could not be grouped with its comparable siblings.
+  } deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON, Functor)
+
+-- | What the scheduler predicted for a task, recorded next to what the task
+-- actually used, so the predictions can be judged after the run.
+--
+-- Estimates are deliberately kept out of 'TaskStats': that file is read back as
+-- the input to scheduling, so a prediction stored there could later be consumed
+-- as though it had been observed. A task record is only ever written.
+data ScheduledEstimates = MkScheduledEstimates
+  { memory    :: Estimate MemorySize
+  , runtime   :: Estimate NominalDiffTime
+    -- ^ At the 'NumCPUs' the task was given, so it pairs with 'taskRuntime'.
+  , fileSizes :: Map FileStatKey (Estimate FileSize)
+    -- ^ Keyed as 'taskFileSizes' is, so predicted and actual sizes line up key
+    -- by key. Output files only, because those are the ones a run measures; an
+    -- input's predicted size belongs to the record of the task that produced
+    -- it.
+  } deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
+
+-- | The estimates a task was scheduled on, as of the given CPU allocation.
+-- The runtime is evaluated from the very curve the scheduler used, so the two
+-- cannot disagree.
+taskEstimatesAt :: IsTask a => NumCPUs -> a -> ScheduledEstimates
+taskEstimatesAt numCpus task = MkScheduledEstimates
+  { memory    = estimates.memory
+  , runtime   = fmap ($ numCpus) estimates.runtime
+  -- Files sharing a stat key are estimated alike, so the duplicates this
+  -- discards are equal anyway.
+  , fileSizes = Map.fromListWith max
+      [ (statKey, info.fileSize)
+      | info <- Set.toList (taskOutputs task)
+      , Just statKey <- [info.fileStatKey]
+      ]
+  }
+  where
+    estimates = taskResourceEstimates task
 
 -- | Observations of one quantity, merged without keeping them.
 --
@@ -216,12 +262,15 @@ newtype TaskStats = MkTaskStats (Map StatKey TaskResourceMap)
   deriving (Semigroup, Monoid) via (MonoidalMap StatKey TaskResourceMap)
 
 
-recordToStats :: IsTask a => TaskRecord a -> TaskAndFileStats
+-- | Needs nothing of the task itself beyond what the record already states, so
+-- it applies to records read back from a file as well as to freshly written
+-- ones -- statistics can be rebuilt offline.
+recordToStats :: TaskRecord a -> TaskAndFileStats
 recordToStats record = MkTaskAndFileStats taskStats fileStats where
   -- A task with no stat key contributes no resource statistics: it performed
   -- no computation, so the only thing its runtime would measure is scheduler
   -- bookkeeping. Its file sizes (if any) are still recorded below.
-  taskStats = MkTaskStats $ case taskStatKey record.task of
+  taskStats = MkTaskStats $ case record.taskStatKey of
     Nothing      -> Map.empty
     Just statKey -> Map.singleton statKey (taskResourceMapSingleton record)
   fileStats = MkFileStats $ Map.map toTrials record.taskFileSizes
@@ -269,6 +318,26 @@ eitherReadFileStrict file = do
     [ Handler (pure . Left . show @IOError)
     , Handler (pure . Left . show @AesonException)
     ]
+
+-- | Read back records written by 'Hyperion.Scheduler.RunTasks.runTasks',
+-- skipping (with a warning) any file that does not parse.
+--
+-- Read them as @'TaskRecord' 'Aeson.Value'@ unless the task type is known and
+-- has a 'FromJSON' instance: a
+-- 'Hyperion.Scheduler.Task.WrappedTask.WrappedTask' cannot have one, so the
+-- task itself usually stays uninterpreted. Everything
+-- an estimate can be judged by -- the stat key, the estimates, the
+-- measurements -- comes back typed regardless.
+readTaskRecords :: (MonadIO m, FromJSON a) => [OsPath] -> m [TaskRecord a]
+readTaskRecords files = concat <$> mapM readOne files
+  where
+    readOne file = do
+      records <- liftIO $ eitherReadFileStrict file
+      case records of
+        Left e -> do
+          Log.warn "Couldn't parse task records file" (file, e)
+          pure []
+        Right r -> pure r
 
 -- TODO: rename to readTaskAndFileStats?
 readTaskStats :: MonadIO m => [OsPath] -> m TaskAndFileStats
