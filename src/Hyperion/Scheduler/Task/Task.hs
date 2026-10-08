@@ -46,9 +46,11 @@ import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
 import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
-import Hyperion.Scheduler.StatKey          (IsFileStatKey (..), IsStatKey (..),
+import Hyperion.Scheduler.StatKey          (FromInputFiles (..), InputFile,
+                                            IsFileStatKey (..), IsStatKey (..),
                                             ToFileStatKey (..), ToTaskFile,
-                                            encodeStatKey, toTaskFile, withSize)
+                                            encodeStatKey, toInputFile,
+                                            toTaskFile, withSize)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
                                             RunStage, Tag, TaskEstimation (..),
@@ -183,6 +185,9 @@ data TaskKind k where
     => (forall f . (Applicative f, FetchesPaths (DepKeys k) f) => k -> f ())
     -> TaskKind k
 
+-- | A task's dependencies with their files' stat keys and sizes.
+type DepInputs k = [(Variant (DepKeys k), InputFile)]
+
 class ( All Eq (DepKeys k)
       , All Ord (DepKeys k)
       , All ToFileStatKey (DepKeys k)
@@ -219,8 +224,8 @@ class ( All Eq (DepKeys k)
 
   -- | StatKeyOf k is used for two things:
   -- 1. as a key for TaskStats (resource usage stats);
-  -- 2. as the only input to 'memoryEstimate' and 'runtimeEstimate' (see
-  --    'IsStatKey').
+  -- 2. with the 'InputSummary', as the input to 'memoryEstimate' and
+  --    'runtimeEstimate' (see 'IsStatKey').
   --
   -- Defaults to 'Void', i.e. no statistics: the task is neither recorded nor
   -- looked up, and both its estimates are zero. That is correct for tasks that
@@ -236,6 +241,34 @@ class ( All Eq (DepKeys k)
   -- its stat key.
   toStatKey :: TaskConfig k -> k -> Maybe (StatKeyOf k)
   toStatKey _ _ = Nothing
+
+  -- | Summarize the task's direct dependencies for its estimates. A pure
+  -- function of the dependency keys and the sizes of their files, so that it
+  -- can be computed from estimated sizes as well as from measured ones.
+  --
+  -- The default builds a stock summary one file at a time (see
+  -- 'FromInputFiles'). Override it for a summary that needs the typed
+  -- dependency keys.
+  toInputSummary
+    :: TaskConfig k -> k -> DepInputs k -> InputSummary (StatKeyOf k)
+  default toInputSummary
+    :: FromInputFiles (InputSummary (StatKeyOf k))
+    => TaskConfig k -> k -> DepInputs k -> InputSummary (StatKeyOf k)
+  toInputSummary _ _ = summarizeInputFiles
+
+  -- | 'toInputSummary' for the size estimates of the output files.
+  toProducerSummary
+    :: TaskConfig k
+    -> k
+    -> DepInputs k
+    -> ProducerSummary (FileStatKeyOf (OutKey k))
+  default toProducerSummary
+    :: FromInputFiles (ProducerSummary (FileStatKeyOf (OutKey k)))
+    => TaskConfig k
+    -> k
+    -> DepInputs k
+    -> ProducerSummary (FileStatKeyOf (OutKey k))
+  toProducerSummary _ _ = summarizeInputFiles
 
   -- | Maximum possible threads for the task.
   -- TODO: get rid of RunStage?
@@ -394,6 +427,10 @@ computeAndWrite Dict numCpus task =
       case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
         Dict -> computeAndSaveValue numCpus task.config task.key
 
+-- | A stock summary of the dependencies' files (see 'FromInputFiles').
+summarizeInputFiles :: FromInputFiles s => [(Variant ks, InputFile)] -> s
+summarizeInputFiles = foldMap (fromInputFile . snd)
+
 -- | A task's shape. The traversal of the dependencies and the projections of
 -- the stat keys are bound outside 'estimate', so that every estimation of one
 -- shape shares them.
@@ -418,20 +455,26 @@ taskShapeOf t = MkTaskShape
       | dep <- Set.toList (toVariants (tailF outsAndDeps))
       ]
     statKey = toStatKey t.config t.key
-    modelFor key = MkResourceEstimates
-      { memory  = EstimatedByTask (memoryEstimate key)
-      , runtime = EstimatedByTask (runtimeEstimate key)
+    modelFor key s = MkResourceEstimates
+      { memory  = EstimatedByTask (memoryEstimate key s)
+      , runtime = EstimatedByTask (runtimeEstimate key s)
       }
-    outputSize = maybe 0 fileSizeEstimate
+    outputSize s = maybe 0 (`fileSizeEstimate` s)
 
     estimate inputInfos = MkTaskEstimation
-      { inputs    = Set.fromList [ inputInfos file | (_, file) <- ownDeps ]
+      { inputs    = Set.fromList (map snd deps)
       , outputs   = Set.fromList
-          [ withSize (EstimatedByTask (outputSize fileKey)) file
+          [ withSize (EstimatedByTask (outputSize producerSummary fileKey)) file
           | (file, fileKey) <- outputs
           ]
-      , estimates = maybe (estimatesFromModel 0) modelFor statKey
+      , estimates =
+          maybe (estimatesFromModel 0) (`modelFor` inputSummary) statKey
       }
+      where
+        deps = [ (dep, inputInfos file) | (dep, file) <- ownDeps ]
+        depInputs = [ (dep, toInputFile info) | (dep, info) <- deps ]
+        inputSummary = toInputSummary t.config t.key depInputs
+        producerSummary = toProducerSummary t.config t.key depInputs
 
 instance
   ( Static(PathResolverForAll r (DepKeys k))

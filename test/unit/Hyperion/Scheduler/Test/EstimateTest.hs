@@ -64,13 +64,13 @@ newtype EstStatKey = MkEstStatKey String
 -- | The task's own memory model. 'MkEstTask' overrides it, so that a test can
 -- make the model and the measurement disagree.
 instance IsStatKey EstStatKey where
-  memoryEstimate _ = 1024 * 1024
+  memoryEstimate _ _ = 1024 * 1024
 
 newtype EstFileStatKey = MkEstFileStatKey String
   deriving newtype (ToJSON)
 
 instance IsFileStatKey EstFileStatKey where
-  fileSizeEstimate _ = 100
+  fileSizeEstimate _ _ = 100
 
 data EstTask = MkEstTask
   { name   :: String
@@ -87,7 +87,7 @@ instance IsTask EstTask where
     , estimate    = \_ -> MkTaskEstimation
         { inputs    = Set.empty
         , outputs   = Set.singleton $ withSize
-            (EstimatedByTask (fileSizeEstimate (MkEstFileStatKey t.name)))
+            (EstimatedByTask (fileSizeEstimate (MkEstFileStatKey t.name) ()))
             output
         , estimates = estimatesFromModel t.memory
         }

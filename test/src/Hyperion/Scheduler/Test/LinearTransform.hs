@@ -90,7 +90,7 @@ data MultiplyStatKey = MkMultiplyStatKey
   deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
 instance IsStatKey MultiplyStatKey where
-  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
 
 computeMultiplyM :: (Applicative f, FetchesKey (VectorKey a) f, LinearTransformContext a) => MultiplyKey a -> f (Process Int)
 computeMultiplyM key = do
@@ -128,7 +128,7 @@ instance LinearTransformContext a => ToFileStatKey (MultiplyKey a) where
 
 -- | Every product is one Int, so all of them share a size.
 instance LinearTransformContext a => IsFileStatKey (MultiplyKey a) where
-  fileSizeEstimate = const 1
+  fileSizeEstimate _ _ = 1
 
 -- | One element of an output vector, @sum_k A_ik x_k@.
 data VectorElementKey a = MkVectorElementKey
@@ -152,7 +152,7 @@ newtype VectorElementStatKey = MkVectorElementStatKey { inputLength :: Int }
   deriving newtype (ToJSON, FromJSON)
 
 instance IsStatKey VectorElementStatKey where
-  memoryEstimate _ = 1024 * 1024 * 10 -- TODO: memory estimate
+  memoryEstimate _ _ = 1024 * 1024 * 10 -- TODO: memory estimate
 
 vectorElementInputKeys :: LinearTransformContext a => VectorElementKey a -> [MultiplyKey a]
 vectorElementInputKeys key = map mkKey ks where
@@ -197,7 +197,7 @@ instance LinearTransformContext a => ToFileStatKey (VectorElementKey a) where
 
 -- | One Int per element, as for 'MultiplyKey'.
 instance LinearTransformContext a => IsFileStatKey (VectorElementKey a) where
-  fileSizeEstimate = const 1
+  fileSizeEstimate _ _ = 1
 
 -- | The vector @x_i@ entering layer @i@.
 data VectorKey a = MkVectorKey
@@ -244,7 +244,7 @@ instance LinearTransformContext a => ToFileStatKey (VectorKey a) where
 
 -- | A vector's file scales with its length.
 instance LinearTransformContext a => IsFileStatKey (VectorKey a) where
-  fileSizeEstimate key = fromIntegral key.length
+  fileSizeEstimate key _ = fromIntegral key.length
 
 -- | Vectors of equal size share statistics, whichever layer they belong to.
 newtype VectorStatKey = MkVectorStatKey { size :: Int }
@@ -252,7 +252,7 @@ newtype VectorStatKey = MkVectorStatKey { size :: Int }
   deriving newtype (ToJSON, FromJSON)
 
 instance IsStatKey VectorStatKey where
-  memoryEstimate _ = 1024 * 1024
+  memoryEstimate _ _ = 1024 * 1024
 
 -- * A concrete problem: cyclic shift
 

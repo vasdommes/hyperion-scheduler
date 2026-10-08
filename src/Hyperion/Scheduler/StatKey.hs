@@ -117,23 +117,29 @@ instance Ord a => Monoid (Sorted a) where
   mempty = MkSorted []
 
 -- | A stat key is the identity under which a task's resource usage is
--- recorded, and the only input to its estimates, so an estimate can always be
--- checked against the statistics recorded under its own key.
+-- recorded. The estimates are a model of the stat key and of an
+-- 'InputSummary', a reduced view of the task's input files.
 --
--- Make it a /reduced/ projection of the task key: drop or coarsen the fields
--- that do not affect resource usage, so that tasks differing only in those
--- share statistics. Project only the estimate-relevant parts of the config (a
--- version or variant tag), never a filesystem path.
+-- Make it a /reduced/ projection of the task key, computed from this task
+-- alone: input sizes and input keys belong in the summary. Drop or coarsen the
+-- fields that do not affect resource usage, so that tasks differing only in
+-- those share statistics. Project only the estimate-relevant parts of the
+-- config (a version or variant tag), never a filesystem path.
 class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
+  -- | What the estimates need to know about the task's input files. The
+  -- default '()' means that they ignore the inputs.
+  type InputSummary a
+  type InputSummary a = ()
+
   -- | Estimated memory in bytes: the resident set of the whole worker process
   -- while this task runs, not only what the task allocates. Each concurrent
   -- task is its own worker, so include the executable's own footprint (tens
   -- of megabytes); statistics measure the same thing.
-  memoryEstimate :: a -> MemorySize
+  memoryEstimate :: a -> InputSummary a -> MemorySize
 
   -- | Estimated runtime in seconds, as a function of 'NumCPUs'.
-  runtimeEstimate :: a -> NumCPUs -> NominalDiffTime
-  runtimeEstimate = defaultRuntimeEstimate . memoryEstimate
+  runtimeEstimate :: a -> InputSummary a -> NumCPUs -> NominalDiffTime
+  runtimeEstimate k s = defaultRuntimeEstimate (memoryEstimate k s)
 
   -- | The tag written into stat files to identify this key's type: by default
   -- its name with its module, so that types of the same name do not share
@@ -149,12 +155,17 @@ class (Typeable a, ToJSON a, FromJSON a) => IsStatKey a where
 -- 'FromJSON' is required only by 'decodeFileStatKey': a file stat key may be
 -- the output key itself, which need not be parseable.
 class (Typeable a, ToJSON a) => IsFileStatKey a where
+  -- | What the size estimate needs to know about the input files of the task
+  -- that produces this file.
+  type ProducerSummary a
+  type ProducerSummary a = ()
+
   -- | Estimated size of the file, in bytes.
   --
   -- Defaults to zero, i.e. unknown. That only under-counts node-local storage
   -- in 'canHandleTask' until a real size has been measured and recorded.
-  fileSizeEstimate :: a -> FileSize
-  fileSizeEstimate _ = 0
+  fileSizeEstimate :: a -> ProducerSummary a -> FileSize
+  fileSizeEstimate _ _ = 0
 
   -- | See 'statKeyTypeName'.
   fileStatKeyTypeName :: Text
@@ -162,7 +173,7 @@ class (Typeable a, ToJSON a) => IsFileStatKey a where
   fileStatKeyTypeName = qualifiedTypeRepText @a
 
 instance IsFileStatKey Void where
-  fileSizeEstimate = absurd
+  fileSizeEstimate v _ = absurd v
 
 -- | Tasks that are never scheduled by estimate -- placeholders, which are
 -- replaced before the map is run, and no-ops, which perform no computation --
@@ -173,7 +184,7 @@ instance IsFileStatKey Void where
 -- zero estimate is indistinguishable from a real one, and schedules the task
 -- as though it were free.
 instance IsStatKey Void where
-  memoryEstimate = absurd
+  memoryEstimate v _ = absurd v
 
 -- | Serialize a stat key together with its type tag. This is the form stored
 -- in stat files and used as the grouping key when statistics are merged.
