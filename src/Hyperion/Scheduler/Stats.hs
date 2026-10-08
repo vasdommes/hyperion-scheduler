@@ -50,9 +50,9 @@ import GHC.Generics                   (Generic, Generically (..))
 import Hyperion.Log                   qualified as Log
 import Hyperion.OsPath                (OsPath, takeDirectory)
 import Hyperion.OsString              (fromString, toString)
-import Hyperion.Scheduler.StatKey     (FileStatKey, StatKey,
-                                       TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), ResourceEstimates (..))
+import Hyperion.Scheduler.StatKey     (FileStatKey, SizedTaskFile (..), StatKey)
+import Hyperion.Scheduler.Task.IsTask (ResourceEstimates (..),
+                                       TaskEstimation (..))
 import Hyperion.Scheduler.Types       (Estimate, FileSize (..), MemorySize (..),
                                        Node, NumCPUs)
 import Hyperion.Util                  (randomString)
@@ -98,23 +98,21 @@ data ScheduledEstimates = MkScheduledEstimates
     -- it.
   } deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
--- | The estimates a task was scheduled on, as of the given CPU allocation.
--- The runtime is evaluated from the very curve the scheduler used, so the two
--- cannot disagree.
-taskEstimatesAt :: IsTask a => NumCPUs -> a -> ScheduledEstimates
-taskEstimatesAt numCpus task = MkScheduledEstimates
-  { memory    = estimates.memory
-  , runtime   = fmap ($ numCpus) estimates.runtime
+-- | The estimates a task was scheduled on, as of the given CPU allocation,
+-- from its final estimation. The runtime is evaluated from the very curve the
+-- scheduler used, so the two cannot disagree.
+taskEstimatesAt :: NumCPUs -> TaskEstimation -> ScheduledEstimates
+taskEstimatesAt numCpus estimation = MkScheduledEstimates
+  { memory    = estimation.estimates.memory
+  , runtime   = fmap ($ numCpus) estimation.estimates.runtime
   -- Files sharing a stat key are estimated alike, so the duplicates this
   -- discards are equal anyway.
   , fileSizes = Map.fromListWith max
       [ (statKey, info.fileSize)
-      | info <- Set.toList (taskOutputs task)
+      | info <- Set.toList estimation.outputs
       , Just statKey <- [info.fileStatKey]
       ]
   }
-  where
-    estimates = taskResourceEstimates task
 
 -- | Observations of one quantity, merged without keeping them.
 --

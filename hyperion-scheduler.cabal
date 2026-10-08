@@ -37,6 +37,8 @@ library
       Hyperion.Scheduler.StatKey
       Hyperion.Scheduler.Stats
       Hyperion.Scheduler.Task
+      Hyperion.Scheduler.Task.EstimatedTask
+      Hyperion.Scheduler.Task.EstimatedTaskMap
       Hyperion.Scheduler.Task.HasConfig
       Hyperion.Scheduler.Task.IsTask
       Hyperion.Scheduler.Task.Task
@@ -117,6 +119,7 @@ test-suite hyperion-scheduler-unit-test
   type: exitcode-stdio-1.0
   main-is: Main.hs
   other-modules:
+      Hyperion.Scheduler.Test.Counted
       Hyperion.Scheduler.Test.EstimateTest
       Hyperion.Scheduler.Test.TaskFilesTest
       Hyperion.Scheduler.Test.TaskMapTest
@@ -130,6 +133,7 @@ test-suite hyperion-scheduler-unit-test
     , binary
     , containers
     , directory
+    , exceptions
     , filepath
     , hyperion
     , hyperion-scheduler

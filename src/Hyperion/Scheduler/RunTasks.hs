@@ -79,14 +79,20 @@ import Hyperion.Scheduler.RunTasks.TChangeNotifier  (TChangeNotifier,
                                                      newChangeNotifierIO,
                                                      notifyChangeM,
                                                      runWithRetry)
-import Hyperion.Scheduler.StatKey                   (TaskKeyFileInfo (..))
+import Hyperion.Scheduler.StatKey                   (SizedTaskFile (..))
 import Hyperion.Scheduler.Stats                     (TaskRecord (..),
                                                      taskEstimatesAt)
-import Hyperion.Scheduler.Task                      (IsTask (..), RunStage (..),
-                                                     TaskMap, taskInputPaths,
+import Hyperion.Scheduler.Task                      (EstimatedTask,
+                                                     EstimatedTaskMap,
+                                                     IsTask (..), RunStage (..),
+                                                     TaskMap, estimatedTasks,
+                                                     originalTask,
+                                                     taskEstimation,
+                                                     taskInputPaths, taskInputs,
                                                      taskMemoryCapped,
                                                      taskOutputPaths,
-                                                     validateTaskMap)
+                                                     taskOutputs, taskStatKey,
+                                                     validateNodeLocalInputs)
 import Hyperion.Scheduler.TaskGraph                 (TaskGraph)
 import Hyperion.Scheduler.TaskGraph                 qualified as TaskGraph
 import Hyperion.Scheduler.TPrioQueue                (TPrioQueue)
@@ -139,15 +145,15 @@ runNodeLoop
   -> FileService
   -> WorkerPool
   -> Shared IO NodeStatus
-  -> TVar (IsNodeStalling a)
-  -> TPrioQueue TaskPriority a
+  -> TVar (IsNodeStalling (EstimatedTask a))
+  -> TPrioQueue TaskPriority (EstimatedTask a)
   -> TChangeNotifier
   -> Lock
   -> Shared IO FileSizeMap
   -> Shared IO FilePathResolveMap
-  -> ConcurrentQueue a
-  -> ConcurrentQueue (TaskRecord a)
-  -> CPUAllocation a
+  -> ConcurrentQueue (EstimatedTask a)
+  -> ConcurrentQueue (TaskRecord (EstimatedTask a))
+  -> CPUAllocation (EstimatedTask a)
   -> Job ()
 runNodeLoop
   config
@@ -182,7 +188,8 @@ runNodeLoop
   forever getAndRunTasks
 
   where
-    reserveLocalTaskFiles :: a -> Process (Response, Map VirtualFilePath FileSize)
+    reserveLocalTaskFiles
+      :: EstimatedTask a -> Process (Response, Map VirtualFilePath FileSize)
     reserveLocalTaskFiles t = do
       let localFiles = Set.filter (isNodeLocal config) $ Set.union (taskInputPaths t) (taskOutputPaths t)
       localFileSizes <- liftIO $ Shared.withRead fileSizeMapVar $ flip Map.restrictKeys localFiles
@@ -194,7 +201,7 @@ runNodeLoop
     -- wait and retry when notified by taskQueueNotifier
     -- (i.e. when either other tasks have finished, or other nodes have taken things from the taskQueue).
     -- Finally, return that first element.
-    blockUntilNewTask :: Job a
+    blockUntilNewTask :: Job (EstimatedTask a)
     blockUntilNewTask = runWithRetry taskQueueNotifier $ do
       status <- liftIO $ readShared nodeStatusVar
       let
@@ -232,7 +239,9 @@ runNodeLoop
     --     instead of calling `tryPeek taskQueue` later
     --     to ensure `atomic` behaviour guarded by taskQueueLock.
     --     This ensures that the correct task is passed to isNodeStallingVar.
-    dequeueTask :: MemorySize -> NumCPUs -> Job (Maybe a, Maybe a)
+    dequeueTask
+      :: MemorySize -> NumCPUs
+      -> Job (Maybe (EstimatedTask a), Maybe (EstimatedTask a))
     dequeueTask freeMem freeCpus = lift $ withLock taskQueueLock $ do
       maybeTask <- liftIO $ atomically $ TPrioQueue.tryPeek taskQueue
       case maybeTask of
@@ -273,7 +282,8 @@ runNodeLoop
     -- other threads while 'getMoreTasks' is running. This could
     -- potentially allow us to get even more tasks, so it is a good
     -- thing.
-    getMoreTasks :: NonEmpty a -> Job (NonEmpty a)
+    getMoreTasks
+      :: NonEmpty (EstimatedTask a) -> Job (NonEmpty (EstimatedTask a))
     getMoreTasks newTasks = do
       status <- liftIO $ readShared nodeStatusVar
       let
@@ -293,12 +303,12 @@ runNodeLoop
     -- Block until there are available CPUs and the first task in the
     -- queue can fit in memory. When those conditions are met, dequeue
     -- all the tasks that can fit on the available resources.
-    getNewTasks :: Job (NonEmpty a)
+    getNewTasks :: Job (NonEmpty (EstimatedTask a))
     getNewTasks = do
       newTask <- blockUntilNewTask
       getMoreTasks (NonEmpty.singleton newTask)
 
-    runRemoteTasks :: CPUAllocation a -> Job ()
+    runRemoteTasks :: CPUAllocation (EstimatedTask a) -> Job ()
     runRemoteTasks allocation = do
       let
         allocList = Map.toList allocation
@@ -313,7 +323,7 @@ runNodeLoop
 
     -- Run a RemoteTask and update NodeStatus when the task is
     -- finished.
-    remoteRunAndUpdateNodeStatus :: (a, NumCPUs) -> Job ()
+    remoteRunAndUpdateNodeStatus :: (EstimatedTask a, NumCPUs) -> Job ()
     remoteRunAndUpdateNodeStatus t@(task, numCpus) = withWorkersFromPool workerPool node.address numCpus $ \workers -> do
       -- TODO:
       -- Resolve input/output file paths from taskInfo, using pathResolveMapVar. Put output files to Data.Bimap?
@@ -412,7 +422,7 @@ runNodeLoop
             mapMaybe toTaskFileSizeItem $ Map.toList res.remoteTaskFileSizes
         -- What the task was scheduled on, recorded next to what it used, so
         -- that estimates can be checked against reality after the run.
-        , taskEstimates = taskEstimatesAt numCpus task
+        , taskEstimates = taskEstimatesAt numCpus (taskEstimation task)
         , taskStatKey = taskStatKey task
         }
       -- NB: this should be the last operation, since the nodeLoop process is killed
@@ -545,15 +555,21 @@ type TaskRecords a = [TaskRecord a]
 runTasks
   :: IsTask a
   => Config
-  -> TaskMap a
+  -> EstimatedTaskMap a
   -> Job (TaskRecords a)
-runTasks config taskMap = do
+runTasks config taskMap =
+  map (fmap originalTask) <$> runTaskMap config (estimatedTasks taskMap)
+
+runTaskMap
+  :: IsTask a
+  => Config
+  -> TaskMap (EstimatedTask a)
+  -> Job (TaskRecords (EstimatedTask a))
+runTaskMap config taskMap = do
   let
     taskGraph = TaskGraph.fromEdges taskMap
     cleanupDependencies = buildCleanupDependenciesMap config taskMap
-  _ <- case validateTaskMap taskMap of
-    Left err -> Log.throw err
-    Right _  -> pure ()
+  either Log.throw pure $ validateNodeLocalInputs config taskMap
   nodes <- getJobNodes config
   withFileService config nodes $ \fileService -> withWorkerPool nodes $ \workerPool -> do
       let
@@ -594,7 +610,11 @@ runTasks config taskMap = do
       -- NB: here we don't need taskQueueNotifier and taskQueueLock,
       -- since no one is accessing taskQueue yet.
       mapM_ (TPrioQueue.write taskQueue) moreIndependentTasks
-      nodeLoopMap :: Map Node ((Shared IO NodeStatus, TVar (IsNodeStalling a)), Async ()) <- flip Map.traverseWithKey initialAllocs $
+      nodeLoopMap
+        :: Map Node
+             ( (Shared IO NodeStatus, TVar (IsNodeStalling (EstimatedTask a)))
+             , Async () )
+        <- flip Map.traverseWithKey initialAllocs $
         \node alloc -> do
           nodeStatusVar <- liftIO $ newShared NodeStatus.empty
           isNodeStallingVar <- liftIO $ newTVarIO NotStalling
@@ -658,7 +678,6 @@ runTasks config taskMap = do
       mapM_ (lift . Async.cancelWait) nodeLoopHandleMap
       _ <- lift $ Async.wait cleanupLoopHandle
       flushQueue taskRecordQueue
-
 
 
 -- Files that can be removed (if there are no other dependencies)

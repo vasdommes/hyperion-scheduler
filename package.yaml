@@ -85,6 +85,7 @@ tests:
     - binary
     - containers
     - directory
+    - exceptions
     - filepath
     - hyperion
     - hyperion-scheduler

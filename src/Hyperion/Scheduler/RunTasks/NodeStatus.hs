@@ -5,13 +5,13 @@
 
 module Hyperion.Scheduler.RunTasks.NodeStatus where
 
-import Data.IntMap.Strict             (IntMap)
-import Data.IntMap.Strict             qualified as IntMap
-import Data.List                      (intercalate)
-import Data.Text                      (Text)
-import Data.Text                      qualified as Text
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), taskMemoryEstimate)
-import Hyperion.Scheduler.Types       (MemorySize, NumCPUs)
+import Data.IntMap.Strict                    (IntMap)
+import Data.IntMap.Strict                    qualified as IntMap
+import Data.List                             (intercalate)
+import Data.Text                             (Text)
+import Data.Text                             qualified as Text
+import Hyperion.Scheduler.Task.EstimatedTask (EstimatedTask, taskMemoryEstimate)
+import Hyperion.Scheduler.Types              (MemorySize, NumCPUs)
 
 -- | Currently in-use resources on a node
 data NodeStatus = MkNodeStatus
@@ -24,7 +24,7 @@ empty :: NodeStatus
 empty = MkNodeStatus 0 0 emptyHistogram
 
 -- | Add a task to NodeStatus
-addTask :: IsTask a => (a, NumCPUs) -> NodeStatus -> NodeStatus
+addTask :: (EstimatedTask a, NumCPUs) -> NodeStatus -> NodeStatus
 addTask (task, taskCpus) status = status
   { cpusInUse    = status.cpusInUse + taskCpus
   , memoryInUse  = status.memoryInUse + taskMemoryEstimate task
@@ -32,7 +32,7 @@ addTask (task, taskCpus) status = status
   }
 
 -- | Remove a task from NodeStatus
-removeTask :: IsTask a => (a, NumCPUs) -> NodeStatus -> NodeStatus
+removeTask :: (EstimatedTask a, NumCPUs) -> NodeStatus -> NodeStatus
 removeTask (task, taskCpus) status = status
   { cpusInUse    = status.cpusInUse - taskCpus
   , memoryInUse  = status.memoryInUse - taskMemoryEstimate task

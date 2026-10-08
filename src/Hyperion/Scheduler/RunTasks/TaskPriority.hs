@@ -12,16 +12,18 @@ module Hyperion.Scheduler.RunTasks.TaskPriority
   )
 where
 
-import Data.Array                     qualified as Array
-import Data.Graph                     qualified as Graph
-import Data.IntMap.Strict             (IntMap)
-import Data.IntMap.Strict             qualified as IntMap
-import Data.Time.Clock                (NominalDiffTime)
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..),
-                                       taskMemoryEstimate, taskRuntimeEstimate)
-import Hyperion.Scheduler.TaskGraph   (TaskGraph, taskToVertex, vertexToTask)
-import Hyperion.Scheduler.TaskGraph   qualified as TaskGraph
-import Hyperion.Scheduler.Types       (MemorySize (..), Node (..))
+import Data.Array                            qualified as Array
+import Data.Graph                            qualified as Graph
+import Data.IntMap.Strict                    (IntMap)
+import Data.IntMap.Strict                    qualified as IntMap
+import Data.Time.Clock                       (NominalDiffTime)
+import Hyperion.Scheduler.Task.EstimatedTask (EstimatedTask, taskMemoryEstimate,
+                                              taskRuntimeEstimate)
+import Hyperion.Scheduler.Task.IsTask        (IsTask (..), RunStage (..))
+import Hyperion.Scheduler.TaskGraph          (TaskGraph, taskToVertex,
+                                              vertexToTask)
+import Hyperion.Scheduler.TaskGraph          qualified as TaskGraph
+import Hyperion.Scheduler.Types              (MemorySize (..), Node (..))
 
 
 -- CriticalPathPriority prioritizes the critical path of a task graph (the slowest dependency chain).
@@ -73,7 +75,11 @@ type TaskPriority = (Int, CriticalPathPriority, MemorySize)
 -- Extra data used to compute task priority
 type TaskPriorityHelper a = (TaskGraph a, IntMap CriticalPathPriority)
 
-mkTaskPriorityHelper :: (IsTask a) => [Node] -> TaskGraph a -> TaskPriorityHelper a
+mkTaskPriorityHelper
+  :: (IsTask a)
+  => [Node]
+  -> TaskGraph (EstimatedTask a)
+  -> TaskPriorityHelper (EstimatedTask a)
 mkTaskPriorityHelper [] _    = error "Empty node list"
 -- NB: here we assume that all nodes have the same memory and numCPUs (which is true in practice).
 -- If not, we should maybe construct an "average node".
@@ -125,7 +131,11 @@ mkTaskPriorityHelper (node:_) taskGraph = (taskGraph, criticalPathPriorityMap) w
         revDeps = taskGraph.revDependencyGraph Array.! v
         revDepsCriticalTimes = foldr max [] $ map (m IntMap.! ) revDeps
 
-taskPriority :: IsTask a => TaskPriorityHelper a -> a -> TaskPriority
+taskPriority
+  :: IsTask a
+  => TaskPriorityHelper (EstimatedTask a)
+  -> EstimatedTask a
+  -> TaskPriority
 taskPriority (taskGraph, criticalPathPriorityMap) t = (taskDefaultPriority t, criticalPathPriority, taskMemoryEstimate t) where
   v = taskToVertex taskGraph t
   criticalPathPriority = criticalPathPriorityMap IntMap.! v

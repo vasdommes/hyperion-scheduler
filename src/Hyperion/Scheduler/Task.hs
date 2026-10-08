@@ -3,8 +3,10 @@ module Hyperion.Scheduler.Task
   )
 where
 
-import Hyperion.Scheduler.Task.IsTask      as Exports
-import Hyperion.Scheduler.Task.Task        as Exports
-import Hyperion.Scheduler.Task.TaskLink    as Exports
-import Hyperion.Scheduler.Task.TaskMap     as Exports
-import Hyperion.Scheduler.Task.WrappedTask as Exports
+import Hyperion.Scheduler.Task.EstimatedTask    as Exports
+import Hyperion.Scheduler.Task.EstimatedTaskMap as Exports
+import Hyperion.Scheduler.Task.IsTask           as Exports
+import Hyperion.Scheduler.Task.Task             as Exports
+import Hyperion.Scheduler.Task.TaskLink         as Exports
+import Hyperion.Scheduler.Task.TaskMap          as Exports
+import Hyperion.Scheduler.Task.WrappedTask      as Exports

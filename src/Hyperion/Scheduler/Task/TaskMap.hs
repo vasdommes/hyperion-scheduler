@@ -10,7 +10,7 @@
 module Hyperion.Scheduler.Task.TaskMap where
 
 import Control.Exception                   (Exception)
-import Control.Monad                       (foldM, foldM_)
+import Control.Monad                       (foldM, foldM_, unless)
 import Control.Monad.Catch                 (MonadThrow, throwM)
 import Data.Graph                          (SCC (..), stronglyConnComp)
 import Data.List.NonEmpty                  qualified as NonEmpty
@@ -20,26 +20,52 @@ import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Typeable                       (Typeable)
 import Hyperion.OsString                   (OsString, showOs)
-import Hyperion.Scheduler.Stats            (TaskAndFileStats)
+import Hyperion.Scheduler.Config           (Config)
+import Hyperion.Scheduler.FilePath         (VirtualFilePath (..), isNodeLocal)
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), RunStage (..),
                                             taskHasClosure, taskInputPaths,
                                             taskOutputPaths)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..), toTaskEdges)
-import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats)
+import Hyperion.Scheduler.Task.WrappedTask (WrappedTask)
 
 type TaskMap a = Map a (Set a)
 
+-- | The tasks needed to create the key's files. Their estimates are not
+-- computed yet: call
+-- 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap' on the final
+-- map.
 mkTaskMap :: (Monad m, HasTaskChain m r c k) => r -> c -> k -> m (TaskMap WrappedTask)
-mkTaskMap resolver cfg = toTaskEdges (taskChain resolver cfg)
+mkTaskMap resolver cfg key = toTaskEdges (taskChain resolver cfg) key
 
--- Update all tasks (keys and values) in a TaskMap
+-- | Update all tasks (keys and values) in a TaskMap. A dependency in the
+-- values becomes the updated task from the keys, so that each task is one
+-- object: a 'WrappedTask' computes its fields lazily, once per object.
 updateTaskMap :: Ord b => (a -> b) -> TaskMap a -> TaskMap b
-updateTaskMap updateTask = updateKeys . updateValues where
-  updateKeys = Map.mapKeys updateTask
-  updateValues = Map.map $ Set.map updateTask
+updateTaskMap updateTask taskMap = Map.map (Set.map asKey) updatedKeys
+  where
+    updatedKeys = Map.mapKeys updateTask taskMap
+    asKey dep = case Map.lookupIndex dep' updatedKeys of
+      Just i  -> fst (Map.elemAt i updatedKeys)
+      Nothing -> dep'
+      where
+        dep' = updateTask dep
 
-decorateTaskMapWithStats :: TaskAndFileStats -> TaskMap WrappedTask -> TaskMap WrappedTask
-decorateTaskMapWithStats = updateTaskMap . decorateTaskWithStats
+-- | Check that every node-local input is produced by a task in the map. The
+-- file service knows nothing of node-local files from before the run, so a
+-- consumer could never get one: the map was built with node-local paths
+-- visible, e.g. outside 'Hyperion.Scheduler.TaskFiles.runTaskFiles'.
+validateNodeLocalInputs
+  :: (IsTask a, MonadThrow m) => Config -> TaskMap a -> m ()
+validateNodeLocalInputs config taskMap =
+  unless (Set.null orphans) $ throwM $ InvalidTaskMap $
+    "Node-local input files are produced by no task in the map. Was the map \
+    \built outside runTaskFiles? "
+    <> showOs [ path | VirtualFilePath path <- Set.toList orphans ]
+  where
+    produced = Set.unions $ map taskOutputPaths $ Map.keys taskMap
+    orphans = Set.filter orphan $
+      Set.unions $ map taskInputPaths $ Map.keys taskMap
+    orphan p = isNodeLocal config p && Set.notMember p produced
 
 newtype InvalidTaskMap = InvalidTaskMap OsString
   deriving (Show)
@@ -136,8 +162,8 @@ validateTaskMap taskMap = do
     -- 2. Already exists on disk
     -- or should be in the task's dependencies outputs.
     -- In the first case, the input path should be in dependencies outputs - we check this.
-    -- In the second case, the input path is not in any task's outputs, so we ignore it.
-    -- TODO: call validateTaskMap in (MonadPathExists m) and check that path exists in the second case?
+    -- In the second case, the input path is not in any task's outputs, so we
+    -- ignore it here: 'mkEstimatedTaskMap' checks that it exists.
     assertCorrectDependencyPaths = mapM_ go (Map.toList taskMap) where
       allOutputPaths = Set.unions $ map taskOutputPaths $ Map.keys taskMap
       go (t, deps) = do

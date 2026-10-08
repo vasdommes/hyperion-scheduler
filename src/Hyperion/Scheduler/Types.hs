@@ -90,9 +90,9 @@ defaultRuntimeEstimate mem numCpus
 
 -- | A figure the scheduler used, together with where it came from. Statistics
 -- override a task's own model (see
--- 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats'), and this keeps
--- the prediction that was overridden, so the model can be judged against the
--- measurement afterwards.
+-- 'Hyperion.Scheduler.Task.EstimatedTask.applyStats'), and
+-- this keeps the prediction that was overridden, so the model can be judged
+-- against the measurement afterwards.
 --
 -- Provenance is per quantity, not per task: memory and runtime are looked up
 -- independently, so a task can run on a measured runtime and its own memory

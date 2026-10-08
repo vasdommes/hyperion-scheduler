@@ -6,45 +6,54 @@
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE TypeFamilies          #-}
 
--- | Pure unit tests for estimate provenance: what 'decorateTaskWithStats'
+-- | Pure unit tests for estimate provenance: what 'applyStats'
 -- records about where a figure came from, and what a task record says its
 -- estimates were. Runs locally, no cluster or filesystem access needed.
 module Hyperion.Scheduler.Test.EstimateTest where
 
-import Control.Exception                   (AssertionFailed (..), throwIO)
-import Control.Monad                       (unless)
-import Data.Aeson                          (FromJSON, ToJSON)
-import Data.Aeson                          qualified as Aeson
-import Data.Binary                         (Binary)
-import Data.List.NonEmpty                  qualified as NonEmpty
-import Data.Map.Strict                     qualified as Map
-import Data.Maybe                          (isJust)
-import Data.Set                            qualified as Set
-import Data.Text                           qualified as Text
-import Data.Time                           (UTCTime (..), fromGregorian)
-import GHC.Generics                        (Generic)
-import Hyperion                            (WorkerAddr (..))
-import Hyperion.OsString                   (fromString)
-import Hyperion.Scheduler.FilePath         (VirtualFilePath (..))
-import Hyperion.Scheduler.StatKey          (IsFileStatKey (..), IsStatKey (..),
-                                            TaskKeyFileInfo (..),
-                                            encodeFileStatKey, encodeStatKey)
-import Hyperion.Scheduler.Stats            (ScheduledEstimates (..),
-                                            TaskAndFileStats, TaskRecord (..),
-                                            Trials (..), lookupMaxFileSize,
-                                            recordToStats, taskEstimatesAt,
-                                            toTrials)
-import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
-                                            estimatesFromModel,
-                                            taskRuntimeEstimate)
-import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, decorateTaskWithStats,
-                                            wrapTask)
-import Hyperion.Scheduler.Types            (Estimate (..), FileSize,
-                                            MemorySize (..), Node (..), NumCPUs,
-                                            defaultRuntimeEstimate,
-                                            isMeasuredFromStats, modelEstimate,
-                                            schedulingEstimate)
-import Hyperion.Scheduler.Util             (qualifiedTypeRepText)
+import Control.Exception                     (AssertionFailed (..), throwIO)
+import Control.Monad                         (unless)
+import Data.Aeson                            (FromJSON, ToJSON)
+import Data.Aeson                            qualified as Aeson
+import Data.Binary                           (Binary)
+import Data.List.NonEmpty                    qualified as NonEmpty
+import Data.Map.Strict                       qualified as Map
+import Data.Maybe                            (isJust)
+import Data.Set                              qualified as Set
+import Data.Text                             qualified as Text
+import Data.Time                             (UTCTime (..), fromGregorian)
+import GHC.Generics                          (Generic)
+import Hyperion                              (WorkerAddr (..))
+import Hyperion.OsString                     (fromString)
+import Hyperion.Scheduler.FilePath           (VirtualFilePath (..))
+import Hyperion.Scheduler.StatKey            (IsFileStatKey (..),
+                                              IsStatKey (..),
+                                              SizedTaskFile (..), TaskFile (..),
+                                              encodeFileStatKey, encodeStatKey,
+                                              withSize)
+import Hyperion.Scheduler.Stats              (ScheduledEstimates (..),
+                                              TaskAndFileStats, TaskRecord (..),
+                                              Trials (..), lookupMaxFileSize,
+                                              recordToStats, taskEstimatesAt,
+                                              toTrials)
+import Hyperion.Scheduler.Task.EstimatedTask (EstimatedTask, applyStats,
+                                              estimateTask, taskEstimation,
+                                              taskOutputs,
+                                              taskResourceEstimates,
+                                              taskRuntimeEstimate)
+import Hyperion.Scheduler.Task.IsTask        (InputInfos, IsTask (..),
+                                              ResourceEstimates (..),
+                                              TaskEstimation (..),
+                                              TaskShape (..),
+                                              estimatesFromModel,
+                                              filesOnlyShape, taskStatKey)
+import Hyperion.Scheduler.Task.WrappedTask   (WrappedTask, wrapTask)
+import Hyperion.Scheduler.Types              (Estimate (..), FileSize,
+                                              MemorySize (..), Node (..),
+                                              NumCPUs, defaultRuntimeEstimate,
+                                              isMeasuredFromStats,
+                                              modelEstimate, schedulingEstimate)
+import Hyperion.Scheduler.Util               (qualifiedTypeRepText)
 
 -- * A minimal task with a stat key
 
@@ -71,36 +80,54 @@ data EstTask = MkEstTask
 instance Binary EstTask
 
 instance IsTask EstTask where
-  taskResourceEstimates t = estimatesFromModel t.memory
-  taskInputs _ = Set.empty
-  taskOutputs t = Set.singleton MkTaskKeyFileInfo
-    { fileStatKey = Just $ encodeFileStatKey (MkEstFileStatKey t.name)
-    , path        = VirtualFilePath $ fromString ("/data/" <> t.name)
-    , fileSize    = EstimatedByTask $ fileSizeEstimate (MkEstFileStatKey t.name)
+  taskShape t = MkTaskShape
+    { inputFiles  = Set.empty
+    , outputFiles = Set.singleton output
+    , statKey     = Just $ encodeStatKey (MkEstStatKey t.name)
+    , estimate    = \_ -> MkTaskEstimation
+        { inputs    = Set.empty
+        , outputs   = Set.singleton $ withSize
+            (EstimatedByTask (fileSizeEstimate (MkEstFileStatKey t.name)))
+            output
+        , estimates = estimatesFromModel t.memory
+        }
     }
+    where
+      output = MkTaskFile
+        { path        = VirtualFilePath $ fromString ("/data/" <> t.name)
+        , fileStatKey = Just $ encodeFileStatKey (MkEstFileStatKey t.name)
+        }
   taskTag t = Just (Text.pack t.name)
   taskClosure _ = Nothing
-  taskStatKey t = Just $ encodeStatKey (MkEstStatKey t.name)
 
 estTask :: String -> MemorySize -> WrappedTask
 estTask name memory = wrapTask MkEstTask { name = name, memory = memory }
 
--- | A task that reports estimates already measured from statistics, as a
--- 'WrappedTask' does once decorated.
+-- | The task estimated with the given statistics. None of these tasks has
+-- inputs.
+estimated :: IsTask a => TaskAndFileStats -> a -> EstimatedTask a
+estimated stats = estimateTask stats noInputs
+
+noInputs :: InputInfos
+noInputs file = error $ "Unexpected input: " <> show file.path
+
+-- | A task that reports estimates already measured from statistics, as
+-- 'applyStats' leaves them.
 data PreMeasuredTask = MkPreMeasuredTask
   deriving (Eq, Ord, Show, Generic, ToJSON)
 
 instance Binary PreMeasuredTask
 
 instance IsTask PreMeasuredTask where
-  taskInputs _ = Set.empty
-  taskOutputs _ = Set.empty
+  taskShape _ = shape { estimate = \known -> (shape.estimate known)
+    { estimates = MkResourceEstimates
+      { memory  = MeasuredFromStats (8 * 1024 * 1024) (1024 * 1024)
+      , runtime = MeasuredFromStats (const 10) (const 1)
+      }
+    } }
+    where shape = filesOnlyShape Set.empty Set.empty
   taskTag _ = Just "PreMeasured"
   taskClosure _ = Nothing
-  taskResourceEstimates _ = MkResourceEstimates
-    { memory  = MeasuredFromStats (8 * 1024 * 1024) (1024 * 1024)
-    , runtime = MeasuredFromStats (const 10) (const 1)
-    }
 
 -- * Statistics built from records
 
@@ -125,7 +152,8 @@ estRecord name numCpus memory fileSize = MkTaskRecord
   , taskNode      = testNode
   , taskNumCPUs   = numCpus
   , taskFileSizes = Map.singleton fileStatKey (NonEmpty.singleton fileSize)
-  , taskEstimates = taskEstimatesAt numCpus task
+  , taskEstimates =
+      taskEstimatesAt numCpus (taskEstimation (estimated mempty task))
   , taskStatKey   = taskStatKey task
   }
   where
@@ -152,7 +180,7 @@ testStatsOverrideKeepsOwnEstimate = do
     ownMemory = 1024 * 1024
     stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
     estimates = taskResourceEstimates $
-      decorateTaskWithStats stats (estTask "A" ownMemory)
+      estimated stats (estTask "A" ownMemory)
   expect "measured memory is used" $
     schedulingEstimate estimates.memory == 8 * 1024 * 1024
   expect "the task's own memory model is kept" $
@@ -170,7 +198,7 @@ testRuntimeMeasuredWithoutMemory = do
   let
     ownMemory = 1024 * 1024
     stats = statsOf [estRecord "A" 4 Nothing 4096]
-    task = decorateTaskWithStats stats (estTask "A" ownMemory)
+    task = estimated stats (estTask "A" ownMemory)
     estimates = taskResourceEstimates task
   expect "memory with no statistics stays the task's own" $
     case estimates.memory of
@@ -186,7 +214,7 @@ testNoMatchKeepsTaskEstimates :: IO ()
 testNoMatchKeepsTaskEstimates = do
   let
     stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
-    task = decorateTaskWithStats stats (estTask "B" (2 * 1024 * 1024))
+    task = estimated stats (estTask "B" (2 * 1024 * 1024))
     estimates = taskResourceEstimates task
   expect "unmatched memory stays the task's own" $
     case estimates.memory of
@@ -197,36 +225,35 @@ testNoMatchKeepsTaskEstimates = do
       EstimatedByTask _ -> True
       _                 -> False
 
--- | Decorating twice must not mistake the first measurement for the task's
--- own prediction.
-testDecorateIsIdempotent :: IO ()
-testDecorateIsIdempotent = do
+-- | Applying statistics twice must not mistake the first measurement for the
+-- task's own prediction.
+testApplyStatsIsIdempotent :: IO ()
+testApplyStatsIsIdempotent = do
   let
     ownMemory = 1024 * 1024
     stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
-    decorate = decorateTaskWithStats stats
-    estimates =
-      taskResourceEstimates $ decorate $ decorate (estTask "A" ownMemory)
-  expect "decorating twice keeps the task's own memory model" $
+    shape = taskShape (estTask "A" ownMemory)
+    apply = applyStats stats shape
+    estimates = (apply $ apply $ shape.estimate noInputs).estimates
+  expect "applying statistics twice keeps the task's own memory model" $
     modelEstimate estimates.memory == ownMemory
-  expect "decorating twice keeps the measured memory" $
+  expect "applying statistics twice keeps the measured memory" $
     schedulingEstimate estimates.memory == 8 * 1024 * 1024
 
--- | 'wrapTask' must not relabel a measurement as the task's own prediction.
--- No task in this repository reports measurements of its own -- only
--- 'decorateTaskWithStats' does, and a 'WrappedTask' cannot be wrapped again for
--- want of a 'Binary' instance -- so this guards the class contract rather than
--- a path that exists today.
-testWrapKeepsMeasuredEstimates :: IO ()
-testWrapKeepsMeasuredEstimates = do
+-- | Estimating must not relabel a measurement as the task's own prediction.
+-- No task in this repository measures its own figures -- only
+-- 'applyStats' does -- so this guards the class contract rather
+-- than a path that exists today.
+testEstimateKeepsMeasuredEstimates :: IO ()
+testEstimateKeepsMeasuredEstimates = do
   let
-    task = wrapTask MkPreMeasuredTask
+    task = estimated mempty (wrapTask MkPreMeasuredTask)
     estimates = taskResourceEstimates task
-  expect "wrapping keeps a measured memory figure measured" $
+  expect "estimating keeps a measured memory figure measured" $
     isMeasuredFromStats estimates.memory
-  expect "wrapping keeps the measured memory" $
+  expect "estimating keeps the measured memory" $
     schedulingEstimate estimates.memory == 8 * 1024 * 1024
-  expect "wrapping keeps the task's own memory model" $
+  expect "estimating keeps the task's own memory model" $
     modelEstimate estimates.memory == 1024 * 1024
   expect "wrapping keeps a measured runtime measured" $
     isMeasuredFromStats estimates.runtime
@@ -239,8 +266,8 @@ testZeroCpuRecordContributesNothing :: IO ()
 testZeroCpuRecordContributesNothing = do
   let
     stats = statsOf [estRecord "A" 0 (Just (8 * 1024 * 1024)) 4096]
-    estimates =
-      taskResourceEstimates $ decorateTaskWithStats stats (estTask "A" 1024)
+    estimates = taskResourceEstimates $ estimated stats (estTask "A" 1024)
+    fileStatKey = encodeFileStatKey (MkEstFileStatKey "A")
     finite n = not (isNaN t) && not (isInfinite t)
       where t = realToFrac (schedulingEstimate estimates.runtime n) :: Double
   expect "a run on no CPUs leaves memory unmeasured" $
@@ -251,7 +278,7 @@ testZeroCpuRecordContributesNothing = do
     all finite [0, 1, 4]
   -- File sizes are a property of the file, so they are recorded regardless.
   expect "a run on no CPUs still records its file sizes" $
-    isJust (lookupMaxFileSize (encodeFileStatKey (MkEstFileStatKey "A")) stats)
+    isJust (lookupMaxFileSize fileStatKey stats)
 
 -- | Merging is the only arithmetic these statistics do, and it had no test.
 -- Checked against the mean and biased variance computed directly from the same
@@ -282,8 +309,7 @@ testFileSizeKeepsOwnEstimate = do
   let
     -- The key declares 100 bytes (see 'EstFileStatKey'); the run measured 4096.
     stats = statsOf [estRecord "A" 4 (Just (8 * 1024 * 1024)) 4096]
-    outputs = Set.toList $ taskOutputs $
-      decorateTaskWithStats stats (estTask "A" 1024)
+    outputs = Set.toList $ taskOutputs $ estimated stats (estTask "A" 1024)
   case outputs of
     [output] -> do
       expect "the recorded file size is used" $
@@ -322,8 +348,8 @@ testTaskEstimatesAt :: IO ()
 testTaskEstimatesAt = do
   let
     ownMemory = 1024 * 1024
-    task = estTask "A" ownMemory
-    estimates = taskEstimatesAt 4 task
+    task = estimated mempty (estTask "A" ownMemory)
+    estimates = taskEstimatesAt 4 (taskEstimation task)
     fileStatKey = encodeFileStatKey (MkEstFileStatKey "A")
   expect "recorded runtime estimate is the scheduler's curve at given CPUs" $
     schedulingEstimate estimates.runtime == taskRuntimeEstimate task 4
@@ -347,8 +373,8 @@ runTest = do
   testStatsOverrideKeepsOwnEstimate
   testRuntimeMeasuredWithoutMemory
   testNoMatchKeepsTaskEstimates
-  testDecorateIsIdempotent
-  testWrapKeepsMeasuredEstimates
+  testApplyStatsIsIdempotent
+  testEstimateKeepsMeasuredEstimates
   testZeroCpuRecordContributesNothing
   testTrialsSummary
   testQualifiedTypeName

@@ -10,6 +10,7 @@
 {-# LANGUAGE ScopedTypeVariables     #-}
 {-# LANGUAGE TypeApplications        #-}
 {-# LANGUAGE TypeFamilies            #-}
+{-# LANGUAGE UndecidableInstances    #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
 module Hyperion.Scheduler.StatKey where
@@ -132,11 +133,11 @@ newtype FileStatKey = MkFileStatKey Aeson.Value
   deriving anyclass (ToJSONKey, FromJSONKey)
 
 -- | Projects an output key onto the key under which its file's size is
--- recorded and estimated, so that the recorded identity and the estimate
--- cannot drift apart. Defaults to 'Void': no file statistics, and a size of
--- zero, which only under-counts node-local storage in @canHandleTask@.
--- Prefer a /reduced/ projection: an unreduced key puts every file in a group
--- of its own, which cannot predict a new file.
+-- recorded and estimated. A property of the key alone, so that one definition
+-- serves a produced file and a file already on disk. Defaults to 'Void': no
+-- file statistics, and a size of zero, which only under-counts node-local
+-- storage in @canHandleTask@. Prefer a /reduced/ projection: an unreduced key
+-- puts every file in a group of its own, which cannot predict a new file.
 class IsFileStatKey (FileStatKeyOf a) => ToFileStatKey a where
   type FileStatKeyOf a
   type FileStatKeyOf a = Void
@@ -148,32 +149,65 @@ class IsFileStatKey (FileStatKeyOf a) => ToFileStatKey a where
 toFileStatKey :: ToFileStatKey a => a -> Maybe FileStatKey
 toFileStatKey = fmap encodeFileStatKey . fileStatKeyOf
 
--- | How big the output file is expected to be. Zero when the key declares no
--- file stat key, i.e. when the size is simply unknown.
-toFileSize :: ToFileStatKey a => a -> FileSize
-toFileSize = maybe 0 fileSizeEstimate . fileStatKeyOf
-
 -- OutKey k = Void means no files.
 instance ToFileStatKey Void
 
-data TaskKeyFileInfo = MkTaskKeyFileInfo
-  { fileStatKey :: Maybe FileStatKey
-  , path        :: VirtualFilePath
+-- | A file of a task: its path and file stat key, known before any size is.
+-- A file is identified by its path: 'Eq' and 'Ord' compare nothing else, so a
+-- set of files is built without forcing their stat keys, which can be
+-- expensive.
+data TaskFile = MkTaskFile
+  { path        :: VirtualFilePath
+  , fileStatKey :: Maybe FileStatKey
+  }
+  deriving (Generic, Show)
+
+instance Eq TaskFile where
+  x == y = x.path == y.path
+
+instance Ord TaskFile where
+  compare x y = compare x.path y.path
+
+-- | A 'TaskFile' with its size. Compared by path, like 'TaskFile', so a set of
+-- infos is built without forcing their sizes, which
+-- 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap' may compute
+-- from other tasks' infos.
+data SizedTaskFile = MkSizedTaskFile
+  { path        :: VirtualFilePath
+  , fileStatKey :: Maybe FileStatKey
   , fileSize    :: Estimate FileSize
     -- ^ Carries its provenance for the same reason a task's memory estimate
-    -- does: 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats'
+    -- does: 'Hyperion.Scheduler.Task.EstimatedTask.applyStats'
     -- replaces it with a recorded size, and what the key itself declared is
     -- then the only way to tell whether 'fileSizeEstimate' is any good.
+    --
+    -- For an input file already on disk, it is the size on disk.
   }
-  deriving (Generic, Eq, Ord, Show)
+  deriving (Generic, Show)
 
-type ToTaskKeyFileInfo r a = (PathResolver r a, ToFileStatKey a)
+instance Eq SizedTaskFile where
+  x == y = x.path == y.path
 
-toTaskKeyFileInfo
-  :: ToTaskKeyFileInfo r a
-  => r -> a -> TaskKeyFileInfo
-toTaskKeyFileInfo resolver key = MkTaskKeyFileInfo
-  { fileStatKey      = toFileStatKey key
-  , path             = VirtualFilePath $ resolvePath resolver key
-  , fileSize         = EstimatedByTask $ toFileSize key
+instance Ord SizedTaskFile where
+  compare x y = compare x.path y.path
+
+-- | The file with the given size.
+withSize :: Estimate FileSize -> TaskFile -> SizedTaskFile
+withSize size file = MkSizedTaskFile
+  { path        = file.path
+  , fileStatKey = file.fileStatKey
+  , fileSize    = size
+  }
+
+-- | A key whose file a resolver can name. A class rather than a constraint
+-- synonym, so that it can be applied partially, e.g. in
+-- @All (ToTaskFile r) ks@.
+class (PathResolver r a, ToFileStatKey a) => ToTaskFile r a
+instance (PathResolver r a, ToFileStatKey a) => ToTaskFile r a
+
+-- | The file of the given key.
+toTaskFile :: ToTaskFile r a => r -> a -> TaskFile
+toTaskFile resolver key = MkTaskFile
+  { path        = VirtualFilePath $ resolvePath resolver key
+  , fileStatKey = toFileStatKey key
   }

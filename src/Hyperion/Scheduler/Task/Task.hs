@@ -46,12 +46,13 @@ import Hyperion.OsPath                     (OsPath)
 import Hyperion.OsString                   qualified as OsString
 import Hyperion.Scheduler.PathResolver     (PathResolver (..),
                                             PathResolverForAll)
-import Hyperion.Scheduler.StatKey          (IsStatKey (..), ToFileStatKey (..),
-                                            ToTaskKeyFileInfo, encodeStatKey,
-                                            toTaskKeyFileInfo)
+import Hyperion.Scheduler.StatKey          (IsFileStatKey (..), IsStatKey (..),
+                                            ToFileStatKey (..), ToTaskFile,
+                                            encodeStatKey, toTaskFile, withSize)
 import Hyperion.Scheduler.Task.HasConfig   (HasConfig (..))
 import Hyperion.Scheduler.Task.IsTask      (IsTask (..), ResourceEstimates (..),
-                                            RunStage, Tag, defaultTaskTag,
+                                            RunStage, Tag, TaskEstimation (..),
+                                            TaskShape (..), defaultTaskTag,
                                             defaultTaskTagForType,
                                             estimatesFromModel)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
@@ -393,17 +394,53 @@ computeAndWrite Dict numCpus task =
       case fetchesAllWithPathsDict (Proxy @(OutAndDepKeys k)) (Proxy @f) of
         Dict -> computeAndSaveValue numCpus task.config task.key
 
-class ToTaskKeyFileInfo r k => FileInfo r k
-instance ToTaskKeyFileInfo r k => FileInfo r k
+-- | A task's shape. The traversal of the dependencies and the projections of
+-- the stat keys are bound outside 'estimate', so that every estimation of one
+-- shape shares them.
+taskShapeOf
+  :: forall r k
+   . (TaskKey k, PathResolver r (OutKey k), All (ToTaskFile r) (DepKeys k))
+  => Task r k -> TaskShape
+taskShapeOf t = MkTaskShape
+  { inputFiles  = Set.fromList (map snd ownDeps)
+  , outputFiles = Set.fromList (map fst outputs)
+  , statKey     = encodeStatKey <$> statKey
+  , estimate    = estimate
+  }
+  where
+    outsAndDeps = outAndDependencies t.config t.key
+    outputs =
+      [ (toTaskFile t.resolver o, fileStatKeyOf o)
+      | o <- Set.toList (headF outsAndDeps)
+      ]
+    ownDeps =
+      [ (dep, vAll @(ToTaskFile r) (toTaskFile t.resolver) dep)
+      | dep <- Set.toList (toVariants (tailF outsAndDeps))
+      ]
+    statKey = toStatKey t.config t.key
+    modelFor key = MkResourceEstimates
+      { memory  = EstimatedByTask (memoryEstimate key)
+      , runtime = EstimatedByTask (runtimeEstimate key)
+      }
+    outputSize = maybe 0 fileSizeEstimate
+
+    estimate inputInfos = MkTaskEstimation
+      { inputs    = Set.fromList [ inputInfos file | (_, file) <- ownDeps ]
+      , outputs   = Set.fromList
+          [ withSize (EstimatedByTask (outputSize fileKey)) file
+          | (file, fileKey) <- outputs
+          ]
+      , estimates = maybe (estimatesFromModel 0) modelFor statKey
+      }
 
 instance
   ( Static(PathResolverForAll r (DepKeys k))
-  , All (FileInfo r) (DepKeys k)
+  , All (ToTaskFile r) (DepKeys k)
   , TaskKey k
   , ToJSON (Task r k)
   , Eq (Task r k)
   , Ord (Task r k)
-  , All (FileInfo r) (DepKeys k)
+  , All (ToTaskFile r) (DepKeys k)
   , Static (PathResolver r (OutKey k))
   , Static (TaskKey k)
   , Static (Binary r)
@@ -419,18 +456,9 @@ instance
   -- statistics for that key.
   -- A task with no stat key estimates zero memory, hence (via
   -- 'estimatesFromModel') zero runtime.
-  taskResourceEstimates t = case toStatKey t.config t.key of
-    Nothing      -> estimatesFromModel 0
-    Just statKey -> MkResourceEstimates
-      { memory = EstimatedByTask (memoryEstimate statKey)
-      , runtime = EstimatedByTask (runtimeEstimate statKey)
-      }
-  taskStatKey t          = encodeStatKey <$> toStatKey t.config t.key
+  taskShape              = taskShapeOf
   taskMaxThreads stage t = maxThreads stage t.config t.key
   taskMinThreads stage t = minThreads stage t.config t.key
-  taskInputs t           = Set.map toFileInfo $ dependencies t.config t.key where
-    toFileInfo = vAll @(FileInfo r) (toTaskKeyFileInfo t.resolver)
-  taskOutputs t          = Set.map (toTaskKeyFileInfo t.resolver) $ outKeys t.config t.key
   taskDefaultPriority t  = priority t.key
   taskTag t              = tag t.key
   -- A closure-less task completes instantly without a worker round-trip
@@ -471,7 +499,7 @@ instance {-# OVERLAPPABLE #-}
   , HasConfig c (TaskConfig k)
   , Static (PathResolver r (OutKey k))
   , Static (PathResolverForAll r (DepKeys k))
-  , All (FileInfo r) (DepKeys k)
+  , All (ToTaskFile r) (DepKeys k)
   , Static (Binary r)
   , Static (Binary k)
   , IsTask (Task r k)

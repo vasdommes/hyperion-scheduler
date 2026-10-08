@@ -1,45 +1,79 @@
-{-# LANGUAGE DataKinds             #-}
-{-# LANGUAGE DeriveAnyClass        #-}
-{-# LANGUAGE DerivingStrategies    #-}
-{-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE NoFieldSelectors      #-}
-{-# LANGUAGE OverloadedRecordDot   #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DeriveAnyClass             #-}
+{-# LANGUAGE DerivingStrategies         #-}
+{-# LANGUAGE DuplicateRecordFields      #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE NoFieldSelectors           #-}
+{-# LANGUAGE OverloadedRecordDot        #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TypeFamilies               #-}
 
 -- | Pure unit tests for TaskMap logic: validateTaskMap, replaceTasks and
 -- placeholder tasks. Runs locally, no cluster or filesystem access needed.
 module Hyperion.Scheduler.Test.TaskMapTest where
 
-import Control.Exception               (AssertionFailed (..), throwIO)
-import Control.Monad                   (unless)
-import Data.Aeson                      (ToJSON)
-import Data.Binary                     (Binary)
-import Data.Map.Strict                 qualified as Map
-import Data.Maybe                      (isNothing)
-import Data.Set                        (Set)
-import Data.Set                        qualified as Set
-import Data.Text                       qualified as Text
-import GHC.Generics                    (Generic)
-import Hyperion.OsPath                 (OsPath)
-import Hyperion.OsString               (fromString)
-import Hyperion.Scheduler.FilePath     (VirtualFilePath (..))
-import Hyperion.Scheduler.StatKey      (IsFileStatKey (..),
-                                        TaskKeyFileInfo (..),
-                                        ToFileStatKey (..), encodeFileStatKey)
-import Hyperion.Scheduler.Task.IsTask  (IsTask (..), taskInputPaths)
-import Hyperion.Scheduler.Task.Task    (DepKeys, TaskKey (..), TaskKind (..),
-                                        dependencies, listTaskKey, outKeys)
-import Hyperion.Scheduler.Task.TaskMap (TaskMap, placeholdersOfType,
-                                        replaceTasks, validateTaskMap)
-import Hyperion.Scheduler.Types        (Estimate (..), NumCPUs)
+import Control.Exception                        (AssertionFailed (..),
+                                                 SomeException, evaluate,
+                                                 throwIO, toException)
+import Control.Monad                            (unless)
+import Control.Monad.Catch                      (MonadThrow (..))
+import Data.Aeson                               (ToJSON)
+import Data.Binary                              (Binary)
+import Data.Either                              (isLeft, isRight)
+import Data.IORef                               (IORef, readIORef)
+import Data.List.NonEmpty                       qualified as NonEmpty
+import Data.Map.Strict                          (Map)
+import Data.Map.Strict                          qualified as Map
+import Data.Maybe                               (isNothing)
+import Data.Set                                 (Set)
+import Data.Set                                 qualified as Set
+import Data.Text                                qualified as Text
+import GHC.Generics                             (Generic)
+import Hyperion.OsPath                          (OsPath)
+import Hyperion.OsString                        (fromString)
+import Hyperion.Scheduler.Config                (Config (..))
+import Hyperion.Scheduler.FilePath              (VirtualFilePath (..))
+import Hyperion.Scheduler.StatKey               (FileStatKey,
+                                                 IsFileStatKey (..),
+                                                 SizedTaskFile (..),
+                                                 TaskFile (..),
+                                                 ToFileStatKey (..),
+                                                 encodeFileStatKey, withSize)
+import Hyperion.Scheduler.Stats                 (FileStats (..),
+                                                 TaskAndFileStats (..),
+                                                 TaskStats (..), toTrials)
+import Hyperion.Scheduler.Task.EstimatedTask    (EstimatedTask, estimateTask,
+                                                 taskInputs,
+                                                 taskResourceEstimates)
+import Hyperion.Scheduler.Task.EstimatedTaskMap (estimatedTasks,
+                                                 mkEstimatedTaskMap)
+import Hyperion.Scheduler.Task.IsTask           (InputInfos, IsTask (..),
+                                                 ResourceEstimates (..),
+                                                 TaskEstimation (..),
+                                                 TaskShape (..), filesOnlyShape,
+                                                 taskInputPaths,
+                                                 taskOutputPaths, taskStatKey)
+import Hyperion.Scheduler.Task.Task             (DepKeys, TaskKey (..),
+                                                 TaskKind (..), dependencies,
+                                                 listTaskKey, outKeys)
+import Hyperion.Scheduler.Task.TaskMap          (TaskMap, placeholdersOfType,
+                                                 replaceTasks,
+                                                 validateNodeLocalInputs,
+                                                 validateTaskMap)
+import Hyperion.Scheduler.Task.WrappedTask      (WrappedTask, wrapTask)
+import Hyperion.Scheduler.TaskFiles             (MonadTaskFiles (..))
+import Hyperion.Scheduler.Test.Counted          (counted, newCounter,
+                                                 resetCounter)
+import Hyperion.Scheduler.Types                 (Estimate (..), FileSize,
+                                                 NumCPUs, schedulingEstimate)
+import System.IO.Unsafe                         (unsafePerformIO)
 
 -- * A minimal IsTask for building TaskMaps by hand
 
 data TestTask = MkTestTask
   { name          :: String
-  , inputs        :: Set OsPath
-  , outputs       :: Set OsPath
+  , inputPaths    :: Set OsPath
+  , outputPaths   :: Set OsPath
   , isPlaceholder :: Bool
   , computes      :: Bool
     -- ^ Whether the task has something to run remotely. The closure itself is
@@ -54,16 +88,18 @@ newtype PathFileStatKey = MkPathFileStatKey String
 
 instance IsFileStatKey PathFileStatKey
 
-mkFileInfo :: OsPath -> TaskKeyFileInfo
-mkFileInfo path = MkTaskKeyFileInfo
-  { fileStatKey = Just $ encodeFileStatKey (MkPathFileStatKey (show path))
-  , path        = VirtualFilePath path
-  , fileSize    = EstimatedByTask 0
+fileStatKeyOfPath :: OsPath -> FileStatKey
+fileStatKeyOfPath path = encodeFileStatKey (MkPathFileStatKey (show path))
+
+mkFile :: OsPath -> TaskFile
+mkFile path = MkTaskFile
+  { path        = VirtualFilePath path
+  , fileStatKey = Just $ fileStatKeyOfPath path
   }
 
 instance IsTask TestTask where
-  taskInputs t        = Set.map mkFileInfo t.inputs
-  taskOutputs t       = Set.map mkFileInfo t.outputs
+  taskShape t         =
+    filesOnlyShape (Set.map mkFile t.inputPaths) (Set.map mkFile t.outputPaths)
   taskTag t           = Just (Text.pack t.name)
   taskClosure t
     | t.computes = Just $ error "TestTask closure is never run"
@@ -75,8 +111,8 @@ instance IsTask TestTask where
 testTask :: String -> [OsPath] -> [OsPath] -> TestTask
 testTask name ins outs = MkTestTask
   { name          = name
-  , inputs        = Set.fromList ins
-  , outputs       = Set.fromList outs
+  , inputPaths    = Set.fromList ins
+  , outputPaths   = Set.fromList outs
   , isPlaceholder = False
   , computes      = False
   , minThreads    = 1
@@ -103,6 +139,10 @@ expect label cond = do
   unless cond $ throwIO $ AssertionFailed $ "FAILED: " <> label
   putStrLn $ "ok: " <> label
 
+-- | For tasks with no inputs.
+noInputs :: InputInfos
+noInputs file = error $ "Unexpected input: " <> show file.path
+
 taskMapOf :: TestTask -> TaskMap TestTask
 taskMapOf t = Map.fromList [(t, Set.empty)]
 
@@ -118,11 +158,12 @@ expectInvalid label taskMap = case validateTaskMap taskMap of
 
 -- * Tests
 
-p1, p2, q, r :: OsPath
+p1, p2, q, r, s :: OsPath
 p1 = fromString "/data/p1"
 p2 = fromString "/data/p2"
 q  = fromString "/data/q"
 r  = fromString "/data/r"
+s  = fromString "/data/s"
 
 -- | An input path produced by NO task in the map is assumed to already exist
 -- on disk (its producer was pruned by checkCreated): valid.
@@ -241,8 +282,204 @@ testThreadRangesAreOrdered = do
   expectValid "maxThreads equal to minThreads is valid" $
     taskMapOf computing { minThreads = 2, maxThreads = 2 }
 
+-- | A task declaring the size of each output file, to tell whose file info a
+-- consumer ends up with.
+data SizedTask = MkSizedTask
+  { sizedName    :: String
+  , sizedInputs  :: [OsPath]
+  , sizedOutputs :: [(OsPath, FileSize)]
+  , sumsInputs   :: Bool
+    -- ^ Whether, given its inputs, each output's size is their total instead.
+  } deriving (Eq, Ord, Show, Generic, ToJSON, Binary)
+
+instance IsTask SizedTask where
+  taskTag t     = Just (Text.pack t.sizedName)
+  taskClosure _ = Nothing
+  taskShape t = shape { estimate = estimate }
+    where
+      shape = filesOnlyShape
+        (Set.fromList (map mkFile t.sizedInputs))
+        (Set.fromList (map (mkFile . fst) t.sizedOutputs))
+      estimate known = estimation { outputs = sizedOutputs }
+        where
+          estimation = shape.estimate known
+          sizedOutputs = Set.fromList
+            [ withSize (EstimatedByTask (if t.sumsInputs then total else size))
+                (mkFile path)
+            | (path, size) <- t.sizedOutputs
+            ]
+          total = sum $ map (schedulingEstimate . (.fileSize)) $
+            Set.toList estimation.inputs
+
+sizedTask :: String -> [OsPath] -> [(OsPath, FileSize)] -> SizedTask
+sizedTask name ins outs = MkSizedTask name ins outs False
+
+-- | A filesystem holding files of the given sizes.
+newtype Disk a = MkDisk (Map OsPath FileSize -> Either SomeException a)
+
+instance Functor Disk where
+  fmap f (MkDisk g) = MkDisk (fmap f . g)
+
+instance Applicative Disk where
+  pure x = MkDisk (const (Right x))
+  MkDisk f <*> MkDisk g = MkDisk (\files -> f files <*> g files)
+
+instance Monad Disk where
+  MkDisk g >>= k = MkDisk $ \files -> g files >>= \x -> runDisk files (k x)
+
+instance MonadThrow Disk where
+  throwM e = MkDisk (const (Left (toException e)))
+
+instance MonadTaskFiles Disk where
+  taskFileSize path = MkDisk (Right . Map.lookup path)
+
+runDisk :: Map OsPath FileSize -> Disk a -> Either SomeException a
+runDisk files (MkDisk f) = f files
+
+-- | The estimated map, or the test fails.
+estimateOnDisk
+  :: Map OsPath FileSize -> TaskAndFileStats -> TaskMap WrappedTask
+  -> IO (TaskMap (EstimatedTask WrappedTask))
+estimateOnDisk files stats taskMap =
+  either throwIO (pure . estimatedTasks) $
+    runDisk files (mkEstimatedTaskMap stats taskMap)
+
+testInputSizes :: IO ()
+testInputSizes = do
+  let
+    producer = wrapTask $ sizedTask "P" [] [(q, 7)]
+    -- r is on disk.
+    consumer = wrapTask $ (sizedTask "C" [q, r] [(p1, 1)]) { sumsInputs = True }
+    root = wrapTask $ sizedTask "R" [p1] []
+    taskMap = Map.fromList
+      [ (producer, Set.empty)
+      , (consumer, Set.singleton producer)
+      , (root, Set.singleton consumer)
+      ]
+    -- The size of q recorded in statistics.
+    stats = MkTaskAndFileStats (MkTaskStats Map.empty) $ MkFileStats $
+      Map.singleton (fileStatKeyOfPath q) (toTrials (NonEmpty.singleton 70))
+    inputSizes t = [ (i.path, i.fileSize) | i <- Set.toList (taskInputs t) ]
+    isConsumer = (== Just "C") . taskTag
+    expected =
+      [ (VirtualFilePath q, MeasuredFromStats 70 7)
+      , (VirtualFilePath r, EstimatedByTask 3)
+      ]
+  estimated <- estimateOnDisk (Map.fromList [(r, 3), (q, 1000)]) stats taskMap
+  let depSets = Map.elems estimated
+  expect "an input takes the file info of the task producing it, after stats; \
+         \another input the size on disk" $
+    map inputSizes (filter isConsumer (Map.keys estimated)) == [expected]
+  expect "a dependency in the map's values has the same inputs" $
+    map inputSizes (filter isConsumer (concatMap Set.toList depSets))
+      == [expected]
+  expect "an output computed from the inputs is what its consumer sees" $
+    map inputSizes (filter ((== Just "R") . taskTag) (Map.keys estimated))
+      == [[(VirtualFilePath p1, EstimatedByTask 73)]]
+
+-- | A map is validated before it is estimated, so a cycle is rejected rather
+-- than estimated with inputs of no known size.
+testCycleIsRejected :: IO ()
+testCycleIsRejected = do
+  let
+    a = wrapTask $ sizedTask "A" [q] [(r, 2)]
+    b = wrapTask $ sizedTask "B" [r] [(q, 4)]
+    taskMap = Map.fromList [(a, Set.singleton b), (b, Set.singleton a)]
+  expect "a map with a cycle is rejected" $
+    isLeft $ runDisk Map.empty (mkEstimatedTaskMap mempty taskMap)
+
+-- | An input produced by no task in the map must be on disk.
+testMissingInputIsRejected :: IO ()
+testMissingInputIsRejected = do
+  let
+    consumer = wrapTask $ sizedTask "C" [r, s] [(p1, 1)]
+    taskMap = Map.fromList [(consumer, Set.empty)]
+    onDisk files = runDisk files (mkEstimatedTaskMap mempty taskMap)
+  expect "an input neither produced in the map nor on disk is rejected" $
+    isLeft (onDisk (Map.fromList [(r, 3)]))
+  expect "inputs on disk are accepted" $
+    isRight (onDisk (Map.fromList [(r, 3), (s, 5)]))
+
+-- | A task with one output, counting how often its shape is built.
+data CountedTask = MkCountedTask String
+  deriving (Eq, Ord, Show, Generic, ToJSON, Binary)
+
+instance IsTask CountedTask where
+  taskTag (MkCountedTask name) = Just (Text.pack name)
+  taskClosure _ = Nothing
+  taskShape t = counted shapeBuilds t $
+    filesOnlyShape Set.empty (Set.singleton (mkFile q))
+
+-- | @f t@, out of the optimizer's sight. The scheduler reads a task's shape in
+-- different functions at different times; within one expression the optimizer
+-- would merge the reads, and hide a shape that is not cached.
+separately :: (t -> b) -> t -> b
+separately f t = f t
+{-# NOINLINE separately #-}
+
+shapeBuilds :: IORef Int
+shapeBuilds = unsafePerformIO newCounter
+{-# NOINLINE shapeBuilds #-}
+
+-- | Every way the scheduler reads a task's shape reuses one shape:
+-- 'WrappedTask' caches it before estimation, and 'EstimatedTask' during the
+-- run.
+testShapeIsCached :: IO ()
+testShapeIsCached = do
+  let
+    -- What the scheduler reads during a run, each read in its own call.
+    readAll t =
+      separately taskStatKey t == Nothing
+        && separately taskInputPaths t == Set.empty
+        && separately taskOutputPaths t == Set.singleton (VirtualFilePath q)
+        && schedulingEstimate (separately taskResourceEstimates t).memory == 0
+  -- Bound at run time: a constant task would be floated out and shared, and
+  -- its shape built before the counter is reset.
+  [wrappedName, estimatedName] <- evaluate ["W", "E"]
+  resetCounter shapeBuilds
+  estimated <- estimateOnDisk Map.empty mempty $
+    Map.singleton (wrapTask (MkCountedTask wrappedName)) Set.empty
+  expect "a wrapped task can be estimated and read" $
+    all readAll (Map.keys estimated)
+  wrappedBuilds <- readIORef shapeBuilds
+  expect "a wrapped task's shape is built once" $ wrappedBuilds == 1
+  resetCounter shapeBuilds
+  expect "an estimated task can be read" $
+    readAll (estimateTask mempty noInputs (MkCountedTask estimatedName))
+  estimatedBuilds <- readIORef shapeBuilds
+  expect "an estimated task's shape is built once" $ estimatedBuilds == 1
+
+-- | A node-local input must come from a task in the map: the file service
+-- could not hand a node-local file from before the run to a consumer.
+testNodeLocalInputs :: IO ()
+testNodeLocalInputs = do
+  let
+    local = fromString "/local/x"
+    config = MkConfig
+      { nodeMemory           = 0
+      , nodeLocalStorageSize = 0
+      , localStoragePath     = fromString "/local"
+      , isLocalPath          = (== local)
+      , reportInterval       = 1
+      }
+    producer = testTask "P" [] [local]
+    consumer = testTask "C" [local, q] []
+    valid taskMap = isRight
+      (validateNodeLocalInputs config taskMap :: Either SomeException ())
+  expect "a node-local input produced in the map is valid" $ valid $
+    Map.fromList [(producer, Set.empty), (consumer, Set.singleton producer)]
+  expect "a node-local input produced by no task is invalid" $
+    not (valid (taskMapOf consumer))
+  expect "an input that is not node-local may come from disk" $
+    valid (taskMapOf (testTask "D" [q] []))
+
 runTest :: IO ()
 runTest = do
+  testNodeLocalInputs
+  testInputSizes
+  testCycleIsRejected
+  testMissingInputIsRejected
+  testShapeIsCached
   testPrunedInputIsValid
   testMissingEdgeIsInvalid
   testCorrectEdgeIsValid

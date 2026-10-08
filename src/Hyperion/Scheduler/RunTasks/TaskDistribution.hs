@@ -7,26 +7,28 @@
 
 module Hyperion.Scheduler.RunTasks.TaskDistribution where
 
-import Data.List                      qualified as List
-import Data.Map.Strict                (Map)
-import Data.Map.Strict                qualified as Map
-import Data.Maybe                     (mapMaybe)
-import Data.MinMaxQueue               qualified as MinMaxQueue
-import Data.Ord                       (Down (..))
-import Data.Set                       (Set)
-import Data.Set                       qualified as Set
-import Data.Time.Clock                (NominalDiffTime)
-import Hyperion.Scheduler.Config      (Config)
-import Hyperion.Scheduler.FilePath    (VirtualFilePath, isNodeLocal)
-import Hyperion.Scheduler.StatKey     (TaskKeyFileInfo (..))
-import Hyperion.Scheduler.Task.IsTask (IsTask (..), RunStage (..),
-                                       taskMemoryCapped, taskRuntimeEstimate)
-import Hyperion.Scheduler.Types       (FileSize, Node (..), NumCPUs,
-                                       schedulingEstimate)
+import Data.List                             qualified as List
+import Data.Map.Strict                       (Map)
+import Data.Map.Strict                       qualified as Map
+import Data.Maybe                            (mapMaybe)
+import Data.MinMaxQueue                      qualified as MinMaxQueue
+import Data.Ord                              (Down (..))
+import Data.Set                              (Set)
+import Data.Set                              qualified as Set
+import Data.Time.Clock                       (NominalDiffTime)
+import Hyperion.Scheduler.Config             (Config)
+import Hyperion.Scheduler.FilePath           (VirtualFilePath, isNodeLocal)
+import Hyperion.Scheduler.StatKey            (SizedTaskFile (..))
+import Hyperion.Scheduler.Task.EstimatedTask (EstimatedTask, taskInputs,
+                                              taskMemoryCapped, taskOutputs,
+                                              taskRuntimeEstimate)
+import Hyperion.Scheduler.Task.IsTask        (IsTask (..), RunStage (..))
+import Hyperion.Scheduler.Types              (FileSize, Node (..), NumCPUs,
+                                              schedulingEstimate)
 
 type CPUAllocation a = Map a NumCPUs
 
-allocCompletionTime :: IsTask a => CPUAllocation a -> NominalDiffTime
+allocCompletionTime :: CPUAllocation (EstimatedTask a) -> NominalDiffTime
 allocCompletionTime alloc
   | Map.null alloc = 0
   | otherwise = maximum $
@@ -62,13 +64,19 @@ basicValidAllocation stage totalCpus tasks = allocNoExcess
 --
 -- NB: This function is only well-defined when 'totalCpus' is between
 -- total sum of 'minThreads' and the total sum of 'maxThreads'.
-allocateCpusToTasks :: forall a . IsTask a => RunStage -> NumCPUs -> [a] -> CPUAllocation a
+allocateCpusToTasks
+  :: forall a . IsTask a
+  => RunStage
+  -> NumCPUs
+  -> [EstimatedTask a]
+  -> CPUAllocation (EstimatedTask a)
 allocateCpusToTasks stage totalCpus tasks =
   let (fastTasks, normalTasks, slowTasks) = refineAllocation stage (basicValidAllocation stage totalCpus tasks)
   in Map.fromList $ fastTasks <> normalTasks <> slowTasks
 
 -- Total size for all node-local input and output files of a task.
-taskLocalFileSizeMap :: IsTask a => Config -> a -> Map VirtualFilePath FileSize
+taskLocalFileSizeMap
+  :: Config -> EstimatedTask a -> Map VirtualFilePath FileSize
 taskLocalFileSizeMap config t =
   Map.fromList $
   map (\fileInfo -> (fileInfo.path, schedulingEstimate fileInfo.fileSize)) $
@@ -76,7 +84,12 @@ taskLocalFileSizeMap config t =
   Set.filter (isNodeLocal config . (.path)) $
   Set.union (taskInputs t) (taskOutputs t)
 
-canHandleTask :: IsTask a => Config -> a -> (Node, CPUAllocation a) -> Bool
+canHandleTask
+  :: IsTask a
+  => Config
+  -> EstimatedTask a
+  -> (Node, CPUAllocation (EstimatedTask a))
+  -> Bool
 canHandleTask config task (node, nodeAlloc) =
   total (taskMemoryCapped node.memory) <= node.memory &&
   total (taskMinThreads InitialRun)    <= node.cpus &&
@@ -95,7 +108,7 @@ canHandleTask config task (node, nodeAlloc) =
       Map.unionsWith (+) $
       map (taskLocalFileSizeMap config) thisAndNodeTasks
 
-getRuntime :: IsTask a => (a, NumCPUs) -> NominalDiffTime
+getRuntime :: (EstimatedTask a, NumCPUs) -> NominalDiffTime
 getRuntime (t, threads) = taskRuntimeEstimate t threads
 
 -- Now we iteratively refine the allocation by taking 1 CPU from
@@ -122,8 +135,11 @@ getRuntime (t, threads) = taskRuntimeEstimate t threads
 refineAllocation
   :: IsTask a
   => RunStage
-  -> [(a, NumCPUs)]
-  -> ([(a, NumCPUs)], [(a, NumCPUs)], [(a, NumCPUs)])
+  -> [(EstimatedTask a, NumCPUs)]
+  -> ( [(EstimatedTask a, NumCPUs)]
+     , [(EstimatedTask a, NumCPUs)]
+     , [(EstimatedTask a, NumCPUs)]
+     )
 refineAllocation stage allocInit = go queueInit [] [] []
   where
     queueInit = MinMaxQueue.fromListWith getRuntime allocInit
@@ -192,16 +208,19 @@ distributeTasksToNodes
   :: forall a k . (IsTask a, Ord k)
   => Config
   -> [Node]
-  -> Set a
-  -> (a -> k)
-  -> (Map Node (CPUAllocation a), [a])
+  -> Set (EstimatedTask a)
+  -> (EstimatedTask a -> k)
+  -> (Map Node (CPUAllocation (EstimatedTask a)), [EstimatedTask a])
 distributeTasksToNodes config nodes taskSet taskPriority =
   go sortedTaskList (Map.fromList [(n, Map.empty) | n <- nodes])
   where
     -- Sort from largest to lowest priority
     sortedTaskList = List.sortOn (Down . taskPriority) $ Set.toList taskSet
 
-    go :: [a] -> Map Node (CPUAllocation a) -> (Map Node (CPUAllocation a), [a])
+    go
+      :: [EstimatedTask a]
+      -> Map Node (CPUAllocation (EstimatedTask a))
+      -> (Map Node (CPUAllocation (EstimatedTask a)), [EstimatedTask a])
     go []                assignments = (assignments, [])
     go ts@(task : tasks) assignments =
       let
@@ -272,9 +291,9 @@ differences :: Num a => [a] -> [a]
 differences xs = zipWith (-) xs (drop 1 xs)
 
 integrateAlloc
-  :: (IsTask a, Real b)
+  :: Real b
   => (NumCPUs -> b)
-  -> CPUAllocation a
+  -> CPUAllocation (EstimatedTask a)
   -> NominalDiffTime
 integrateAlloc f alloc = sum $ zipWith (*) times weights
   where
@@ -283,7 +302,8 @@ integrateAlloc f alloc = sum $ zipWith (*) times weights
     weights = map (realToFrac . f) usedCpuCounts
     times = differences (map getRuntime sortedTasks <> [0])
 
-allocScore :: IsTask a => Double -> Node -> CPUAllocation a -> NominalDiffTime
+allocScore
+  :: Double -> Node -> CPUAllocation (EstimatedTask a) -> NominalDiffTime
 allocScore e0 node = integrateAlloc integrand
   where
     totalCpus = fromIntegral node.cpus
@@ -308,9 +328,9 @@ distributeTasksToNodesWithScores
   => Double
   -> Config
   -> [Node]
-  -> Set a
-  -> (a -> k)
-  -> (Map Node (CPUAllocation a), [a])
+  -> Set (EstimatedTask a)
+  -> (EstimatedTask a -> k)
+  -> (Map Node (CPUAllocation (EstimatedTask a)), [EstimatedTask a])
 distributeTasksToNodesWithScores e0 config nodes taskSet taskPriority =
   case (sortedTaskList, nodes) of
     ([], _)     -> (Map.empty, [])
@@ -330,7 +350,10 @@ distributeTasksToNodesWithScores e0 config nodes taskSet taskPriority =
     -- Sort from largest to lowest priority
     sortedTaskList = List.sortOn (Down . taskPriority) $ Set.toList taskSet
 
-    taskIncreasesScore :: a -> (Node, CPUAllocation a) -> Maybe (Node, CPUAllocation a)
+    taskIncreasesScore
+      :: EstimatedTask a
+      -> (Node, CPUAllocation (EstimatedTask a))
+      -> Maybe (Node, CPUAllocation (EstimatedTask a))
     taskIncreasesScore task (node, oldAlloc) =
       -- We want to fill all CPUs even if it doesn't increase the score.
       if newMaxTotalCpus <= node.cpus || newScore > oldScore
@@ -343,7 +366,10 @@ distributeTasksToNodesWithScores e0 config nodes taskSet taskPriority =
         -- Max number of CPUs that can be filled with the new allocation
         newMaxTotalCpus = sum $ map (taskMaxThreads InitialRun) $ Map.keys newAlloc
 
-    bestNodeForTask :: a -> Map Node (CPUAllocation a) -> Maybe (Node, CPUAllocation a)
+    bestNodeForTask
+      :: EstimatedTask a
+      -> Map Node (CPUAllocation (EstimatedTask a))
+      -> Maybe (Node, CPUAllocation (EstimatedTask a))
     bestNodeForTask task assignments = case goodNodes of
       newNodeAlloc : _ -> Just newNodeAlloc
       []               -> Nothing
@@ -354,7 +380,10 @@ distributeTasksToNodesWithScores e0 config nodes taskSet taskPriority =
           filter (canHandleTask config task) $
           Map.toList assignments
 
-    go :: [a] -> Map Node (CPUAllocation a) -> (Map Node (CPUAllocation a), [a])
+    go
+      :: [EstimatedTask a]
+      -> Map Node (CPUAllocation (EstimatedTask a))
+      -> (Map Node (CPUAllocation (EstimatedTask a)), [EstimatedTask a])
     go []                assignments = (assignments, [])
     go ts@(task : tasks) assignments
       | Just (node, newAlloc) <- bestNodeForTask task assignments =

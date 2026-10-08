@@ -14,12 +14,12 @@ import Data.Set                    qualified as Set
 import Data.Text                   (Text)
 import Data.Time.Clock             (NominalDiffTime)
 import Data.Typeable               (Typeable)
-import Debug.Trace                 qualified as Debug
 import Hyperion                    (Closure, Process)
 import Hyperion.Scheduler.FilePath (VirtualFilePath)
-import Hyperion.Scheduler.StatKey  (StatKey, TaskKeyFileInfo (..))
+import Hyperion.Scheduler.StatKey  (SizedTaskFile (..), StatKey, TaskFile (..),
+                                    withSize)
 import Hyperion.Scheduler.Types    (Estimate (..), MemorySize, NumCPUs,
-                                    defaultRuntimeEstimate, schedulingEstimate)
+                                    defaultRuntimeEstimate)
 import Hyperion.Scheduler.Util     (typeRepText)
 
 -- | We allow minThreads and maxThreads to depend on the stage of the
@@ -32,18 +32,20 @@ data RunStage = InitialRun | InProgressRun
 type Tag = Text
 
 -- Everything Scheduler needs
--- HasTaskHash + IsTask + CanRemoteRunTask + 'taskStatKey'
+-- HasTaskHash + IsTask + CanRemoteRunTask + 'taskShape'
 class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
 --  taskHash :: a -> ByteString
 --  default taskHash :: Binary a => a -> ByteString
 --  taskHash = hashBase64SafeByteString
 
-  -- | Estimated memory in bytes and runtime in seconds, with the provenance of
-  -- each. Ordinary tasks return 'estimatesFromModel', i.e. their own model;
-  -- only 'Hyperion.Scheduler.Task.WrappedTask.decorateTaskWithStats' ever
-  -- reports a figure measured from statistics.
-  taskResourceEstimates :: a -> ResourceEstimates
-  taskResourceEstimates _ = estimatesFromModel 0
+  -- | The task's files, stat key and models: everything about it that does
+  -- not depend on the sizes of its input files. They share expensive work, so
+  -- they are computed together, and a
+  -- 'Hyperion.Scheduler.Task.WrappedTask.WrappedTask' and an
+  -- 'Hyperion.Scheduler.Task.EstimatedTask.EstimatedTask' compute them once.
+  -- Its 'estimate' reuses them for each set of input sizes.
+  taskShape :: a -> TaskShape
+
   -- | Maximum possible threads for the task
   -- TODO: get rid of RunStage?
   taskMaxThreads :: RunStage -> a -> NumCPUs
@@ -51,16 +53,11 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   -- | Minimum possible threads for the task
   taskMinThreads :: RunStage -> a -> NumCPUs
   taskMinThreads _ _ = 1
-  -- | A label indicating the type of task. If Nothing, the task
-  -- will be ommitted from progress reports.
-  -- List of input files
-  taskInputs     :: a -> Set TaskKeyFileInfo
-  -- List of output files
-  taskOutputs    :: a -> Set TaskKeyFileInfo
-
   taskDefaultPriority   :: a -> Int
   taskDefaultPriority = const 0
 
+  -- | A label indicating the type of task. If Nothing, the task
+  -- will be ommitted from progress reports.
   taskTag :: a -> Maybe Tag
   taskTag = defaultTaskTag
 
@@ -79,23 +76,64 @@ class (Typeable a, ToJSON a, Eq a, Ord a) => IsTask a where
   taskPlaceholderKey :: Typeable k => a -> Maybe k
   taskPlaceholderKey _ = Nothing
 
-  -- | The serialized stat key under which this task's resource usage is
-  -- recorded and looked up. For a 'Hyperion.Scheduler.Task.Task.Task' this is
-  -- built from the task's own stat key, which is also what
-  -- 'taskMemoryEstimate' and 'taskRuntimeEstimate' are computed from.
-  --
-  -- 'Nothing' means the task has no identity in statistics: it is neither
-  -- recorded nor looked up, and its estimates are zero. That is the right
-  -- answer for tasks performing no computation (no-ops, placeholders), whose
-  -- only measurable quantity would be scheduler bookkeeping latency.
-  --
-  -- Defaults to 'Nothing', matching the default 'StatKeyOf' of 'Void' at the
-  -- 'Hyperion.Scheduler.Task.Task.TaskKey' level: no statistics unless a task
-  -- says otherwise. Defaulting instead to the whole task encoded as its own
-  -- stat key would put every task in a group of one, which no curve can be
-  -- fitted to.
-  taskStatKey :: a -> Maybe StatKey
-  taskStatKey _ = Nothing
+-- | The info, with its size, of each input file.
+type InputInfos = TaskFile -> SizedTaskFile
+
+-- | See 'taskShape'.
+data TaskShape = MkTaskShape
+  { inputFiles  :: Set TaskFile
+  , outputFiles :: Set TaskFile
+    -- | The serialized stat key under which this task's resource usage is
+    -- recorded and looked up. For a 'Hyperion.Scheduler.Task.Task.Task' this
+    -- is built from the task's own stat key, which is also what the estimates
+    -- are computed from.
+    --
+    -- 'Nothing' means the task has no identity in statistics: it is neither
+    -- recorded nor looked up, and its estimates are zero. That is the right
+    -- answer for tasks performing no computation (no-ops, placeholders),
+    -- whose only measurable quantity would be scheduler bookkeeping latency.
+    -- Setting it instead to the whole task encoded as its own stat key would
+    -- put every task in a group of one, which no curve can be fitted to.
+  , statKey     :: Maybe StatKey
+    -- | The estimation for the given infos of the input files: those produced
+    -- by other tasks in the map and those on disk (see
+    -- 'Hyperion.Scheduler.Task.EstimatedTaskMap.mkEstimatedTaskMap').
+  , estimate    :: InputInfos -> TaskEstimation
+  }
+
+-- | What a task's estimates are, given the sizes of its input files. See
+-- 'estimate'.
+data TaskEstimation = MkTaskEstimation
+  { inputs    :: Set SizedTaskFile
+  , outputs   :: Set SizedTaskFile
+    -- | Estimated memory in bytes and runtime in seconds, with the provenance
+    -- of each. Ordinary tasks give their own model (e.g.
+    -- 'estimatesFromModel'); only
+    -- 'Hyperion.Scheduler.Task.EstimatedTask.applyStats'
+    -- ever reports a figure measured from statistics.
+  , estimates :: ResourceEstimates
+  }
+
+-- | The shape of a task with no stat key: its files and zero estimates. The
+-- sizes of its output files are unknown (zero).
+filesOnlyShape
+  :: Set TaskFile  -- ^ inputs
+  -> Set TaskFile  -- ^ outputs
+  -> TaskShape
+filesOnlyShape inputs outputs = MkTaskShape
+  { inputFiles  = inputs
+  , outputFiles = outputs
+  , statKey     = Nothing
+  , estimate    = \known -> MkTaskEstimation
+      { inputs    = Set.map known inputs
+      , outputs   = Set.map (withSize (EstimatedByTask 0)) outputs
+      , estimates = estimatesFromModel 0
+      }
+  }
+
+-- | See 'TaskShape'.
+taskStatKey :: IsTask a => a -> Maybe StatKey
+taskStatKey = (.statKey) . taskShape
 
 -- | A task's memory and runtime estimates with their provenance.
 data ResourceEstimates = MkResourceEstimates
@@ -119,37 +157,11 @@ estimatesFromModel memory = MkResourceEstimates
   , runtime = EstimatedByTask (defaultRuntimeEstimate memory)
   }
 
--- | Estimated memory in bytes: the figure the task is scheduled on, whether
--- that is the task's own prediction or one measured from statistics.
-taskMemoryEstimate :: IsTask a => a -> MemorySize
-taskMemoryEstimate t = schedulingEstimate (taskResourceEstimates t).memory
-
--- | Estimated runtime in seconds, as a function of NumCPUs. See
--- 'taskMemoryEstimate'.
-taskRuntimeEstimate :: IsTask a => a -> NumCPUs -> NominalDiffTime
-taskRuntimeEstimate t = schedulingEstimate (taskResourceEstimates t).runtime
-
--- Returns min(maxMemory, taskMemory t)
-taskMemoryCapped :: IsTask a => MemorySize -> a -> MemorySize
-taskMemoryCapped maxMemory t =
-  let
-    memEstimate = taskMemoryEstimate t
-  in
-    if memEstimate > maxMemory
-    then Debug.trace (concat
-                       [ "WARNING: task memEstimate exceeds maxMemory."
-                       , " Replacing it with maxMemory. This might lead to a crash."
-                       , " memEstimate = ", show memEstimate
-                       , ", maxMemory = ", show maxMemory
-                       , ", task.tag = ", show (taskTag t)
-                       ]) maxMemory
-    else memEstimate
-
 taskInputPaths :: IsTask a => a -> Set VirtualFilePath
-taskInputPaths t = Set.map (.path) $ taskInputs t
+taskInputPaths t = Set.map (.path) (taskShape t).inputFiles
 
 taskOutputPaths :: IsTask a => a -> Set VirtualFilePath
-taskOutputPaths t = Set.map (.path) $ taskOutputs t
+taskOutputPaths t = Set.map (.path) (taskShape t).outputFiles
 
 taskHasClosure :: IsTask a => a -> Bool
 taskHasClosure = isJust . taskClosure
