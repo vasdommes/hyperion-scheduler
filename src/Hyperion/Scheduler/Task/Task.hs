@@ -21,8 +21,10 @@ import Bootstrap.Build                     (All, FList, FetchConfig (..),
                                             Fetches (..), FetchesAll,
                                             HasForce (..), Keys, KnownKeyVals,
                                             KnownLength (..), Length (..),
-                                            Variant (..), getDependencies,
-                                            headF, runFetchTAll, runMemoFetchT,
+                                            MultiList, Variant (..),
+                                            getDependencies, headF,
+                                            runFetchTAll,
+                                            runMemoFetchTWithDependencies,
                                             setsFromLists, tailF, toVariants,
                                             vAll)
 import Control.Distributed.Process         (Process)
@@ -331,9 +333,9 @@ type DepKeyVals k = ValueKeyVals (DepKeys k)
 --
 -- The computation is polymorphic in @f@, so that the scheduler can run it
 -- with 'Bootstrap.Build.GetDependencies' to find the dependencies, and with
--- 'Bootstrap.Build.runMemoFetchT' to compute the value. The latter reads each
--- dependency once, even if it is fetched many times. Values captured by the
--- result's 'Process' action stay in memory until it runs.
+-- 'Bootstrap.Build.runMemoFetchTWithDependencies' to compute the value. The
+-- latter reads each dependency once, even if it is fetched many times. Values
+-- captured by the result's 'Process' action stay in memory until it runs.
 --
 -- Define 'computeValue' for a pure computation, or 'computeValueM' to compute
 -- the value with effects in a 'Process' action run after the fetches.
@@ -402,12 +404,15 @@ computeAndSaveValue numCpus cfg key = case taskKind @k of
     pure $ case mapResolverForAllDict @(DepKeys k) of
       Dict -> do
         let resolver = MkMapResolver (Map.fromList (zip deps depPaths))
-        getVal <- runComputeValueM @k (computeValueM numCpus cfg key) resolver
+        getVal <- runComputeValueM @k depList
+          (computeValueM numCpus cfg key) resolver
         val <- getVal
         saveValueM key path val
     where
-      -- Same numCpus as the run below, so the resolver has every key it fetches.
-      deps = Set.toList (computeValueDependencies numCpus cfg key)
+      -- Computed once, for both the resolver and the run. Same numCpus as the
+      -- run, so the resolver has every key it fetches.
+      depList = computeValueDependencyList numCpus cfg key
+      deps = Set.toList (toVariants (setsFromLists depList))
   -- The 'getPath' call declares the placeholder's output (OutKey k ~ k),
   -- so its graph node has the same output path as the real task it stands in for.
   -- It should never execute: validateTaskMap rejects unreplaced placeholders.
@@ -443,24 +448,34 @@ valueFetchConfig (LSucc l) resolver =
 computeValueDependencies
   :: forall k . (TaskKey k, ComputeValue k)
   => NumCPUs -> TaskConfig k -> k -> Set (Variant (DepKeys k))
-computeValueDependencies numCpus cfg key = case valueKeyValsDict @(DepKeys k) of
-  Dict -> toVariants . setsFromLists $
-    getDependencies (Proxy @(DepKeyVals k)) (computeValueM numCpus cfg key)
+computeValueDependencies numCpus cfg key =
+  toVariants . setsFromLists $ computeValueDependencyList numCpus cfg key
+
+-- | Every fetch of 'computeValueM', with repeats.
+computeValueDependencyList
+  :: forall k . (TaskKey k, ComputeValue k)
+  => NumCPUs -> TaskConfig k -> k -> MultiList (DepKeys k)
+computeValueDependencyList numCpus cfg key =
+  case valueKeyValsDict @(DepKeys k) of
+    Dict ->
+      getDependencies (Proxy @(DepKeyVals k)) (computeValueM numCpus cfg key)
 
 -- | Run a 'ComputeValue' computation, reading the dependencies' values from
 -- the files that the resolver gives. Each value is read once (see
--- 'runMemoFetchT').
+-- 'runMemoFetchTWithDependencies'). The list must be the computation's
+-- 'computeValueDependencyList'.
 runComputeValueM
   :: forall k r a .
      ( TaskKey k
      , All (ValueSerializableM Process) (DepKeys k)
      , PathResolverForAll r (DepKeys k)
      )
-  => (forall f . (Applicative f, HasForce f, FetchesAll (DepKeyVals k) f) => f a)
+  => MultiList (DepKeys k)
+  -> (forall f . (Applicative f, HasForce f, FetchesAll (DepKeyVals k) f) => f a)
   -> r
   -> Process a
-runComputeValueM action resolver = case valueKeyValsDict @(DepKeys k) of
-  Dict -> runMemoFetchT @(DepKeyVals k) action $
+runComputeValueM deps action resolver = case valueKeyValsDict @(DepKeys k) of
+  Dict -> runMemoFetchTWithDependencies @(DepKeyVals k) deps action $
     valueFetchConfig (knownLength @(DepKeys k)) resolver
 
 outAndDependencies :: forall k . TaskKey k => TaskConfig k -> k -> FList Set (OutAndDepKeys k)

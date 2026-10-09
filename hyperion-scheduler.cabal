@@ -120,6 +120,7 @@ test-suite hyperion-scheduler-unit-test
   type: exitcode-stdio-1.0
   main-is: Main.hs
   other-modules:
+      Hyperion.Scheduler.Test.ComputeValueTest
       Hyperion.Scheduler.Test.Counted
       Hyperion.Scheduler.Test.EstimateTest
       Hyperion.Scheduler.Test.InputSummaryTest
@@ -133,6 +134,7 @@ test-suite hyperion-scheduler-unit-test
       aeson
     , base
     , binary
+    , bootstrap-build
     , containers
     , directory
     , exceptions
