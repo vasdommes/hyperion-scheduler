@@ -435,6 +435,18 @@ valueKeyValsDict = go (knownLength @ks)
     go (LSucc l') = case go l' of
       Dict -> Dict
 
+-- | Every key of an abstract list can be read and saved in @m@, by the
+-- 'MonadIO' instance of 'ValueSerializableM'.
+valueSerializableMDict
+  :: forall m ks . (MonadIO m, KnownLength ks, All ValueSerializable ks)
+  => Dict (All (ValueSerializableM m) ks)
+valueSerializableMDict = go (knownLength @ks)
+  where
+    go :: All ValueSerializable ks' => Length ks' -> Dict (All (ValueSerializableM m) ks')
+    go LZero      = Dict
+    go (LSucc l') = case go l' of
+      Dict -> Dict
+
 -- | Fetch each key's value from the file that the resolver gives for it.
 valueFetchConfig
   :: forall ks r m . (MonadIO m, All (ValueSerializableM m) ks, PathResolverForAll r ks)
