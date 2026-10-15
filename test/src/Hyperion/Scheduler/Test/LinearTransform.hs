@@ -47,9 +47,8 @@ import Hyperion.Scheduler        qualified as Scheduler
 import Hyperion.Scheduler.Config qualified as Scheduler
 import Hyperion.Scheduler.Task   (ComputeValue (..), DepKeys, FetchesKey,
                                   TaskKey (..), TaskKind (..),
-                                  ValueSerializable (..),
-                                  ValueSerializableM (..), ValueType, getPath,
-                                  mkTaskMap)
+                                  ValueSerializable (..), ValueType, getPath,
+                                  mkTaskMap, readValueM, saveValueM)
 import System.Directory.OsPath   (createDirectoryIfMissing, removePathForcibly)
 
 -- * The problem

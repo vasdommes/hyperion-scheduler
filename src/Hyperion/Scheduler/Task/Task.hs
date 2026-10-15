@@ -163,8 +163,8 @@ data TaskKind k where
   -- 'ValueSerializable'. This is 'taskKind''s default.
   ComputeValueTask
     :: ( ComputeValue k
-       , ValueSerializableM Process k
-       , All (ValueSerializableM Process) (DepKeys k)
+       , ValueSerializable k
+       , All ValueSerializable (DepKeys k)
        , OutKey k ~ k
        )
     => TaskKind k
@@ -232,8 +232,8 @@ class ( All Eq (DepKeys k)
   taskKind :: TaskKind k
   default taskKind
     :: ( ComputeValue k
-       , ValueSerializableM Process k
-       , All (ValueSerializableM Process) (DepKeys k)
+       , ValueSerializable k
+       , All ValueSerializable (DepKeys k)
        , OutKey k ~ k
        )
     => TaskKind k
@@ -365,13 +365,12 @@ class ValueSerializable k where
   default saveValue :: Binary (ValueType k) => k -> OsPath -> ValueType k -> IO ()
   saveValue _ = encodeBinaryFileAtomic
 
-class ValueSerializableM m k where
-  readValueM :: k -> OsPath -> m (ValueType k)
-  saveValueM :: k -> OsPath -> ValueType k -> m ()
+readValueM :: (MonadIO m, ValueSerializable k) => k -> OsPath -> m (ValueType k)
+readValueM key = liftIO . readValue key
 
-instance (MonadIO m, ValueSerializable k) => ValueSerializableM m k where
-  readValueM key = liftIO . readValue key
-  saveValueM key path = liftIO . saveValue key path
+saveValueM
+  :: (MonadIO m, ValueSerializable k) => k -> OsPath -> ValueType k -> m ()
+saveValueM key path = liftIO . saveValue key path
 
 type FetchesKey k = Fetches k (ValueType k)
 
@@ -435,21 +434,9 @@ valueKeyValsDict = go (knownLength @ks)
     go (LSucc l') = case go l' of
       Dict -> Dict
 
--- | Every key of an abstract list can be read and saved in @m@, by the
--- 'MonadIO' instance of 'ValueSerializableM'.
-valueSerializableMDict
-  :: forall m ks . (MonadIO m, KnownLength ks, All ValueSerializable ks)
-  => Dict (All (ValueSerializableM m) ks)
-valueSerializableMDict = go (knownLength @ks)
-  where
-    go :: All ValueSerializable ks' => Length ks' -> Dict (All (ValueSerializableM m) ks')
-    go LZero      = Dict
-    go (LSucc l') = case go l' of
-      Dict -> Dict
-
 -- | Fetch each key's value from the file that the resolver gives for it.
 valueFetchConfig
-  :: forall ks r m . (MonadIO m, All (ValueSerializableM m) ks, PathResolverForAll r ks)
+  :: forall ks r m . (MonadIO m, All ValueSerializable ks, PathResolverForAll r ks)
   => Length ks -> r -> FetchConfig m (ValueKeyVals ks)
 valueFetchConfig LZero _          = FetchNil
 valueFetchConfig (LSucc l) resolver =
@@ -479,7 +466,7 @@ computeValueDependencyList numCpus cfg key =
 runComputeValueM
   :: forall k r a .
      ( TaskKey k
-     , All (ValueSerializableM Process) (DepKeys k)
+     , All ValueSerializable (DepKeys k)
      , PathResolverForAll r (DepKeys k)
      )
   => MultiList (DepKeys k)
