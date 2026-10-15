@@ -46,9 +46,9 @@ import Hyperion.Scheduler        (IsFileStatKey (..), IsStatKey (..),
 import Hyperion.Scheduler        qualified as Scheduler
 import Hyperion.Scheduler.Config qualified as Scheduler
 import Hyperion.Scheduler.Task   (ComputeValue (..), DepKeys, FetchesKey,
-                                  TaskKey (..), TaskKind (..),
-                                  ValueSerializable (..), ValueType, getPath,
-                                  mkTaskMap, readValueM, saveValueM)
+                                  ReadValue, SaveValue, TaskKey (..),
+                                  TaskKind (..), ValueType, getPath, mkTaskMap,
+                                  readValueM, saveValueM)
 import System.Directory.OsPath   (createDirectoryIfMissing, removePathForcibly)
 
 -- * The problem
@@ -88,7 +88,7 @@ data MultiplyKey a = MkMultiplyKey
   , col        :: Int
   , ctx        :: a
   }
-  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ValueSerializable)
+  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ReadValue, SaveValue)
 
 instance (Typeable a, Static (Binary a)) => Static (Binary (MultiplyKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary a)
@@ -159,7 +159,7 @@ data VectorElementKey a = MkVectorElementKey
   , index      :: Int
   , ctx        :: a
   }
-  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ValueSerializable)
+  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ReadValue, SaveValue)
 
 instance (Typeable a, Static (Binary a)) => Static (Binary (VectorElementKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary a)
@@ -227,7 +227,7 @@ data VectorKey a = MkVectorKey
   , length     :: Int
   , ctx        :: a
   }
-  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ValueSerializable)
+  deriving (Eq, Ord, Show, Generic, Binary, ToJSON, ReadValue, SaveValue)
 
 instance (Typeable a, Static (Binary a)) => Static (Binary (VectorKey a)) where
   closureDict = static (\Dict -> Dict) `cAp` closureDict @(Binary a)

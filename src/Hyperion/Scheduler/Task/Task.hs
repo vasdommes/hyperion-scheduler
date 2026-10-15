@@ -159,12 +159,12 @@ type family DepKeys k :: [Type]
 -- instance that forgot to fetch its output path silently produced an empty
 -- 'outKeys' and was vacuously considered created).
 data TaskKind k where
-  -- | Compute the value with 'ComputeValue' and save it with
-  -- 'ValueSerializable'. This is 'taskKind''s default.
+  -- | Compute the value with 'ComputeValue' and save it with 'SaveValue'.
+  -- This is 'taskKind''s default.
   ComputeValueTask
     :: ( ComputeValue k
-       , ValueSerializable k
-       , All ValueSerializable (DepKeys k)
+       , SaveValue k
+       , All ReadValue (DepKeys k)
        , OutKey k ~ k
        )
     => TaskKind k
@@ -232,8 +232,8 @@ class ( All Eq (DepKeys k)
   taskKind :: TaskKind k
   default taskKind
     :: ( ComputeValue k
-       , ValueSerializable k
-       , All ValueSerializable (DepKeys k)
+       , SaveValue k
+       , All ReadValue (DepKeys k)
        , OutKey k ~ k
        )
     => TaskKind k
@@ -356,20 +356,24 @@ class ComputeValue k where
 
 type family ValueType k :: Type
 
-class ValueSerializable k where
+-- | Reads a key's value from its file. A 'ComputeValueTask' reads its
+-- dependencies with this.
+class ReadValue k where
   readValue :: k -> OsPath -> IO (ValueType k)
   default readValue :: Binary (ValueType k) => k -> OsPath -> IO (ValueType k)
   readValue _ path = Binary.decodeFile (OsString.toString path)
 
+-- | Saves a key's value to its file. A 'ComputeValueTask' saves its output
+-- with this.
+class SaveValue k where
   saveValue :: k -> OsPath -> ValueType k -> IO ()
   default saveValue :: Binary (ValueType k) => k -> OsPath -> ValueType k -> IO ()
   saveValue _ = encodeBinaryFileAtomic
 
-readValueM :: (MonadIO m, ValueSerializable k) => k -> OsPath -> m (ValueType k)
+readValueM :: (MonadIO m, ReadValue k) => k -> OsPath -> m (ValueType k)
 readValueM key = liftIO . readValue key
 
-saveValueM
-  :: (MonadIO m, ValueSerializable k) => k -> OsPath -> ValueType k -> m ()
+saveValueM :: (MonadIO m, SaveValue k) => k -> OsPath -> ValueType k -> m ()
 saveValueM key path = liftIO . saveValue key path
 
 type FetchesKey k = Fetches k (ValueType k)
@@ -436,7 +440,7 @@ valueKeyValsDict = go (knownLength @ks)
 
 -- | Fetch each key's value from the file that the resolver gives for it.
 valueFetchConfig
-  :: forall ks r m . (MonadIO m, All ValueSerializable ks, PathResolverForAll r ks)
+  :: forall ks r m . (MonadIO m, All ReadValue ks, PathResolverForAll r ks)
   => Length ks -> r -> FetchConfig m (ValueKeyVals ks)
 valueFetchConfig LZero _          = FetchNil
 valueFetchConfig (LSucc l) resolver =
@@ -466,7 +470,7 @@ computeValueDependencyList numCpus cfg key =
 runComputeValueM
   :: forall k r a .
      ( TaskKey k
-     , All ValueSerializable (DepKeys k)
+     , All ReadValue (DepKeys k)
      , PathResolverForAll r (DepKeys k)
      )
   => MultiList (DepKeys k)

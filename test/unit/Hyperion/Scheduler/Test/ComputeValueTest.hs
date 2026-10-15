@@ -21,9 +21,9 @@ import Hyperion.OsString               (fromString)
 import Hyperion.OsString               qualified as OsString
 import Hyperion.Scheduler.PathResolver (PathResolver (..))
 import Hyperion.Scheduler.StatKey      (ToFileStatKey)
-import Hyperion.Scheduler.Task.Task    (ComputeValue (..), DepKeys, Task (..),
-                                        TaskKey, ValueSerializable (..),
-                                        ValueType, computeAndWrite)
+import Hyperion.Scheduler.Task.Task    (ComputeValue (..), DepKeys,
+                                        ReadValue (..), SaveValue, Task (..),
+                                        TaskKey, ValueType, computeAndWrite)
 import Hyperion.Scheduler.Test.Counted (counted, newCounter, resetCounter)
 import System.Directory                (createDirectory, getTemporaryDirectory,
                                         removeDirectoryRecursive)
@@ -38,7 +38,7 @@ type instance ValueType InKey = Int
 
 instance ToFileStatKey InKey
 
-instance ValueSerializable InKey where
+instance ReadValue InKey where
   readValue _ path = do
     atomicModifyIORef' inputReads (\n -> (n + 1, ()))
     Binary.decodeFile (OsString.toString path)
@@ -52,7 +52,8 @@ type instance DepKeys SumKey = '[InKey]
 
 instance ToFileStatKey SumKey
 
-instance ValueSerializable SumKey
+instance ReadValue SumKey
+instance SaveValue SumKey
 
 instance TaskKey SumKey
 
@@ -103,7 +104,7 @@ runTest = do
   resetCounter inputReads
   runProcessLocal defaultHostNameStrategy $
     computeAndWrite Dict 1 (MkTask resolver () key)
-  value <- Binary.decodeFile @Int (OsString.toString (resolvePath resolver key))
+  value <- readValue key (resolvePath resolver key)
   numComputations <- readIORef computations
   numReads <- readIORef inputReads
   removeDirectoryRecursive dir
