@@ -41,12 +41,14 @@ library:
   - extra
   - file-io
   - hyperion
+  - hyperion-util
   - min-max-pqueue
   - monoidal-containers
   - mtl
   - os-string
   - pqueue
   - stm
+  - store
   - strict-concurrency
   - text
   - time
@@ -90,6 +92,8 @@ tests:
     - filepath
     - hyperion
     - hyperion-scheduler
+    - hyperion-util
+    - store
     - text
     - time
     ghc-options: -threaded

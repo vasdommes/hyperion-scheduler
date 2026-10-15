@@ -39,7 +39,6 @@ module Hyperion.Scheduler.Stats
   , readTaskStats
   , readTaskRecords
   , writeTaskStats
-  , encodeJsonFileAtomic
   ) where
 
 import Control.DeepSeq                (NFData, deepseq)
@@ -62,8 +61,7 @@ import Data.Time                      (UTCTime)
 import Data.Time.Clock                (NominalDiffTime)
 import GHC.Generics                   (Generic, Generically (..))
 import Hyperion.Log                   qualified as Log
-import Hyperion.OsPath                (OsPath, takeDirectory)
-import Hyperion.OsString              (fromString, toString)
+import Hyperion.OsPath                (OsPath)
 import Hyperion.Scheduler.FilePath    (VirtualFilePath)
 import Hyperion.Scheduler.StatKey     (EncodedSummary, FileStatKey,
                                        IsFileStatKey (..), IsStatKey (..),
@@ -74,10 +72,9 @@ import Hyperion.Scheduler.Task.IsTask (ResourceEstimates (..),
                                        TaskEstimation (..))
 import Hyperion.Scheduler.Types       (Estimate, FileSize (..), MemorySize (..),
                                        Node, NumCPUs)
-import Hyperion.Util                  (randomString)
+import Hyperion.Util.EncodeFile       (encodeJsonFileAtomic)
 import Prelude                        hiding (readFile, (^))
 import Prelude qualified
-import System.Directory.OsPath        (createDirectoryIfMissing, renameFile)
 import System.File.OsPath             (readFile)
 
 (^) :: Num a => a -> Int -> a
@@ -586,16 +583,3 @@ warnOnSingletonGroups (MkTaskAndFileStats (MkTaskStats taskStats) _)
     isSingleton (MkTaskResourceMap m) =
       sum (map trialCount (Map.elems m)) <= (1 :: Int)
     trialCount r = maybe 0 (.numTrials) r.runtime
-
--- | Write a json representation of 'x' to a temporary file, and then
--- move the temporary file into place.
---
--- TODO: This is a copy of a function in SDPB. Export the function or
--- relocate it.
-encodeJsonFileAtomic :: (MonadIO m, ToJSON a) => OsPath -> a -> m ()
-encodeJsonFileAtomic path x = liftIO $ do
-  salt <- randomString 6
-  let tmpPath = path <> "_" <> fromString salt
-  createDirectoryIfMissing True (takeDirectory path)
-  Aeson.encodeFile (toString tmpPath) x
-  renameFile tmpPath path

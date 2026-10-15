@@ -13,18 +13,17 @@ import Control.Exception               (AssertionFailed (..), IOException,
 import Control.Monad                   (unless)
 import Data.Aeson                      (ToJSON)
 import Data.Binary                     (Binary)
-import Data.Binary                     qualified as Binary
 import Data.IORef                      (IORef, atomicModifyIORef', readIORef)
 import Hyperion                        (Dict (..), defaultHostNameStrategy,
                                         runProcessLocal)
 import Hyperion.OsString               (fromString)
-import Hyperion.OsString               qualified as OsString
 import Hyperion.Scheduler.PathResolver (PathResolver (..))
 import Hyperion.Scheduler.StatKey      (ToFileStatKey)
 import Hyperion.Scheduler.Task.Task    (ComputeValue (..), DepKeys,
                                         ReadValue (..), SaveValue, Task (..),
                                         TaskKey, ValueType, computeAndWrite)
 import Hyperion.Scheduler.Test.Counted (counted, newCounter, resetCounter)
+import Hyperion.Util.EncodeFile        (decodeStoreFile, encodeStoreFileAtomic)
 import System.Directory                (createDirectory, getTemporaryDirectory,
                                         removeDirectoryRecursive)
 import System.FilePath                 ((</>))
@@ -41,7 +40,7 @@ instance ToFileStatKey InKey
 instance ReadValue InKey where
   readValue _ path = do
     atomicModifyIORef' inputReads (\n -> (n + 1, ()))
-    Binary.decodeFile (OsString.toString path)
+    decodeStoreFile path
 
 -- | The sum of inputs @1..n@, each fetched twice.
 newtype SumKey = MkSumKey Int
@@ -97,8 +96,8 @@ runTest = do
   () <$ try @IOException (removeDirectoryRecursive dir)
   createDirectory dir
   mapM_
-    (\i -> Binary.encodeFile
-      (OsString.toString (resolvePath resolver (MkInKey i))) (10 * i :: Int))
+    (\i -> encodeStoreFileAtomic
+      (resolvePath resolver (MkInKey i)) (10 * i :: Int))
     [1 .. 3]
   resetCounter computations
   resetCounter inputReads

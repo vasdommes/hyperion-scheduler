@@ -32,7 +32,6 @@ import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
 import Data.Aeson                          (ToJSON (..))
 import Data.Binary                         (Binary (..))
-import Data.Binary                         qualified as Binary
 import Data.Data                           (Proxy (..))
 import Data.Foldable.Extra                 (allM, traverse_)
 import Data.Functor                        (($>), (<&>))
@@ -41,13 +40,13 @@ import Data.Map.Strict                     qualified as Map
 import Data.Maybe                          (isJust)
 import Data.Set                            (Set)
 import Data.Set                            qualified as Set
+import Data.Store                          (Store)
 import Data.Text                           (Text)
 import Data.Typeable                       (cast, typeOf)
 import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
 import Hyperion.OsPath                     (OsPath)
-import Hyperion.OsString                   qualified as OsString
 import Hyperion.Scheduler.PathResolver     (MapResolver (..), PathResolver (..),
                                             PathResolverForAll,
                                             mapResolverForAllDict)
@@ -66,10 +65,11 @@ import Hyperion.Scheduler.Task.IsTask      (IsTask (..), Model (..),
                                             estimatesFromModel)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
-import Hyperion.Scheduler.Task.Util        (encodeBinaryFileAtomic)
 import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
 import Hyperion.Scheduler.TaskFiles        (MonadTaskFiles, doesTaskFileExist)
 import Hyperion.Scheduler.Types            (Estimate (..), NumCPUs)
+import Hyperion.Util.EncodeFile            (decodeStoreFile,
+                                            encodeStoreFileAtomic)
 import Type.Reflection                     (Typeable)
 
 type FetchesPath k = Fetches k OsPath
@@ -360,15 +360,16 @@ type family ValueType k :: Type
 -- dependencies with this.
 class ReadValue k where
   readValue :: k -> OsPath -> IO (ValueType k)
-  default readValue :: Binary (ValueType k) => k -> OsPath -> IO (ValueType k)
-  readValue _ path = Binary.decodeFile (OsString.toString path)
+  default readValue :: Store (ValueType k) => k -> OsPath -> IO (ValueType k)
+  readValue _ = decodeStoreFile
 
 -- | Saves a key's value to its file. A 'ComputeValueTask' saves its output
 -- with this.
 class SaveValue k where
   saveValue :: k -> OsPath -> ValueType k -> IO ()
-  default saveValue :: Binary (ValueType k) => k -> OsPath -> ValueType k -> IO ()
-  saveValue _ = encodeBinaryFileAtomic
+  default saveValue
+    :: Store (ValueType k) => k -> OsPath -> ValueType k -> IO ()
+  saveValue _ = encodeStoreFileAtomic
 
 readValueM :: (MonadIO m, ReadValue k) => k -> OsPath -> m (ValueType k)
 readValueM key = liftIO . readValue key

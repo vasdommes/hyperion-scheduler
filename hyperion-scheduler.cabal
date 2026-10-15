@@ -45,7 +45,6 @@ library
       Hyperion.Scheduler.Task.Task
       Hyperion.Scheduler.Task.TaskLink
       Hyperion.Scheduler.Task.TaskMap
-      Hyperion.Scheduler.Task.Util
       Hyperion.Scheduler.Task.WrappedTask
       Hyperion.Scheduler.TaskFiles
       Hyperion.Scheduler.TaskGraph
@@ -79,12 +78,14 @@ library
     , extra
     , file-io
     , hyperion
+    , hyperion-util
     , min-max-pqueue
     , monoidal-containers
     , mtl
     , os-string
     , pqueue
     , stm
+    , store
     , strict-concurrency
     , text
     , time
@@ -124,8 +125,10 @@ test-suite hyperion-scheduler-unit-test
       Hyperion.Scheduler.Test.Counted
       Hyperion.Scheduler.Test.EstimateTest
       Hyperion.Scheduler.Test.InputSummaryTest
+      Hyperion.Scheduler.Test.StoreFileTest
       Hyperion.Scheduler.Test.TaskFilesTest
       Hyperion.Scheduler.Test.TaskMapTest
+      Hyperion.Scheduler.Test.WriteFileAtomicTest
       Paths_hyperion_scheduler
   hs-source-dirs:
       test/unit
@@ -141,6 +144,8 @@ test-suite hyperion-scheduler-unit-test
     , filepath
     , hyperion
     , hyperion-scheduler
+    , hyperion-util
+    , store
     , text
     , time
   default-language: GHC2021
