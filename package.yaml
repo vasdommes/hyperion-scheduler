@@ -56,6 +56,17 @@ library:
   - vector
 
 executables:
+  hyperion-scheduler-stats:
+    main: Main.hs
+    source-dirs: app/stats
+    dependencies:
+    - base
+    - hyperion
+    - hyperion-scheduler
+    - optparse-applicative
+    ghc-options:
+    - -threaded
+    - -rtsopts
   hyperion-scheduler-test:
     main: Main.hs
     source-dirs: test/src

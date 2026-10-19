@@ -93,6 +93,20 @@ library
     , vector
   default-language: GHC2021
 
+executable hyperion-scheduler-stats
+  main-is: Main.hs
+  other-modules:
+      Paths_hyperion_scheduler
+  hs-source-dirs:
+      app/stats
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -O2 -Wunused-packages -Wno-x-partial -Werror=missing-fields -threaded -rtsopts
+  build-depends:
+      base
+    , hyperion
+    , hyperion-scheduler
+    , optparse-applicative
+  default-language: GHC2021
+
 executable hyperion-scheduler-test
   main-is: Main.hs
   other-modules:

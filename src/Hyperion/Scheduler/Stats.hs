@@ -39,6 +39,15 @@ module Hyperion.Scheduler.Stats
   , readTaskStats
   , readTaskRecords
   , writeTaskStats
+  , StatsFiles (..)
+  , noStats
+  , readStatsFiles
+  , listStatFiles
+  , uniqueStatFiles
+  , RunStatsFiles (..)
+  , timestampedRunStatsFiles
+  , writeRunStats
+  , mergeStatFiles
   ) where
 
 import Control.DeepSeq                (NFData, deepseq)
@@ -46,8 +55,11 @@ import Control.Monad.Catch            (Handler (..), catches)
 import Control.Monad.IO.Class         (MonadIO, liftIO)
 import Data.Aeson                     (AesonException, FromJSON, ToJSON)
 import Data.Aeson                     qualified as Aeson
+import Data.Binary                    (Binary)
 import Data.ByteString                qualified as B
+import Data.Containers.ListUtils      (nubOrd)
 import Data.Foldable                  (fold)
+import Data.List                      (sort)
 import Data.List.Extra                (maximumOn, minimumOn)
 import Data.List.NonEmpty             (NonEmpty (..), nonEmpty)
 import Data.List.NonEmpty             qualified as NonEmpty
@@ -59,9 +71,11 @@ import Data.Set                       (Set)
 import Data.Set                       qualified as Set
 import Data.Time                      (UTCTime)
 import Data.Time.Clock                (NominalDiffTime)
+import Data.Time.Format               (defaultTimeLocale, formatTime)
 import GHC.Generics                   (Generic, Generically (..))
 import Hyperion.Log                   qualified as Log
-import Hyperion.OsPath                (OsPath)
+import Hyperion.OsPath                (OsPath, (<.>), (</>))
+import Hyperion.OsString              (fromString)
 import Hyperion.Scheduler.FilePath    (VirtualFilePath)
 import Hyperion.Scheduler.StatKey     (EncodedSummary, FileStatKey,
                                        IsFileStatKey (..), IsStatKey (..),
@@ -73,8 +87,11 @@ import Hyperion.Scheduler.Task.IsTask (ResourceEstimates (..),
 import Hyperion.Scheduler.Types       (Estimate, FileSize (..), MemorySize (..),
                                        Node, NumCPUs)
 import Hyperion.Util.EncodeFile       (encodeJsonFileAtomic)
+import Hyperion.Util.ToPath           (hashBasePath)
 import Prelude                        hiding (readFile, (^))
 import Prelude qualified
+import System.Directory.OsPath        (canonicalizePath, doesDirectoryExist,
+                                       listDirectory)
 import System.File.OsPath             (readFile)
 
 (^) :: Num a => a -> Int -> a
@@ -563,6 +580,94 @@ readTaskStats statFiles = do
         Left e  -> Log.warn "Couldn't parse stats file" (file, e) >> pure mempty
         Right s -> pure s
       newStats `deepseq` go files (acc <> newStats)
+
+-- | Task statistics, and the stat files that hold them. Passing this from one
+-- run to the next uses each run's statistics without reading files again.
+data StatsFiles = MkStatsFiles
+  { stats :: TaskAndFileStats
+  , files :: [OsPath]
+  }
+
+-- | No statistics.
+noStats :: StatsFiles
+noStats = MkStatsFiles { stats = mempty, files = [] }
+
+-- | The given paths made canonical (absolute, with no @.@, @..@ or symbolic
+-- links), without duplicates, so that no file is read twice.
+uniqueStatFiles :: MonadIO m => [OsPath] -> m [OsPath]
+uniqueStatFiles = liftIO . fmap nubOrd . traverse canonicalizePath
+
+-- | Read the given stat files, each once (see 'uniqueStatFiles').
+readStatsFiles :: MonadIO m => [OsPath] -> m StatsFiles
+readStatsFiles paths = do
+  files <- uniqueStatFiles paths
+  Log.info "Reading task stats" files
+  stats <- readTaskStats files
+  pure MkStatsFiles { stats = stats, files = files }
+
+-- | The given paths, with each directory replaced by the files in it whose
+-- names satisfy the predicate, in name order, without duplicates (see
+-- 'uniqueStatFiles').
+listStatFiles :: (OsPath -> Bool) -> [OsPath] -> IO [OsPath]
+listStatFiles isStatFile paths = uniqueStatFiles . concat =<< traverse expand paths
+  where
+    expand path = do
+      isDir <- doesDirectoryExist path
+      if isDir
+        then map (path </>) . sort . filter isStatFile <$> listDirectory path
+        else pure [path]
+
+-- | Where 'writeRunStats' writes a run's task records and statistics.
+data RunStatsFiles = MkRunStatsFiles
+  { recordsFile :: OsPath
+  , statsFile   :: OsPath
+  }
+
+-- | A naming convention for 'RunStatsFiles': @task_records_<hash>_<time>.json@
+-- and @task_stats_<hash>_<time>.json@ in the given directory. The hash is of
+-- @name@ and the time is the given one, so that a later run of the same @name@
+-- does not overwrite the files.
+timestampedRunStatsFiles :: Binary a => OsPath -> a -> UTCTime -> RunStatsFiles
+timestampedRunStatsFiles dir name time = MkRunStatsFiles
+  { recordsFile = file "task_records"
+  , statsFile   = file "task_stats"
+  }
+  where
+    timeTag = fromString (formatTime defaultTimeLocale "%Y%m%dT%H%M%S%3Q" time)
+    file tag = dir </> hashBasePath tag name <> "_" <> timeTag <.> "json"
+
+-- | Write a run's task records and statistics, and add the statistics to the
+-- given ones. A run with no records writes nothing.
+writeRunStats
+  :: (MonadIO m, ToJSON a)
+  => RunStatsFiles -> StatsFiles -> [TaskRecord a] -> m StatsFiles
+writeRunStats runFiles old records
+  | null records = do
+      Log.text "No task records to write"
+      pure old
+  | otherwise = do
+      Log.info "Writing task records to file" runFiles.recordsFile
+      encodeJsonFileAtomic runFiles.recordsFile records
+      writeTaskStats runFiles.statsFile newStats
+      pure MkStatsFiles
+        { stats = newStats <> old.stats
+        , files = old.files <> [runFiles.statsFile]
+        }
+  where
+    newStats = foldMap recordToStats records
+
+-- | Merge the statistics in the given stat files, each once (see
+-- 'uniqueStatFiles'), into one file. Unlike 'readTaskStats', throws if a file
+-- cannot be read, and then writes nothing.
+mergeStatFiles :: MonadIO m => OsPath -> [OsPath] -> m ()
+mergeStatFiles out statFiles = do
+  files <- uniqueStatFiles statFiles
+  Log.info "Merging task stats" files
+  results <- liftIO $ traverse eitherReadFileStrict files
+  case [ (file, e) | (file, Left e) <- zip files results ] of
+    [] -> writeTaskStats out (mconcat [ stats | Right stats <- results ])
+    failed -> liftIO $ ioError $ userError $
+      "mergeStatFiles: cannot read stats files " <> show failed
 
 -- | A stat key exists to group comparable observations, so that a curve can be
 -- fitted to them. If almost every group holds a single observation, the key is
