@@ -18,7 +18,7 @@ import Control.Exception                        (AssertionFailed (..),
 import Control.Monad                            (unless)
 import Control.Monad.Catch                      (MonadThrow (..))
 import Data.Aeson                               (ToJSON)
-import Data.Binary                              (Binary)
+import Data.Binary                              (Binary, encode)
 import Data.Either                              (isLeft, isRight)
 import Data.IORef                               (IORef, readIORef)
 import Data.List.NonEmpty                       qualified as NonEmpty
@@ -419,6 +419,34 @@ testMissingInputIsRejected = do
   expect "inputs on disk are accepted" $
     isRight (onDisk (Map.fromList [(r, 3), (s, 5)]))
 
+-- | Two task types with the same bytes for the same name.
+data TwinTaskA = MkTwinTaskA String
+  deriving (Eq, Ord, Show, Generic, ToJSON, Binary)
+
+data TwinTaskB = MkTwinTaskB String
+  deriving (Eq, Ord, Show, Generic, ToJSON, Binary)
+
+instance IsTask TwinTaskA where
+  taskTag _ = Nothing
+  taskClosure _ = Nothing
+  taskShape _ = filesOnlyShape Set.empty Set.empty
+
+instance IsTask TwinTaskB where
+  taskTag _ = Nothing
+  taskClosure _ = Nothing
+  taskShape _ = filesOnlyShape Set.empty Set.empty
+
+-- | Tasks of different types are different, even with the same bytes, e.g.
+-- keys with a phantom precision.
+testWrappedTaskTypeIsHashed :: IO ()
+testWrappedTaskTypeIsHashed = do
+  expect "the twin tasks have the same bytes" $
+    encode (MkTwinTaskA "T") == encode (MkTwinTaskB "T")
+  expect "wrapped tasks of different types differ" $
+    wrapTask (MkTwinTaskA "T") /= wrapTask (MkTwinTaskB "T")
+  expect "wrapped tasks of one type with the same bytes are equal" $
+    wrapTask (MkTwinTaskA "T") == wrapTask (MkTwinTaskA "T")
+
 -- | A task with one output, counting how often its shape is built.
 data CountedTask = MkCountedTask String
   deriving (Eq, Ord, Show, Generic, ToJSON, Binary)
@@ -502,6 +530,7 @@ runTest = do
   testCycleIsRejected
   testMissingInputIsRejected
   testShapeIsCached
+  testWrappedTaskTypeIsHashed
   testPrunedInputIsValid
   testMissingEdgeIsInvalid
   testCorrectEdgeIsValid

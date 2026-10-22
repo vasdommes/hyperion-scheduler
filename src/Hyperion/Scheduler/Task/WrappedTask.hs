@@ -14,6 +14,7 @@ import Data.Aeson                     (ToJSON (..))
 import Data.Binary                    (Binary (..))
 import Data.BinaryHash                (hashBase64SafeByteString)
 import Data.ByteString                (ByteString)
+import Data.Typeable                  (typeOf, typeRepFingerprint)
 import Hyperion.Scheduler.Task.IsTask (IsTask (..), TaskShape)
 
 -- | A general container for an instance of IsTask and
@@ -65,9 +66,13 @@ instance IsTask WrappedTask where
   taskPlaceholderKey (MkWrappedTask { task = t }) = taskPlaceholderKey t
 
 -- | A smart constructor for a WrappedTask.
+--
+-- The hash includes the task's type: tasks of different types can have the
+-- same bytes, e.g. keys with a phantom precision. The type's fingerprint
+-- changes between builds, which is fine, since the hash is never saved.
 wrapTask :: (IsTask a, Binary a) => a -> WrappedTask
 wrapTask t = MkWrappedTask
   { task  = t
-  , hash  = hashBase64SafeByteString t
+  , hash  = hashBase64SafeByteString (typeRepFingerprint (typeOf t), t)
   , shape = taskShape t
   }
