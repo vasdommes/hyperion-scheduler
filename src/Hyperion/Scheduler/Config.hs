@@ -8,7 +8,6 @@ import Hyperion.Scheduler.Types (FileSize, MemorySize)
 data Config = MkConfig
   { nodeMemory           :: MemorySize -- ^ Total memory on the node
   , nodeLocalStorageSize :: FileSize
-  , localStoragePath     :: OsPath
-  , isLocalPath          :: OsPath -> Bool
+  , localStoragePath     :: OsPath -- ^ The node-local paths are those under it; none if empty
   , reportInterval       :: NominalDiffTime
   }

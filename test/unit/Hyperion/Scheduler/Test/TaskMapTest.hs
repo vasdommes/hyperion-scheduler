@@ -32,7 +32,8 @@ import GHC.Generics                             (Generic)
 import Hyperion.OsPath                          (OsPath)
 import Hyperion.OsString                        (fromString)
 import Hyperion.Scheduler.Config                (Config (..))
-import Hyperion.Scheduler.FilePath              (VirtualFilePath (..))
+import Hyperion.Scheduler.FilePath              (VirtualFilePath (..),
+                                                 isUnderLocalStorage)
 import Hyperion.Scheduler.StatKey               (FileStatKey,
                                                  IsFileStatKey (..),
                                                  SizedTaskFile (..),
@@ -509,7 +510,6 @@ testNodeLocalInputs = do
       { nodeMemory           = 0
       , nodeLocalStorageSize = 0
       , localStoragePath     = fromString "/local"
-      , isLocalPath          = (== local)
       , reportInterval       = 1
       }
     producer = testTask "P" [] [local]
@@ -523,8 +523,21 @@ testNodeLocalInputs = do
   expect "an input that is not node-local may come from disk" $
     valid (taskMapOf (testTask "D" [q] []))
 
+-- | A path is node-local when it is under the local storage path, compared
+-- by path components.
+testUnderLocalStorage :: IO ()
+testUnderLocalStorage = do
+  let under root path = isUnderLocalStorage (fromString root) (fromString path)
+  expect "a file under the local storage is local" $ under "/scratch/u/job_1" "/scratch/u/job_1/x"
+  expect "the local storage itself is local" $ under "/scratch/u/job_1/" "/scratch/u/job_1"
+  expect "a non-normalised path under it is local" $ under "/scratch/u/job_1" "/scratch//u/./job_1/x"
+  expect "a sibling with a longer name is not local" $ not $ under "/scratch/u/job_1" "/scratch/u/job_12/x"
+  expect "a parent is not local" $ not $ under "/scratch/u/job_1" "/scratch/u"
+  expect "an empty local storage path contains nothing" $ not $ under "" "/scratch/u/job_1/x"
+
 runTest :: IO ()
 runTest = do
+  testUnderLocalStorage
   testNodeLocalInputs
   testInputSizes
   testCycleIsRejected

@@ -96,10 +96,11 @@ import GHC.Clock                                   (getMonotonicTimeNSec)
 import GHC.Generics                                (Generic)
 import Hyperion                                    hiding (Service)
 import Hyperion.Log                                qualified as Log
-import Hyperion.OsPath                             (OsPath, normalise)
-import Hyperion.OsString                           (isPrefixOf, toString)
+import Hyperion.OsPath                             (OsPath)
+import Hyperion.OsString                           (toString)
 import Hyperion.Scheduler.FilePath                 (ClusterFilePath (..),
                                                     VirtualFilePath (..),
+                                                    isUnderLocalStorage,
                                                     toVirtualFilePath)
 import Hyperion.Scheduler.FileService.FileSender   (FileSender,
                                                     FileSenders (..), TimeStamp)
@@ -152,14 +153,13 @@ data NodeLocalFileManagerConfig = MkNodeLocalFileManagerConfig
 instance Static (Binary NodeLocalFileManagerConfig) where
   closureDict = static Dict
 
--- TODO this duplicates Util.isNodeLocal
--- Config contains (non-serializable) function isLocalPath,
--- so we cannot reuse it on different node.
 isNodeLocal :: NodeLocalFileManagerConfig -> OsPath -> Bool
-isNodeLocal config path = config.localStoragePath `isPrefixOf` normalise path
+isNodeLocal config = isUnderLocalStorage config.localStoragePath
 
 isNodeLocalV :: NodeLocalFileManagerConfig -> VirtualFilePath -> Bool
-isNodeLocalV config (VirtualFilePath path) = isNodeLocal config path
+isNodeLocalV config = \(VirtualFilePath path) -> isLocal path
+  where
+    isLocal = isNodeLocal config
 
 fetchFiles :: NodeLocalFileManager -> Set ClusterFilePath -> [ReusableWorker] -> Process Response
 fetchFiles manager files workers = do

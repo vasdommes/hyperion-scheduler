@@ -8,10 +8,11 @@
 module Hyperion.Scheduler.FilePath where
 
 import Data.Binary               (Binary)
+import Data.List                 (isPrefixOf)
 import GHC.Generics              (Generic)
 import Hyperion                  (Dict (..), Static, WorkerAddr (..),
                                   closureDict)
-import Hyperion.OsPath           (OsPath)
+import Hyperion.OsPath           (OsPath, normalise, splitDirectories)
 import Hyperion.OsString         (OsString, toString)
 import Hyperion.Scheduler.Config (Config (..))
 
@@ -50,7 +51,22 @@ toClusterFilePath config node vp@(VirtualFilePath p)
 
 -- | Check if the file path is node-local or global.
 isNodeLocal :: Config -> VirtualFilePath -> Bool
-isNodeLocal config (VirtualFilePath path) = config.isLocalPath path
+isNodeLocal config = \(VirtualFilePath path) -> isLocal path
+  where
+    isLocal = isLocalPath config
+
+isLocalPath :: Config -> OsPath -> Bool
+isLocalPath config = isUnderLocalStorage config.localStoragePath
+
+-- | Whether the path is under the given local storage path. The master and
+-- the nodes use this same test. An empty local storage path contains no
+-- paths. The storage path is split once for each partial application.
+isUnderLocalStorage :: OsPath -> OsPath -> Bool
+isUnderLocalStorage localStoragePath
+  | null root = const False
+  | otherwise = \path -> root `isPrefixOf` splitDirectories (normalise path)
+  where
+    root = splitDirectories (normalise localStoragePath)
 
 getAddr :: WorkerAddr -> OsString
 getAddr (LocalHost a)  = a

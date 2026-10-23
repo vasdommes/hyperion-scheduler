@@ -19,8 +19,8 @@ import Hyperion                  (Dict (..), HostNameStrategy (..),
                                   HyperionStaticConfig (..), Job, Static (..),
                                   defaultHyperionConfig,
                                   defaultHyperionStaticConfig)
-import Hyperion.OsPath           (OsPath, normalise, (</>))
-import Hyperion.OsString         (fromString, isPrefixOf)
+import Hyperion.OsPath           (OsPath, (</>))
+import Hyperion.OsString         (fromString)
 import Hyperion.Scheduler.Config qualified as Scheduler
 import Hyperion.Slurm            (SbatchOptions (..))
 import Hyperion.Slurm            qualified as Slurm
@@ -118,7 +118,6 @@ getSchedulerConfig = \case
       { nodeMemory           = 240 * 1024 * 1024 * 1024
       , nodeLocalStorageSize = 900 * 1000 * 1000 * 1000
       , localStoragePath     = localStoragePath
-      , isLocalPath          = isPrefixOf localStoragePath . normalise
       , reportInterval       = 10
       }
 
@@ -132,6 +131,5 @@ localSchedulerConfig localStoragePath = Scheduler.MkConfig
   { nodeMemory           = 4 * 1024 * 1024 * 1024
   , nodeLocalStorageSize = 1024 * 1024 * 1024
   , localStoragePath     = localStoragePath
-  , isLocalPath          = isPrefixOf localStoragePath . normalise
   , reportInterval       = 5
   }
