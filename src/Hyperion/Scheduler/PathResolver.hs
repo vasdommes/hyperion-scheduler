@@ -40,7 +40,10 @@ instance PathResolver r Void where
   resolvePath _ = absurd
 
 
-instance Typeable r => Static (PathResolver r Void) where
+-- | Incoherent, so that code with an abstract resolver can use it although a
+-- resolver-specific instance, such as the one of 'PathResolverWithStrategy',
+-- might also match: every dictionary for 'Void' is the same.
+instance {-# INCOHERENT #-} Typeable r => Static (PathResolver r Void) where
   closureDict = static Dict
 
 -- | Resolve paths from a precomputed map, e.g. of a task's
