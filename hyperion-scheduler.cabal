@@ -24,6 +24,7 @@ library
       Hyperion.Scheduler.FileService.NodeLocalFileManager
       Hyperion.Scheduler.FileService.RetryTimeout
       Hyperion.Scheduler.PathResolver
+      Hyperion.Scheduler.PathResolver.StorageStrategy
       Hyperion.Scheduler.RemoteUtil
       Hyperion.Scheduler.ReusableWorker
       Hyperion.Scheduler.RunTasks
@@ -139,6 +140,7 @@ test-suite hyperion-scheduler-unit-test
       Hyperion.Scheduler.Test.Counted
       Hyperion.Scheduler.Test.EstimateTest
       Hyperion.Scheduler.Test.InputSummaryTest
+      Hyperion.Scheduler.Test.StorageStrategyTest
       Hyperion.Scheduler.Test.StoreFileTest
       Hyperion.Scheduler.Test.TaskFilesTest
       Hyperion.Scheduler.Test.TaskMapTest
