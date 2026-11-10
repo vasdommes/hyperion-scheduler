@@ -32,6 +32,7 @@
 module Hyperion.Scheduler.FileService.NodeLocalFileManager
   ( NodeLocalFileManager (..)
   , NodeLocalFileManagers (..)
+  , fileManagerProcesses
   , NodeLocalFileManagerConfig (..)
   , Response(..)
   , withNodeLocalFileManagers
@@ -50,9 +51,11 @@ import Control.Concurrent.STM                      (STM, TQueue, TVar,
                                                     newTVarIO, readTQueue,
                                                     readTVar, readTVarIO, retry,
                                                     writeTQueue, writeTVar)
-import Control.Distributed.Process                 (ProcessId, SendPort,
-                                                    getSelfNode, getSelfPid,
-                                                    link, newChan, receiveChan,
+import Control.Distributed.Process                 (ProcessId,
+                                                    ProcessLinkException (..),
+                                                    SendPort, getSelfNode,
+                                                    getSelfPid, link, newChan,
+                                                    processNodeId, receiveChan,
                                                     sendChan, spawnLocal,
                                                     unlink)
 import Control.Distributed.Process.Async           (AsyncResult (..),
@@ -69,8 +72,8 @@ import Control.Distributed.Process.ManagedProcess  (StatelessHandler,
 import Control.Monad                               (filterM, forM, forever,
                                                     guard, when)
 import Control.Monad.Catch                         (SomeException, bracket,
-                                                    bracket_, finally, try,
-                                                    tryJust)
+                                                    bracket_, catch, finally,
+                                                    try, tryJust)
 import Control.Monad.IO.Class                      (MonadIO, liftIO)
 import Control.Monad.Trans                         (lift)
 import Data.Binary                                 (Binary)
@@ -111,6 +114,8 @@ import Hyperion.Scheduler.RemoteUtil               (RequestType, ResponseType,
                                                     Service (..),
                                                     StartupResponseType,
                                                     getServiceProcessId,
+                                                    awaitProcessesEnd,
+                                                    startAllOrNone,
                                                     startRemoteService)
 import Hyperion.Scheduler.ReusableWorker           (ReusableWorker (..),
                                                     getNodeId,
@@ -138,6 +143,12 @@ data NodeLocalFileManager = NodeLocalFileManager
 
 data NodeLocalFileManagers = NodeLocalFileManagers (Map WorkerAddr NodeLocalFileManager)
   deriving(Generic, Binary)
+
+-- | The managers' processes, named for error messages.
+fileManagerProcesses :: NodeLocalFileManagers -> [(String, ProcessId)]
+fileManagerProcesses (NodeLocalFileManagers managers) =
+  [ ("NodeLocalFileManager on " <> show node, manager.pid)
+  | (node, manager) <- Map.toList managers ]
 
 data NodeLocalFileManagerConfig = MkNodeLocalFileManagerConfig
   { retryPolicy                :: RetryTimeoutPolicy
@@ -222,15 +233,19 @@ withNodeLocalFileManagers
   -> [(WorkerAddr, NodeLocalFileManagerConfig)]
   -> (NodeLocalFileManagers -> Job a)
   -> Job a
-withNodeLocalFileManagers fileSenders nodesConfig = bracket acquire release where
+withNodeLocalFileManagers fileSenders nodesConfig go = bracket acquire release (go . fst) where
   acquire = do
-    managers <- forM nodesConfig $ \(node, config) -> do
-      manager <- startFileManager config fileSenders node
-      return (node, manager)
-    return $ NodeLocalFileManagers $ Map.fromList managers
+    managers <- startAllOrNone
+      (\(node, config) -> do
+        (manager, launching) <- startFileManager config fileSenders node
+        return ((node, manager), launching))
+      (\((_, manager), launching) -> shutdown' manager >> lift (awaitProcessesEnd [launching]))
+      nodesConfig
+    return (NodeLocalFileManagers $ Map.fromList $ map fst managers, map snd managers)
 
-  release (NodeLocalFileManagers managerMap) = do
+  release (NodeLocalFileManagers managerMap, launching) = do
     mapM_ shutdown' $ Map.elems managerMap
+    lift $ awaitProcessesEnd launching
 
   shutdown' manager = lift $ shutdown manager.pid
 
@@ -301,7 +316,7 @@ sendRequestAndGetResponse manager request = do
   cast manager.pid $ request responseSendPort
   receiveChan responseReceivePort
 
-startFileManager :: NodeLocalFileManagerConfig -> FileSenders -> WorkerAddr -> Job NodeLocalFileManager
+startFileManager :: NodeLocalFileManagerConfig -> FileSenders -> WorkerAddr -> Job (NodeLocalFileManager, ProcessId)
 startFileManager config fileSenders node = do
   let
     getClosure startupResponseSendPort =
@@ -310,8 +325,8 @@ startFileManager config fileSenders node = do
       `cAp` cPure fileSenders
       `cAp` cPure startupResponseSendPort
   Log.info "Start remote NodeLocalFileManager" node
-  pid <- startRemoteService @NodeLocalFileManager node getClosure
-  return $ NodeLocalFileManager config node pid
+  (pid, launching) <- startRemoteService @NodeLocalFileManager "NodeLocalFileManager" node getClosure
+  return (NodeLocalFileManager config node pid, launching)
 
 -- Statistics
 
@@ -1120,7 +1135,13 @@ downloadNodeLoop fileSender config activeDownloadRequestsVar queue = do
 
     doDownload :: TimeStamp -> String -> OsPath -> TWorkerPool -> TVar (Maybe DownloadFileResult) -> Process ()
     doDownload timeStamp description filePath workerPool resVar = do
-      res <- withAnyWorker workerPool $ downloadOnWorker timeStamp description filePath
+      -- A dead ReusableWorker reaches us through the link in withAnyWorker. The waiter on resVar has no other way
+      -- to learn of it, so answer with DownloadError: without this the fetch is never answered and the run hangs silently.
+      res <- withAnyWorker workerPool (downloadOnWorker timeStamp description filePath)
+        `catch` \(ProcessLinkException pid reason) -> do
+          Log.err $ description <> " failed: linked process " <> show pid <> " on " <> show (processNodeId pid)
+            <> " was lost (a ReusableWorker, unless the run is already shutting down): " <> show reason
+          pure DownloadError
       liftIO $ atomically $ writeTVar resVar $ Just res
 
     checkIsLess countVar maybeMaxCount = case maybeMaxCount of
