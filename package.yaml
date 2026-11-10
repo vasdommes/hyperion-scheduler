@@ -30,6 +30,7 @@ library:
   - bytestring
   - concurrency
   - containers
+  - crypton
   - deepseq
   - directory
   - disk-free-space
@@ -42,6 +43,7 @@ library:
   - file-io
   - hyperion
   - hyperion-util
+  - memory
   - min-max-pqueue
   - monoidal-containers
   - mtl
@@ -98,6 +100,7 @@ tests:
     - base
     - binary
     - bootstrap-build
+    - bytestring
     - containers
     - directory
     - exceptions
@@ -105,7 +108,9 @@ tests:
     - hyperion
     - hyperion-scheduler
     - hyperion-util
+    - mtl
     - store
     - text
     - time
+    - unix
     ghc-options: -threaded

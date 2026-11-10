@@ -36,7 +36,7 @@ module Hyperion.Scheduler.WorkerPool where
 import Control.Concurrent.MVar.Strict     (MVar, modifyMVar_, newMVar, putMVar,
                                            readMVar, takeMVar, tryPutMVar)
 import Control.DeepSeq                    (NFData)
-import Control.Monad                      (forM, replicateM, when)
+import Control.Monad                      (forM, replicateM, unless, when)
 import Control.Monad.Catch                (MonadMask, bracket, bracketOnError)
 import Control.Monad.Reader               (asks)
 import Control.Monad.Trans                (MonadIO, lift, liftIO)
@@ -58,13 +58,21 @@ import Hyperion.OsString                  (OsString, fromString)
 import Hyperion.Scheduler.ConcurrentQueue (ConcurrentQueue, flushQueue,
                                            newQueue, readQueue, writeQueue)
 import Hyperion.Scheduler.FilePath        (getAddr)
-import Hyperion.Scheduler.NodeSupervisor  (NodeSupervisor, runOnNodeSupervisor,
-                                           startNodeSupervisor,
+import Hyperion.Scheduler.NodeSupervisor  (NodeSlots (..), NodeSupervisor,
+                                           StartedSupervisor (..),
+                                           runOnNodeSupervisor,
+                                           startNodeSupervisors,
                                            stopNodeSupervisor)
 import Hyperion.Scheduler.ReusableWorker  (ReusableWorker (..),
                                            deleteReusableWorker,
                                            runOnReusableWorker,
                                            spawnRemoteReusableWorker)
+import Hyperion.Scheduler.TaskLaunch      (StagingReport (..),
+                                           StagingSummary (..), TaskLaunch,
+                                           TaskLaunchError (..),
+                                           concreteTaskLaunch,
+                                           isDefaultTaskLaunch,
+                                           validateTaskLaunch)
 import Hyperion.Scheduler.Types           (Node (..))
 import Hyperion.Util                      (sanitizeFileString)
 import System.Environment                 (lookupEnv)
@@ -179,14 +187,13 @@ getLogPath logDir wId = logDir </> wId' <.> "log" where
   -- TODO: check that different nodes have different paths?
   wId' = sanitizeFileString $ workerCpuIdToString wId
 
-newNodeWorkerPool :: WorkerAddr -> Int -> OsPath -> Job NodeWorkerPool
-newNodeWorkerPool addr maxWorkers logDir = do
+nodeWorkerIds :: WorkerAddr -> Int -> [WorkerCpuId]
+nodeWorkerIds addr maxWorkers = map (WorkerCpuId addr) [0 .. maxWorkers - 1]
+
+newNodeWorkerPool :: WorkerAddr -> Int -> OsPath -> Maybe NodeSupervisor -> Job NodeWorkerPool
+newNodeWorkerPool addr maxWorkers logDir supervisor = do
   let
-    ids = map (WorkerCpuId addr) [0 .. maxWorkers - 1]
-  useSupervisor <- liftIO $ (/= Just "0") <$> lookupEnv nodeSupervisorsVar
-  supervisor <- if useSupervisor
-    then Just <$> startNodeSupervisor addr (map (getLogPath logDir) ids)
-    else pure Nothing
+    ids = nodeWorkerIds addr maxWorkers
   workerMap <- fmap Map.fromList $ forM ids $ \w -> do
     tWorker <- newTWorker w (getLogPath logDir w) supervisor
     return (w, tWorker)
@@ -221,23 +228,59 @@ data WorkerPool = WorkerPool
   , logDir  :: OsPath
   }
 
-newWorkerPool :: [Node] -> Job WorkerPool
-newWorkerPool nodes = do
+newWorkerPool :: TaskLaunch -> [Node] -> Job WorkerPool
+newWorkerPool launch nodes = do
   -- 'Log.getLogFile' is unset when logs go to stderr, e.g. under 'runJobLocal'.
   programLogDir <- asks ((.programLogDir) . jobProgramInfo)
   maybeLogFile <- Log.getLogFile
   let logDir = maybe (programLogDir </> "workers") dropExtension maybeLogFile
+  supervisors <- startSupervisors launch logDir nodes
   nodeMap <- fmap Map.fromList $
-    forM nodes $ \node -> do
-      pool <- newNodeWorkerPool node.address node.cpus logDir
+    forM (zip nodes supervisors) $ \(node, supervisor) -> do
+      pool <- newNodeWorkerPool node.address node.cpus logDir supervisor
       return (node.address, pool)
   return $ WorkerPool nodeMap logDir
 
-withWorkerPool :: [Node] -> (WorkerPool -> Job a) -> Job a
-withWorkerPool nodes go = bracket acquire release go' where
+-- | Stop the run if the task launch configuration can't work.
+checkTaskLaunch :: TaskLaunch -> Job ()
+checkTaskLaunch launch = do
+  useSupervisor <- liftIO supervisorsEnabled
+  let errors = validateTaskLaunch launch
+        <> [ NeedsNodeSupervisors | not useSupervisor, not (isDefaultTaskLaunch launch) ]
+  unless (null errors) $
+    Log.throwError $ "Invalid task launch configuration: " <> show errors
+
+supervisorsEnabled :: IO Bool
+supervisorsEnabled = (/= Just "0") <$> lookupEnv nodeSupervisorsVar
+
+-- | One supervisor per node, started all at once, or none if they are turned
+-- off. Checks that every node staged the same programs: if not, stops them.
+startSupervisors :: TaskLaunch -> OsPath -> [Node] -> Job [Maybe NodeSupervisor]
+startSupervisors launch logDir nodes = do
+  useSupervisor <- liftIO supervisorsEnabled
+  if not useSupervisor
+    then pure (map (const Nothing) nodes)
+    else do
+      nodeLaunch <- liftIO $ concreteTaskLaunch launch
+      started <- startNodeSupervisors nodeLaunch
+        [ NodeSlots node.address (map (getLogPath logDir) (nodeWorkerIds node.address node.cpus))
+        | node <- nodes ]
+      let
+        reports = [ (s.address, report) | s <- started, Just report <- [s.staging] ]
+        hashes = Set.fromList [ report.summary.manifestHash | (_, report) <- reports ]
+      when (Set.size hashes > 1) $ do
+        lift $ mapM_ (\s -> stopNodeSupervisor s.supervisor) started
+        Log.throwError $ "Nodes staged different programs: " <> show reports
+      case reports of
+        (_, report) : _ -> Log.info "Every node staged the same programs" report.summary
+        []              -> pure ()
+      pure (map (Just . (.supervisor)) started)
+
+withWorkerPool :: TaskLaunch -> [Node] -> (WorkerPool -> Job a) -> Job a
+withWorkerPool launch nodes go = bracket acquire release go' where
   acquire = do
     startTime <- liftIO getMonotonicTimeNSec
-    pool <- newWorkerPool nodes
+    pool <- newWorkerPool launch nodes
     return (startTime, pool)
 
   release :: (TimeNanoSec, WorkerPool) -> Job ()
