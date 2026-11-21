@@ -10,24 +10,31 @@
 -- regular files, never directories.
 module Hyperion.Scheduler.TaskFiles where
 
-import Control.Exception              (IOException, throwIO, try)
+import Control.Exception              (throwIO)
 import Control.Monad.Catch            (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class         (MonadIO, liftIO)
 import Control.Monad.Reader           (ReaderT, ask, runReaderT)
 import Control.Monad.Trans            (MonadTrans (..))
+import Data.ByteString.Short          (useAsCString)
 import Data.IORef                     (IORef, atomicModifyIORef', newIORef,
                                        readIORef)
+import Data.Int                       (Int64)
 import Data.Map.Strict                (Map)
 import Data.Map.Strict                qualified as Map
 import Data.Maybe                     (isJust)
+import Foreign.C.Error                (errnoToIOError, getErrno)
+import Foreign.C.String               (CString)
+import Foreign.C.Types                (CInt (..))
+import Foreign.Marshal.Alloc          (alloca)
+import Foreign.Ptr                    (Ptr)
+import Foreign.Storable               (peek)
 import Hyperion                       (Dict (..), Static (..))
 import Hyperion.OsPath                (OsPath)
 import Hyperion.Scheduler.Config      (Config)
 import Hyperion.Scheduler.FilePath    (isLocalPath)
 import Hyperion.Scheduler.Types       (FileSize)
 import System.IO.Error                (isDoesNotExistError)
-import System.OsString.Internal.Types (OsString (..))
-import System.Posix.Files.PosixString qualified as Posix
+import System.OsString.Internal.Types (OsString (..), PosixString (..))
 
 class Monad m => MonadTaskFiles m where
   -- | The size of the regular file at the path, 'Nothing' if nothing is
@@ -38,18 +45,27 @@ class Monad m => MonadTaskFiles m where
 doesTaskFileExist :: MonadTaskFiles m => OsPath -> m Bool
 doesTaskFileExist = fmap isJust . taskFileSize
 
--- | 'taskFileSize' with one stat call, following symlinks.
+-- | 'taskFileSize' with one statx call, following symlinks. The call need not
+-- reach the servers that hold the file's data (@AT_STATX_DONT_SYNC@, see
+-- @cbits/task_file_size.c@): on Lustre, a plain stat fetches the size from
+-- them, which cost 10-70 ms a file on Expanse's scratch, and minutes for the
+-- thousands of files a task map checks (bootstrap-compute #1344). Existence and
+-- type are exact; the size is the file's size at its last close.
 statTaskFile :: OsPath -> IO (Maybe FileSize)
 statTaskFile path =
-  try @IOException (Posix.getFileStatus (getOsString path)) >>= \case
-    Left e
-      | isDoesNotExistError e -> pure Nothing
-      | otherwise             -> throwIO e
-    Right status
-      | Posix.isRegularFile status ->
-          pure $ Just $ fromIntegral $ Posix.fileSize status
-      | otherwise ->
-          ioError $ userError $ "Task file is not a regular file: " <> show path
+  useAsCString (getPosixString (getOsString path)) $ \cPath ->
+  alloca $ \sizePtr -> do
+    r <- c_taskFileSize cPath sizePtr
+    case r of
+      1 -> Just . fromIntegral <$> peek sizePtr
+      0 -> ioError $ userError $ "Task file is not a regular file: " <> show path
+      _ -> do
+        errno <- getErrno
+        let e = errnoToIOError "statTaskFile" errno Nothing (Just (show path))
+        if isDoesNotExistError e then pure Nothing else throwIO e
+
+foreign import ccall safe "hyperion_scheduler_task_file_size"
+  c_taskFileSize :: CString -> Ptr Int64 -> IO CInt
 
 -- | Task files as the scheduler sees them while building a task map: each path
 -- is stat'ed once, and node-local paths are absent. Such a file from before

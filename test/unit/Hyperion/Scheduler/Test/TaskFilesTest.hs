@@ -1,5 +1,6 @@
--- | What 'statTaskFile' reports for a regular file, a missing path and a
--- directory, and what 'runTaskFilesWith' remembers and treats as absent.
+-- | What 'statTaskFile' reports for a regular file, an empty one, a missing
+-- path, a path under a regular file, a directory and symbolic links, and what
+-- 'runTaskFilesWith' remembers and treats as absent.
 -- Uses a temporary directory.
 module Hyperion.Scheduler.Test.TaskFilesTest where
 
@@ -11,7 +12,8 @@ import Data.Either                  (isLeft)
 import Hyperion.OsString            (fromString)
 import Hyperion.Scheduler.TaskFiles (MonadTaskFiles (..), runTaskFilesWith,
                                      statTaskFile)
-import System.Directory             (createDirectory, getTemporaryDirectory,
+import System.Directory             (createDirectory, createFileLink,
+                                     getTemporaryDirectory,
                                      removeDirectoryRecursive, removeFile)
 import System.FilePath              ((</>))
 
@@ -30,6 +32,13 @@ runTest = do
   fileSize <- statTaskFile (fromString (dir </> "file"))
   missing <- statTaskFile (fromString (dir </> "missing"))
   directory <- try @IOException $ statTaskFile (fromString dir)
+  writeFile (dir </> "empty") ""
+  empty <- statTaskFile (fromString (dir </> "empty"))
+  underFile <- statTaskFile (fromString (dir </> "file" </> "child"))
+  createFileLink (dir </> "file") (dir </> "link")
+  createFileLink (dir </> "nowhere") (dir </> "dangling")
+  link <- statTaskFile (fromString (dir </> "link"))
+  dangling <- statTaskFile (fromString (dir </> "dangling"))
   let
     file = fromString (dir </> "file")
     other = fromString (dir </> "other")
@@ -45,6 +54,10 @@ runTest = do
   expect "a regular file has its size" $ fileSize == Just 5000
   expect "a missing path has no size" $ missing == Nothing
   expect "a directory is an error" $ isLeft directory
+  expect "an empty file has size 0" $ empty == Just 0
+  expect "a path under a regular file has no size" $ underFile == Nothing
+  expect "a symbolic link has its target's size" $ link == Just 5000
+  expect "a dangling symbolic link has no size" $ dangling == Nothing
   expect "a path is stat'ed once, a path known to be absent never" $
     sizes == (Just 5000, Just 5000, Nothing)
   putStrLn "All TaskFiles tests passed."
