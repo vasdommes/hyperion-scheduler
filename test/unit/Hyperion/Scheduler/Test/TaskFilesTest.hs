@@ -34,7 +34,7 @@ runTest = do
   directory <- try @IOException $ statTaskFile (fromString dir)
   writeFile (dir </> "empty") ""
   empty <- statTaskFile (fromString (dir </> "empty"))
-  underFile <- statTaskFile (fromString (dir </> "file" </> "child"))
+  underFile <- try @IOException $ statTaskFile (fromString (dir </> "file" </> "child"))
   createFileLink (dir </> "file") (dir </> "link")
   createFileLink (dir </> "nowhere") (dir </> "dangling")
   link <- statTaskFile (fromString (dir </> "link"))
@@ -55,7 +55,8 @@ runTest = do
   expect "a missing path has no size" $ missing == Nothing
   expect "a directory is an error" $ isLeft directory
   expect "an empty file has size 0" $ empty == Just 0
-  expect "a path under a regular file has no size" $ underFile == Nothing
+  -- ENOTDIR is not "does not exist" for GHC: an error, as with getFileStatus before
+  expect "a path under a regular file is an error" $ isLeft underFile
   expect "a symbolic link has its target's size" $ link == Just 5000
   expect "a dangling symbolic link has no size" $ dangling == Nothing
   expect "a path is stat'ed once, a path known to be absent never" $

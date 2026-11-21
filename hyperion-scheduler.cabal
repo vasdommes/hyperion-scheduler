@@ -94,7 +94,6 @@ library
     , strict-concurrency
     , text
     , time
-    , unix
     , vector
   default-language: GHC2021
 

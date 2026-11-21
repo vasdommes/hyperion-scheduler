@@ -55,7 +55,6 @@ library:
   - strict-concurrency
   - text
   - time
-  - unix
   - vector
 
 executables:
