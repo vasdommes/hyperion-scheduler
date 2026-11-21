@@ -20,7 +20,11 @@ int hyperion_scheduler_task_file_size(const char *path, int64_t *size)
   struct statx s;
   if (statx(AT_FDCWD, path, AT_STATX_DONT_SYNC, STATX_TYPE | STATX_SIZE, &s) != 0)
     return -1;
-  if (!(s.stx_mask & STATX_TYPE)) {
+  /* A filesystem that cannot answer the size without its data servers leaves STATX_SIZE out: ask again as stat() would. */
+  if (!(s.stx_mask & STATX_SIZE) &&
+      statx(AT_FDCWD, path, AT_STATX_SYNC_AS_STAT, STATX_TYPE | STATX_SIZE, &s) != 0)
+    return -1;
+  if (!(s.stx_mask & STATX_TYPE) || !(s.stx_mask & STATX_SIZE)) {
     errno = EIO;
     return -1;
   }
