@@ -71,8 +71,15 @@ instance IsTask WrappedTask where
 -- same bytes, e.g. keys with a phantom precision. The type's fingerprint
 -- changes between builds, which is fine, since the hash is never saved.
 wrapTask :: (IsTask a, Binary a) => a -> WrappedTask
-wrapTask t = MkWrappedTask
+wrapTask t = wrapTaskWithHash (hashBase64SafeByteString (typeRepFingerprint (typeOf t), t)) t
+
+-- | A WrappedTask with the given hash, which must be what 'wrapTask' would
+-- hash: a function of the task's type and of all of its contents (see
+-- 'Hyperion.Scheduler.Task.Task.wrapTaskOf', which hashes the resolver that a
+-- chain's tasks share once, not once per task).
+wrapTaskWithHash :: IsTask a => ByteString -> a -> WrappedTask
+wrapTaskWithHash h t = MkWrappedTask
   { task  = t
-  , hash  = hashBase64SafeByteString (typeRepFingerprint (typeOf t), t)
+  , hash  = h
   , shape = taskShape t
   }
