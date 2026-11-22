@@ -31,7 +31,8 @@ import Control.Distributed.Process         (Process)
 import Control.Monad                       (join)
 import Control.Monad.IO.Class              (MonadIO, liftIO)
 import Data.Aeson                          (ToJSON (..))
-import Data.Binary                         (Binary (..))
+import Data.Binary                         (Binary (..), encode)
+import Data.BinaryHash                     (hashBase64SafeByteString)
 import Data.Data                           (Proxy (..))
 import Data.Foldable.Extra                 (allM, traverse_)
 import Data.Functor                        (($>), (<&>))
@@ -42,7 +43,7 @@ import Data.Set                            (Set)
 import Data.Set                            qualified as Set
 import Data.Store                          (Store)
 import Data.Text                           (Text)
-import Data.Typeable                       (cast, typeOf)
+import Data.Typeable                       (cast, typeOf, typeRepFingerprint)
 import Data.Void                           (Void)
 import GHC.Generics                        (Generic)
 import Hyperion                            (Dict (..), Static (..), cAp, cPure)
@@ -65,7 +66,7 @@ import Hyperion.Scheduler.Task.IsTask      (IsTask (..), Model (..),
                                             estimatesFromModel)
 import Hyperion.Scheduler.Task.TaskLink    (HasTaskChain (..),
                                             TaskChain (TaskNode), TaskLink (..))
-import Hyperion.Scheduler.Task.WrappedTask (wrapTask)
+import Hyperion.Scheduler.Task.WrappedTask (WrappedTask, wrapTaskWithHash)
 import Hyperion.Scheduler.TaskFiles        (MonadTaskFiles, doesTaskFileExist)
 import Hyperion.Scheduler.Types            (Estimate (..), NumCPUs)
 import Hyperion.Util.EncodeFile            (decodeStoreFile,
@@ -659,7 +660,24 @@ instance {-# OVERLAPPABLE #-}
   , Static (Binary k)
   , IsTask (Task r k)
   ) => HasTaskChain m r c k where
-  taskChain resolver cfg = TaskNode (wrapTask <$> taskLink resolver cfg) (taskChain resolver cfg)
+  taskChain resolver cfg = TaskNode (wrapTaskOf resolver <$> taskLink resolver cfg) (taskChain resolver cfg)
+
+-- | 'wrapTask' for the tasks of one chain node, which share their resolver:
+-- the resolver is hashed once (the partial application holds that hash), and
+-- each task's hash covers its type, the resolver's hash, its config and its
+-- key, so it is the same function of the task's contents as 'wrapTask''s.
+-- A chain visits a task once per edge into it, and each visit wraps it again
+-- (see 'Hyperion.Scheduler.Task.TaskLink.toTaskEdges'): hashing the resolver
+-- (in a walk's bound, its storage strategy holds every OPE-matrix key) at each
+-- visit was a third of the time an n14 task map took to build
+-- (bootstrap-compute #1344).
+wrapTaskOf
+  :: forall r k . (IsTask (Task r k), Binary r, Binary (TaskConfig k), Binary k)
+  => r -> Task r k -> WrappedTask
+wrapTaskOf resolver = \t ->
+  wrapTaskWithHash (hashBase64SafeByteString (typeRepFingerprint (typeOf t), resolverHash, encode t.config, encode t.key)) t
+  where
+    resolverHash = hashBase64SafeByteString (encode resolver)
 
 
 data ListTaskKey k = MkListTaskKey

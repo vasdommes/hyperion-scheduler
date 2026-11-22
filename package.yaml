@@ -20,6 +20,8 @@ ghc-options:
 
 library:
   source-dirs: src
+  c-sources:
+  - cbits/task_file_size.c
   dependencies:
   - aeson
   - array
@@ -53,7 +55,6 @@ library:
   - strict-concurrency
   - text
   - time
-  - unix
   - vector
 
 executables:

@@ -56,6 +56,8 @@ library
       Hyperion.Scheduler.WorkerPool
   other-modules:
       Paths_hyperion_scheduler
+  c-sources:
+      cbits/task_file_size.c
   hs-source-dirs:
       src
   ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -O2 -Wunused-packages -Wno-x-partial -Werror=missing-fields
@@ -92,7 +94,6 @@ library
     , strict-concurrency
     , text
     , time
-    , unix
     , vector
   default-language: GHC2021
 
